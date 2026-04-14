@@ -120,15 +120,35 @@ run_acceptance() {
   done <<< "$TESTS"
 }
 
+# Per-file rollback baseline: for each file, find the commit in CANDIDATES
+# (ordered newest→oldest) that actually touched THAT file. Roll it back to
+# THAT commit's parent. A single $LAST_COMMIT^ baseline fails when files
+# were introduced in different commits (e.g. types.rs added in commit A
+# then lib.rs wired in commit B — rolling lib.rs to B^ leaves types.rs
+# intact, and rolling types.rs to B^ leaves its own current content because
+# types.rs existed before commit B).
+declare -A _file_commit
+for f in $CHANGED_FILES; do
+  for sha in $CANDIDATES; do
+    if git show --name-only --pretty=format: "$sha" 2>/dev/null | grep -qxF "$f"; then
+      _file_commit["$f"]="$sha"
+      break
+    fi
+  done
+done
+
 # Stash the feature's files
 echo ""
-echo "[reality-check] Stashing $CHANGED_FILES"
+echo "[reality-check] Stashing:"
+echo "$CHANGED_FILES" | sed 's/^/  /'
 git stash push -u -m "reality-check-$FEATURE_ID" -- $CHANGED_FILES
 
-# Reset them to HEAD~1 state (before this commit) if possible, else delete
+# Reset each file to its own introducing-commit's parent state (or delete if
+# the file didn't exist before the introducing commit).
 for f in $CHANGED_FILES; do
-  if git cat-file -e "${LAST_COMMIT}^:$f" 2>/dev/null; then
-    git show "${LAST_COMMIT}^:$f" > "$f" || true
+  sha="${_file_commit[$f]:-$LAST_COMMIT}"
+  if git cat-file -e "${sha}^:$f" 2>/dev/null; then
+    git show "${sha}^:$f" > "$f" || true
   else
     rm -f "$f"
   fi
@@ -136,8 +156,26 @@ done
 
 echo ""
 echo "[reality-check] Running acceptance tests with code stashed — they MUST FAIL"
-if run_acceptance >/tmp/reality-stashed.log 2>&1; then
-  echo "[reality-check] FAILURE: acceptance tests PASSED with code stashed — this is a fake-green test."
+# Capture whether any tests ran at all. cargo nextest/cargo test exit 0 when
+# the selector matches 0 tests (undeclared module / removed test file). A
+# zero-test pass is a fake-green and must be treated as FAILURE here.
+set +e
+run_acceptance >/tmp/reality-stashed.log 2>&1
+stashed_rc=$?
+set -e
+
+# Detect the zero-tests case: any of the tools emits a "0 passed" marker.
+zero_tests=0
+if grep -qE '(0 tests? passed|Running 0 tests|no tests found|collected 0 items|0 passed|0 filtered in)' /tmp/reality-stashed.log; then
+  zero_tests=1
+fi
+
+if [[ "$stashed_rc" -eq 0 ]] || [[ "$zero_tests" -eq 1 ]]; then
+  if [[ "$zero_tests" -eq 1 ]]; then
+    echo "[reality-check] FAILURE: acceptance tests reported ZERO tests run with code stashed — module was removed, not a genuine pass."
+  else
+    echo "[reality-check] FAILURE: acceptance tests PASSED with code stashed — this is a fake-green test."
+  fi
   # Restore state
   git checkout HEAD -- $CHANGED_FILES 2>/dev/null || true
   git stash pop 2>/dev/null || true
