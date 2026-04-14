@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# Spawn a FRESH Claude Code session as the verifier subagent.
+# - Generates a new session ID distinct from the caller
+# - Writes ucil-build/.verifier-lock with the session ID so feature-list-guard
+#   and flip-feature.sh accept its writes
+# - Launches `claude -p <prompt> --session-id=<new> --no-resume` with the verifier
+#   subagent prompt loaded via --append-system-prompt
+#
+# Usage:
+#   scripts/spawn-verifier.sh <work-order-id-or-feature-id> [extra args]
+set -euo pipefail
+
+cd "$(git rev-parse --show-toplevel)"
+
+TARGET="${1:-}"
+if [[ -z "$TARGET" ]]; then
+  echo "Usage: $0 <work-order-id|feature-id>" >&2
+  exit 2
+fi
+shift
+
+if ! command -v claude >/dev/null 2>&1; then
+  echo "ERROR: 'claude' CLI not found in PATH. Install Claude Code first." >&2
+  exit 3
+fi
+
+if [[ -z "${ANTHROPIC_API_KEY:-}" && -f .env ]]; then
+  set -a
+  source .env
+  set +a
+fi
+
+# Generate a fresh session id
+NEW_SESSION="vrf-$(date -u +%Y%m%dT%H%M%SZ)-$RANDOM"
+MARKER_FILE="ucil-build/.verifier-lock"
+
+echo "$NEW_SESSION" > "$MARKER_FILE"
+trap 'rm -f "$MARKER_FILE"' EXIT
+
+# Assert caller is not the same session as the new one (belt-and-suspenders)
+CALLER_SESSION="${CLAUDE_SESSION_ID:-parent}"
+if [[ "$CALLER_SESSION" == "$NEW_SESSION" ]]; then
+  echo "ERROR: session-id collision (caller=$CALLER_SESSION, new=$NEW_SESSION)" >&2
+  exit 4
+fi
+
+PROMPT="You are the UCIL verifier. Target to verify: $TARGET.
+Read .claude/agents/verifier.md for your full instructions.
+Read ucil-build/work-orders/ or search for feature $TARGET in feature-list.json to find context.
+Run all acceptance tests from a clean slate. Flip passes=true only if everything is green and the mutation check confirms.
+DO NOT edit any source code. Write your verification report and/or rejection, commit, push, end session."
+
+echo "[spawn-verifier] new session: $NEW_SESSION"
+echo "[spawn-verifier] target: $TARGET"
+
+CLAUDE_SUBAGENT_NAME=verifier \
+CLAUDE_SESSION_ID="$NEW_SESSION" \
+exec claude -p "$PROMPT" \
+  --session-id "$NEW_SESSION" \
+  --no-resume \
+  --append-system-prompt "$(cat .claude/agents/verifier.md)" \
+  "$@"
