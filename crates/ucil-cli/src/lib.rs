@@ -1,6 +1,6 @@
 //! `ucil-cli` library root — re-exports for integration tests.
 //!
-//! All CLI logic lives in sub-modules (commands/init, commands/daemon, etc.).
+//! All CLI logic lives in sub-modules (`commands/init`, `commands/daemon`, etc.).
 //! This file only declares modules and re-exports.
 
 #![deny(warnings)]
