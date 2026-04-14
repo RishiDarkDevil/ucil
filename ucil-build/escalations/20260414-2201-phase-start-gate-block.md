@@ -4,6 +4,7 @@ phase: 0
 week: 1
 raised_by: claude-code (main session)
 severity: harness-config
+resolved: true
 blocks_loop: false
 ---
 
