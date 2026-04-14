@@ -11,13 +11,16 @@
       "crate": "ucil-core",
       "description": "Cargo workspace, TypeScript pnpm workspace, and uv Python environment are configured and all build targets compile cleanly.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-core"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-core"
+        }
       ],
       "dependencies": [],
-      "passes": false,
-      "last_verified_ts": null,
-      "last_verified_by": null,
-      "last_verified_commit": null,
+      "passes": true,
+      "last_verified_ts": "2026-04-14T22:38:11Z",
+      "last_verified_by": "verifier-6c4f652d-b7fa-40fd-a006-15511bf9129c",
+      "last_verified_commit": "7f5650c7e96631c425199a82fe2f5c38bd312f34",
       "attempts": 0,
       "blocked_reason": null
     },
@@ -28,9 +31,14 @@
       "crate": "ucil-core",
       "description": "Core type system defined in ucil-core/src/types.rs: QueryPlan, Symbol, Diagnostic, KnowledgeEntry, ToolGroup, CeqpParams, ResponseEnvelope.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-core types::"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-core types::"
+        }
       ],
-      "dependencies": ["P0-W1-F01"],
+      "dependencies": [
+        "P0-W1-F01"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -45,9 +53,15 @@
       "crate": "ucil-cli",
       "description": "ucil init command creates .ucil/ directory, detects project languages, and writes ucil.toml with sensible defaults.",
       "acceptance_tests": [
-        {"kind": "script", "script": "scripts/verify/P0-W1-F03.sh", "exit": 0}
+        {
+          "kind": "script",
+          "script": "scripts/verify/P0-W1-F03.sh",
+          "exit": 0
+        }
       ],
-      "dependencies": ["P0-W1-F02"],
+      "dependencies": [
+        "P0-W1-F02"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -62,9 +76,14 @@
       "crate": "ucil-cli",
       "description": "ucil init --llm-provider prompts for LLM provider selection (ollama/claude/openai/passthrough/none) and writes [llm] section to ucil.toml.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-cli commands::init::test_llm_provider_selection"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-cli commands::init::test_llm_provider_selection"
+        }
       ],
-      "dependencies": ["P0-W1-F03"],
+      "dependencies": [
+        "P0-W1-F03"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -79,9 +98,14 @@
       "crate": "ucil-cli",
       "description": "ucil init runs P0 plugin health verification: checks that every P0-priority external tool binary is reachable and responds to a health probe.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-cli commands::init::test_plugin_health_verification"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-cli commands::init::test_plugin_health_verification"
+        }
       ],
-      "dependencies": ["P0-W1-F03"],
+      "dependencies": [
+        "P0-W1-F03"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -96,9 +120,14 @@
       "crate": "ucil-cli",
       "description": "ucil init writes .ucil/init_report.json with language detections, plugin health status, LLM provider, and schema version.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-cli commands::init::test_init_report_json"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-cli commands::init::test_init_report_json"
+        }
       ],
-      "dependencies": ["P0-W1-F05"],
+      "dependencies": [
+        "P0-W1-F05"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -113,9 +142,14 @@
       "crate": "ucil-core",
       "description": "Schema version tracking in ucil-core: migration version stamped in .ucil/state.db, checked on daemon startup, triggers migration runner if behind.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-core schema_migration::"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-core schema_migration::"
+        }
       ],
-      "dependencies": ["P0-W1-F01"],
+      "dependencies": [
+        "P0-W1-F01"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -130,9 +164,15 @@
       "crate": "scripts",
       "description": "CI pipeline configured: Rust cargo test + clippy, TypeScript biome check + vitest, Python ruff + mypy + pytest, all passing on a clean checkout.",
       "acceptance_tests": [
-        {"kind": "script", "script": "scripts/verify/P0-W1-F08.sh", "exit": 0}
+        {
+          "kind": "script",
+          "script": "scripts/verify/P0-W1-F08.sh",
+          "exit": 0
+        }
       ],
-      "dependencies": ["P0-W1-F01"],
+      "dependencies": [
+        "P0-W1-F01"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -147,9 +187,14 @@
       "crate": "ucil-core",
       "description": "OpenTelemetry skeleton wired in ucil-core/src/otel.rs: init_tracer() configures stdout exporter, span creation works, no panic on startup.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-core otel::"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-core otel::"
+        }
       ],
-      "dependencies": ["P0-W1-F01"],
+      "dependencies": [
+        "P0-W1-F01"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -162,15 +207,21 @@
       "phase": 0,
       "week": 1,
       "crate": "ucil-core",
-      "description": "Full repository directory skeleton matches \u00a717: crates/, adapters/, plugins/, ml/, tests/fixtures/, scripts/, docs/ all present and committed.",
+      "description": "Full repository directory skeleton matches §17: crates/, adapters/, plugins/, ml/, tests/fixtures/, scripts/, docs/ all present and committed.",
       "acceptance_tests": [
-        {"kind": "script", "script": "scripts/verify/P0-W1-F10.sh", "exit": 0}
+        {
+          "kind": "script",
+          "script": "scripts/verify/P0-W1-F10.sh",
+          "exit": 0
+        }
       ],
-      "dependencies": ["P0-W1-F01"],
-      "passes": false,
-      "last_verified_ts": null,
-      "last_verified_by": null,
-      "last_verified_commit": null,
+      "dependencies": [
+        "P0-W1-F01"
+      ],
+      "passes": true,
+      "last_verified_ts": "2026-04-14T22:38:14Z",
+      "last_verified_by": "verifier-6c4f652d-b7fa-40fd-a006-15511bf9129c",
+      "last_verified_commit": "7f5650c7e96631c425199a82fe2f5c38bd312f34",
       "attempts": 0,
       "blocked_reason": null
     },
@@ -181,9 +232,14 @@
       "crate": "tests/fixtures",
       "description": "rust-project test fixture (~5K LOC Rust) committed to tests/fixtures/rust-project/ with Cargo.toml, src/, and tests/ directories.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-core -- --ignored fixture::rust_project_loads"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-core -- --ignored fixture::rust_project_loads"
+        }
       ],
-      "dependencies": ["P0-W1-F01"],
+      "dependencies": [
+        "P0-W1-F01"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -198,9 +254,14 @@
       "crate": "tests/fixtures",
       "description": "python-project test fixture (~5K LOC Python) committed to tests/fixtures/python-project/ with pyproject.toml, src/, and tests/ directories.",
       "acceptance_tests": [
-        {"kind": "pytest", "selector": "tests/fixtures/python_project/test_fixture_valid.py"}
+        {
+          "kind": "pytest",
+          "selector": "tests/fixtures/python_project/test_fixture_valid.py"
+        }
       ],
-      "dependencies": ["P0-W1-F01"],
+      "dependencies": [
+        "P0-W1-F01"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -215,9 +276,14 @@
       "crate": "tests/fixtures",
       "description": "typescript-project test fixture (~5K LOC TypeScript) committed to tests/fixtures/typescript-project/ with tsconfig.json, src/, and tests/ directories.",
       "acceptance_tests": [
-        {"kind": "vitest", "selector": "adapters/tests/fixtures/typescript-project.test.ts"}
+        {
+          "kind": "vitest",
+          "selector": "adapters/tests/fixtures/typescript-project.test.ts"
+        }
       ],
-      "dependencies": ["P0-W1-F01"],
+      "dependencies": [
+        "P0-W1-F01"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -232,9 +298,15 @@
       "crate": "tests/fixtures",
       "description": "mixed-project test fixture (~3K LOC with intentional lint errors, type errors, security issues, and failing tests) committed to tests/fixtures/mixed-project/.",
       "acceptance_tests": [
-        {"kind": "script", "script": "scripts/verify/P0-W1-F14.sh", "exit": 0}
+        {
+          "kind": "script",
+          "script": "scripts/verify/P0-W1-F14.sh",
+          "exit": 0
+        }
       ],
-      "dependencies": ["P0-W1-F01"],
+      "dependencies": [
+        "P0-W1-F01"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -247,11 +319,16 @@
       "phase": 1,
       "week": 2,
       "crate": "ucil-treesitter",
-      "description": "ucil-treesitter crate implements multi-language parser using tree-sitter Rust bindings supporting \u226510 languages including Rust, Python, TypeScript, Go, and Java.",
+      "description": "ucil-treesitter crate implements multi-language parser using tree-sitter Rust bindings supporting ≥10 languages including Rust, Python, TypeScript, Go, and Java.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-treesitter parser::"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-treesitter parser::"
+        }
       ],
-      "dependencies": ["P0-W1-F01"],
+      "dependencies": [
+        "P0-W1-F01"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -266,9 +343,14 @@
       "crate": "ucil-treesitter",
       "description": "Symbol extraction from tree-sitter ASTs yields function, class, method, struct, enum, and trait definitions with line ranges and signatures.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-treesitter symbols::"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-treesitter symbols::"
+        }
       ],
-      "dependencies": ["P1-W2-F01"],
+      "dependencies": [
+        "P1-W2-F01"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -281,11 +363,16 @@
       "phase": 1,
       "week": 2,
       "crate": "ucil-treesitter",
-      "description": "AST-aware chunking splits source files at function/class boundaries into \u2264512-token chunks suitable for embedding.",
+      "description": "AST-aware chunking splits source files at function/class boundaries into ≤512-token chunks suitable for embedding.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-treesitter chunker::"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-treesitter chunker::"
+        }
       ],
-      "dependencies": ["P1-W2-F01"],
+      "dependencies": [
+        "P1-W2-F01"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -298,11 +385,16 @@
       "phase": 1,
       "week": 2,
       "crate": "ucil-treesitter",
-      "description": "LMDB tag cache (via heed crate) maps (file_path, mtime) \u2192 Vec<Symbol>; warm reads complete in <1ms on fixture rust-project.",
+      "description": "LMDB tag cache (via heed crate) maps (file_path, mtime) → Vec<Symbol>; warm reads complete in <1ms on fixture rust-project.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-treesitter tag_cache::"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-treesitter tag_cache::"
+        }
       ],
-      "dependencies": ["P1-W2-F02"],
+      "dependencies": [
+        "P1-W2-F02"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -317,9 +409,14 @@
       "crate": "ucil-daemon",
       "description": "Session manager creates per-agent sessions with isolated state, detects current git branch, and discovers worktree paths.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-daemon session_manager::"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-daemon session_manager::"
+        }
       ],
-      "dependencies": ["P0-W1-F02"],
+      "dependencies": [
+        "P0-W1-F02"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -334,9 +431,14 @@
       "crate": "ucil-daemon",
       "description": "Two-tier storage layout initialised: .ucil/shared/ for cross-branch data and .ucil/branches/<branch>/ for per-branch symbol indexes.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-daemon storage::test_two_tier_layout"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-daemon storage::test_two_tier_layout"
+        }
       ],
-      "dependencies": ["P1-W2-F05"],
+      "dependencies": [
+        "P1-W2-F05"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -351,9 +453,14 @@
       "crate": "ucil-daemon",
       "description": "Daemon process lifecycle: daemonize with PID file at .ucil/daemon.pid, clean shutdown on SIGTERM/SIGHUP, PID file removed on exit.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-daemon lifecycle::"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-daemon lifecycle::"
+        }
       ],
-      "dependencies": ["P1-W2-F05"],
+      "dependencies": [
+        "P1-W2-F05"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -368,9 +475,14 @@
       "crate": "ucil-daemon",
       "description": "File watcher using notify + notify-debouncer-full: 100ms debounce for editor events, PostToolUse hook path bypasses debounce immediately.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-daemon watcher::"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-daemon watcher::"
+        }
       ],
-      "dependencies": ["P1-W2-F06"],
+      "dependencies": [
+        "P1-W2-F06"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -385,9 +497,14 @@
       "crate": "ucil-daemon",
       "description": "Watchman integration: auto-detected at ucil init for repos >50K files; persistent subscriptions and cookie-based sync; fallback to PollWatcher for network mounts.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-daemon watcher::test_watchman_detection"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-daemon watcher::test_watchman_detection"
+        }
       ],
-      "dependencies": ["P1-W3-F02"],
+      "dependencies": [
+        "P1-W3-F02"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -402,9 +519,14 @@
       "crate": "ucil-core",
       "description": "Salsa incremental engine skeleton: dependency DAG tracks computations, invalidation propagates on file change, early cutoff stops propagation when result unchanged.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-core incremental::"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-core incremental::"
+        }
       ],
-      "dependencies": ["P0-W1-F02"],
+      "dependencies": [
+        "P0-W1-F02"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -419,9 +541,14 @@
       "crate": "ucil-daemon",
       "description": "Plugin manager skeleton: discovers plugin.toml manifests, spawns plugin processes, performs health checks via tools/list MCP call.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-daemon plugin_manager::"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-daemon plugin_manager::"
+        }
       ],
-      "dependencies": ["P0-W1-F02"],
+      "dependencies": [
+        "P0-W1-F02"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -436,9 +563,14 @@
       "crate": "ucil-daemon",
       "description": "HOT/COLD plugin lifecycle: plugins with hot_cold=true auto-transition to IDLE after idle_timeout_minutes, restart on next relevant query.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-daemon plugin_manager::test_hot_cold_lifecycle"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-daemon plugin_manager::test_hot_cold_lifecycle"
+        }
       ],
-      "dependencies": ["P1-W3-F05"],
+      "dependencies": [
+        "P1-W3-F05"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -453,9 +585,14 @@
       "crate": "ucil-daemon",
       "description": "Basic MCP server over stdio: all 22 UCIL tools registered with schemas; unimplemented tools return {_meta:{not_yet_implemented:true}}.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-daemon server::test_all_22_tools_registered"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-daemon server::test_all_22_tools_registered"
+        }
       ],
-      "dependencies": ["P1-W3-F05"],
+      "dependencies": [
+        "P1-W3-F05"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -470,9 +607,14 @@
       "crate": "ucil-daemon",
       "description": "Progressive startup sequence: MCP server accepts queries within 2 seconds of daemon start; priority indexing queue serves recently-queried files first.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-daemon server::test_progressive_startup"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-daemon server::test_progressive_startup"
+        }
       ],
-      "dependencies": ["P1-W3-F07"],
+      "dependencies": [
+        "P1-W3-F07"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -487,9 +629,14 @@
       "crate": "ucil-daemon",
       "description": "Crash recovery: daemon stores last-good checkpoint in .ucil/checkpoint.json; on restart it resumes indexing from the checkpoint without full re-index.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-daemon lifecycle::test_crash_recovery"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-daemon lifecycle::test_crash_recovery"
+        }
       ],
-      "dependencies": ["P1-W3-F01"],
+      "dependencies": [
+        "P1-W3-F01"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -504,9 +651,14 @@
       "crate": "ucil-core",
       "description": "SQLite schema created with WAL mode, PRAGMA busy_timeout=10000, BEGIN IMMEDIATE writes: tables for symbols, knowledge_entries, hot_staging, warm, quality_issues, feedback, conventions, sessions.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-core knowledge_graph::test_schema_creation"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-core knowledge_graph::test_schema_creation"
+        }
       ],
-      "dependencies": ["P0-W1-F07"],
+      "dependencies": [
+        "P0-W1-F07"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -521,9 +673,14 @@
       "crate": "ucil-core",
       "description": "knowledge_graph.rs: CRUD operations for KnowledgeEntry with bi-temporal queries (valid_time, transaction_time), entity resolution, and provenance tracking.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-core knowledge_graph::"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-core knowledge_graph::"
+        }
       ],
-      "dependencies": ["P1-W4-F01"],
+      "dependencies": [
+        "P1-W4-F01"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -538,9 +695,14 @@
       "crate": "ucil-core",
       "description": "Symbol resolution: given symbol name + optional file scope, returns definition location, signature, docstring, and parent module from the knowledge graph.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-core knowledge_graph::test_symbol_resolution"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-core knowledge_graph::test_symbol_resolution"
+        }
       ],
-      "dependencies": ["P1-W4-F02"],
+      "dependencies": [
+        "P1-W4-F02"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -553,11 +715,17 @@
       "phase": 1,
       "week": 4,
       "crate": "ucil-daemon",
-      "description": "Tree-sitter extraction pipeline populates knowledge graph: file change \u2192 parse \u2192 extract symbols \u2192 upsert to KG with WAL transaction batching.",
+      "description": "Tree-sitter extraction pipeline populates knowledge graph: file change → parse → extract symbols → upsert to KG with WAL transaction batching.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-daemon executor::test_treesitter_to_kg_pipeline"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-daemon executor::test_treesitter_to_kg_pipeline"
+        }
       ],
-      "dependencies": ["P1-W4-F02", "P1-W2-F02"],
+      "dependencies": [
+        "P1-W4-F02",
+        "P1-W2-F02"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -572,9 +740,15 @@
       "crate": "ucil-daemon",
       "description": "find_definition MCP tool returns definition location, signature, hover doc, and immediate callers from tree-sitter + KG for a symbol in the fixture rust-project.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-daemon server::test_find_definition_tool"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-daemon server::test_find_definition_tool"
+        }
       ],
-      "dependencies": ["P1-W4-F04", "P1-W3-F07"],
+      "dependencies": [
+        "P1-W4-F04",
+        "P1-W3-F07"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -589,9 +763,14 @@
       "crate": "ucil-daemon",
       "description": "CEQP universal parameters wired on all 22 tool schemas: reason, current_task, files_in_context, token_budget accepted on every tool call.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-daemon server::test_ceqp_params_on_all_tools"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-daemon server::test_ceqp_params_on_all_tools"
+        }
       ],
-      "dependencies": ["P1-W3-F07"],
+      "dependencies": [
+        "P1-W3-F07"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -606,9 +785,14 @@
       "crate": "ucil-daemon",
       "description": "Session state tracking: per-agent session stores call history, inferred domain, files_in_context set, branch, and worktree path with TTL expiry.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-daemon session_manager::test_session_state_tracking"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-daemon session_manager::test_session_state_tracking"
+        }
       ],
-      "dependencies": ["P1-W2-F05"],
+      "dependencies": [
+        "P1-W2-F05"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -623,9 +807,14 @@
       "crate": "ucil-core",
       "description": "Hot staging writes: all knowledge graph writes go through hot_staging table first using BEGIN IMMEDIATE; WAL checkpoint triggered at configurable interval.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-core knowledge_graph::test_hot_staging_writes"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-core knowledge_graph::test_hot_staging_writes"
+        }
       ],
-      "dependencies": ["P1-W4-F01"],
+      "dependencies": [
+        "P1-W4-F01"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -640,9 +829,14 @@
       "crate": "ucil-daemon",
       "description": "understand_code MCP tool returns a structured explanation of a file, function, or module via tree-sitter AST summary + knowledge graph facts.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-daemon server::test_understand_code_tool"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-daemon server::test_understand_code_tool"
+        }
       ],
-      "dependencies": ["P1-W4-F04"],
+      "dependencies": [
+        "P1-W4-F04"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -657,9 +851,14 @@
       "crate": "ucil-daemon",
       "description": "get_conventions MCP tool returns project-specific coding conventions from the conventions table, empty list if none yet extracted.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-daemon server::test_get_conventions_tool"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-daemon server::test_get_conventions_tool"
+        }
       ],
-      "dependencies": ["P1-W4-F02"],
+      "dependencies": [
+        "P1-W4-F02"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -672,11 +871,17 @@
       "phase": 1,
       "week": 5,
       "crate": "plugins/structural/serena",
-      "description": "Serena plugin manifest (plugin.toml) written; ucil plugin install serena succeeds; MCP client sends tools/list and receives \u226510 Serena tools.",
+      "description": "Serena plugin manifest (plugin.toml) written; ucil plugin install serena succeeds; MCP client sends tools/list and receives ≥10 Serena tools.",
       "acceptance_tests": [
-        {"kind": "script", "script": "scripts/verify/P1-W5-F01.sh", "exit": 0}
+        {
+          "kind": "script",
+          "script": "scripts/verify/P1-W5-F01.sh",
+          "exit": 0
+        }
       ],
-      "dependencies": ["P1-W3-F05"],
+      "dependencies": [
+        "P1-W3-F05"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -691,9 +896,15 @@
       "crate": "ucil-daemon",
       "description": "Serena wired into G1 structural group: find_symbol, find_references, and go_to_definition results enriched with Serena hover info for the fixture projects.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-daemon executor::test_serena_g1_fusion"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-daemon executor::test_serena_g1_fusion"
+        }
       ],
-      "dependencies": ["P1-W5-F01", "P1-W4-F05"],
+      "dependencies": [
+        "P1-W5-F01",
+        "P1-W4-F05"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -708,9 +919,14 @@
       "crate": "ucil-lsp-diagnostics",
       "description": "ucil-lsp-diagnostics crate implements LspDiagnosticsBridge: connects to Serena-managed LSP server instances via shared socket; no duplicate LSP processes when Serena active.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-lsp-diagnostics bridge::"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-lsp-diagnostics bridge::"
+        }
       ],
-      "dependencies": ["P1-W5-F01"],
+      "dependencies": [
+        "P1-W5-F01"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -725,9 +941,14 @@
       "crate": "ucil-lsp-diagnostics",
       "description": "LSP JSON-RPC client implements textDocument/diagnostic, callHierarchy/incomingCalls, callHierarchy/outgoingCalls, and typeHierarchy/supertypes requests.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-lsp-diagnostics diagnostics::"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-lsp-diagnostics diagnostics::"
+        }
       ],
-      "dependencies": ["P1-W5-F03"],
+      "dependencies": [
+        "P1-W5-F03"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -742,9 +963,15 @@
       "crate": "ucil-lsp-diagnostics",
       "description": "Diagnostics bridge feeds G7 quality pipeline: type errors and lint warnings for fixture python-project appear in quality_issues table within 5s of daemon start.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-lsp-diagnostics test_diagnostics_to_quality_issues"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-lsp-diagnostics test_diagnostics_to_quality_issues"
+        }
       ],
-      "dependencies": ["P1-W5-F04", "P1-W4-F01"],
+      "dependencies": [
+        "P1-W5-F04",
+        "P1-W4-F01"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -759,9 +986,14 @@
       "crate": "ucil-lsp-diagnostics",
       "description": "Diagnostics bridge feeds G4 architecture: call hierarchy (incoming/outgoing calls) and type hierarchy (supertypes) enriched for symbols in fixture projects.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-lsp-diagnostics call_hierarchy::"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-lsp-diagnostics call_hierarchy::"
+        }
       ],
-      "dependencies": ["P1-W5-F04"],
+      "dependencies": [
+        "P1-W5-F04"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -776,9 +1008,14 @@
       "crate": "ucil-lsp-diagnostics",
       "description": "Degraded mode: when Serena is unavailable, bridge spawns its own pyright, rust-analyzer, and typescript-language-server processes with 5-minute grace period shutdown.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-lsp-diagnostics server_sharing::test_fallback_spawn"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-lsp-diagnostics server_sharing::test_fallback_spawn"
+        }
       ],
-      "dependencies": ["P1-W5-F03"],
+      "dependencies": [
+        "P1-W5-F03"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -793,9 +1030,17 @@
       "crate": "tests/integration",
       "description": "LSP and Serena integration test suite (tests/integration/test_lsp_bridge.rs) passes against all four fixture projects: type errors detected, call hierarchies populated.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "--test test_lsp_bridge"}
+        {
+          "kind": "cargo_test",
+          "selector": "--test test_lsp_bridge"
+        }
       ],
-      "dependencies": ["P1-W5-F05", "P1-W5-F06", "P0-W1-F11", "P0-W1-F12"],
+      "dependencies": [
+        "P1-W5-F05",
+        "P1-W5-F06",
+        "P0-W1-F11",
+        "P0-W1-F12"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -810,9 +1055,15 @@
       "crate": "ucil-daemon",
       "description": "search_code MCP tool returns results from tree-sitter symbol index and ripgrep text search merged and de-duplicated.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-daemon server::test_search_code_basic"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-daemon server::test_search_code_basic"
+        }
       ],
-      "dependencies": ["P1-W4-F04", "P1-W3-F07"],
+      "dependencies": [
+        "P1-W4-F04",
+        "P1-W3-F07"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -827,9 +1078,14 @@
       "crate": "ucil-daemon",
       "description": "Plugin manifest parser: reads plugin.toml, validates all required fields (name, version, capabilities, transport), extracts language activation rules.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-daemon plugin_manager::test_manifest_parser"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-daemon plugin_manager::test_manifest_parser"
+        }
       ],
-      "dependencies": ["P1-W3-F05"],
+      "dependencies": [
+        "P1-W3-F05"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -842,11 +1098,16 @@
       "phase": 2,
       "week": 6,
       "crate": "ucil-daemon",
-      "description": "Plugin lifecycle manager: full state machine (DISCOVERED\u2192REGISTERED\u2192LOADING\u2192ACTIVE\u2192IDLE\u2192STOPPED\u2192ERROR) with monitored transitions and error logging.",
+      "description": "Plugin lifecycle manager: full state machine (DISCOVERED→REGISTERED→LOADING→ACTIVE→IDLE→STOPPED→ERROR) with monitored transitions and error logging.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-daemon plugin_manager::test_lifecycle_state_machine"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-daemon plugin_manager::test_lifecycle_state_machine"
+        }
       ],
-      "dependencies": ["P2-W6-F01"],
+      "dependencies": [
+        "P2-W6-F01"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -861,9 +1122,14 @@
       "crate": "ucil-daemon",
       "description": "Plugin hot-reload: ucil plugin reload <name> restarts the plugin process without restarting the daemon; active queries complete before reload.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-daemon plugin_manager::test_hot_reload"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-daemon plugin_manager::test_hot_reload"
+        }
       ],
-      "dependencies": ["P2-W6-F02"],
+      "dependencies": [
+        "P2-W6-F02"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -878,9 +1144,14 @@
       "crate": "ucil-daemon",
       "description": "Circuit breakers for plugin crashes: after max_restarts=3 failures the plugin enters ERROR state; exponential backoff (base 1s) between restart attempts.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-daemon plugin_manager::test_circuit_breaker"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-daemon plugin_manager::test_circuit_breaker"
+        }
       ],
-      "dependencies": ["P2-W6-F02"],
+      "dependencies": [
+        "P2-W6-F02"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -895,9 +1166,15 @@
       "crate": "plugins/structural/ast-grep",
       "description": "ast-grep plugin manifest written; ast-grep binary installed; MCP server starts and responds to a structural pattern search on the fixture typescript-project.",
       "acceptance_tests": [
-        {"kind": "script", "script": "scripts/verify/P2-W6-F05.sh", "exit": 0}
+        {
+          "kind": "script",
+          "script": "scripts/verify/P2-W6-F05.sh",
+          "exit": 0
+        }
       ],
-      "dependencies": ["P2-W6-F01"],
+      "dependencies": [
+        "P2-W6-F01"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -912,9 +1189,15 @@
       "crate": "plugins/search/probe",
       "description": "Probe plugin manifest written; probe binary installed; MCP server returns complete function bodies with token budgets from the fixture rust-project.",
       "acceptance_tests": [
-        {"kind": "script", "script": "scripts/verify/P2-W6-F06.sh", "exit": 0}
+        {
+          "kind": "script",
+          "script": "scripts/verify/P2-W6-F06.sh",
+          "exit": 0
+        }
       ],
-      "dependencies": ["P2-W6-F01"],
+      "dependencies": [
+        "P2-W6-F01"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -929,9 +1212,14 @@
       "crate": "ucil-cli",
       "description": "ucil plugin CLI subcommands (list, install, uninstall, enable, disable, reload) all work and produce machine-readable JSON output with --format json.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-cli commands::plugin::"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-cli commands::plugin::"
+        }
       ],
-      "dependencies": ["P2-W6-F02"],
+      "dependencies": [
+        "P2-W6-F02"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -946,9 +1234,16 @@
       "crate": "tests/integration",
       "description": "Plugin lifecycle integration test suite (tests/integration/test_plugin_lifecycle.rs) verifies HOT/COLD transitions, crash recovery, and circuit breaker behaviour.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "--test test_plugin_lifecycle"}
+        {
+          "kind": "cargo_test",
+          "selector": "--test test_plugin_lifecycle"
+        }
       ],
-      "dependencies": ["P2-W6-F04", "P2-W6-F05", "P2-W6-F06"],
+      "dependencies": [
+        "P2-W6-F04",
+        "P2-W6-F05",
+        "P2-W6-F06"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -963,9 +1258,15 @@
       "crate": "ucil-daemon",
       "description": "G1 parallel execution: on a structural query, tree-sitter, Serena, ast-grep, and the diagnostics bridge all run concurrently with tokio::join! and a 5s timeout.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-daemon executor::test_g1_parallel_execution"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-daemon executor::test_g1_parallel_execution"
+        }
       ],
-      "dependencies": ["P2-W6-F05", "P1-W5-F02"],
+      "dependencies": [
+        "P2-W6-F05",
+        "P1-W5-F02"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -980,9 +1281,14 @@
       "crate": "ucil-daemon",
       "description": "G1 result fusion: results merged by source location (file + line range), unique information unioned, conflict resolved by source authority (Serena > tree-sitter > ast-grep).",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-daemon executor::test_g1_result_fusion"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-daemon executor::test_g1_result_fusion"
+        }
       ],
-      "dependencies": ["P2-W7-F01"],
+      "dependencies": [
+        "P2-W7-F01"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -995,11 +1301,16 @@
       "phase": 2,
       "week": 7,
       "crate": "ucil-core",
-      "description": "G2 intra-group RRF fusion: Probe\u00d72.0, ripgrep\u00d71.5, LanceDB\u00d71.5 weights applied in the Reciprocal Rank Fusion formula with k=60.",
+      "description": "G2 intra-group RRF fusion: Probe×2.0, ripgrep×1.5, LanceDB×1.5 weights applied in the Reciprocal Rank Fusion formula with k=60.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-core fusion::test_g2_rrf_weights"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-core fusion::test_g2_rrf_weights"
+        }
       ],
-      "dependencies": ["P1-W4-F01"],
+      "dependencies": [
+        "P1-W4-F01"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -1014,9 +1325,14 @@
       "crate": "ucil-daemon",
       "description": "Session deduplication: files already in files_in_context are excluded from search results; session-scoped dedup store is cleared on session expiry.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-daemon session_manager::test_session_dedup"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-daemon session_manager::test_session_dedup"
+        }
       ],
-      "dependencies": ["P1-W4-F07"],
+      "dependencies": [
+        "P1-W4-F07"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -1031,9 +1347,14 @@
       "crate": "ucil-daemon",
       "description": "find_references MCP tool returns all references to a symbol grouped by usage type (call, import, type-annotation) from fused G1/G2 results.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-daemon server::test_find_references_tool"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-daemon server::test_find_references_tool"
+        }
       ],
-      "dependencies": ["P2-W7-F02"],
+      "dependencies": [
+        "P2-W7-F02"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -1048,9 +1369,15 @@
       "crate": "ucil-daemon",
       "description": "search_code MCP tool returns fused G2 results (ripgrep text + Probe AST-aware + LanceDB semantic) ranked by weighted RRF.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-daemon server::test_search_code_fused"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-daemon server::test_search_code_fused"
+        }
       ],
-      "dependencies": ["P2-W7-F03", "P2-W6-F06"],
+      "dependencies": [
+        "P2-W7-F03",
+        "P2-W6-F06"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -1065,9 +1392,15 @@
       "crate": "plugins/search/ripgrep",
       "description": "ripgrep plugin configuration and smoke test: ripgrep binary in PATH, searches fixture projects respecting .gitignore, returns structured match results.",
       "acceptance_tests": [
-        {"kind": "script", "script": "scripts/verify/P2-W7-F07.sh", "exit": 0}
+        {
+          "kind": "script",
+          "script": "scripts/verify/P2-W7-F07.sh",
+          "exit": 0
+        }
       ],
-      "dependencies": ["P2-W6-F01"],
+      "dependencies": [
+        "P2-W6-F01"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -1082,9 +1415,15 @@
       "crate": "plugins/structural/scip",
       "description": "SCIP P1 install: scip-rust and scip CLI produce a cross-repo symbol index for the fixture rust-project; index loaded into SQLite and queried via G1.",
       "acceptance_tests": [
-        {"kind": "script", "script": "scripts/verify/P2-W7-F08.sh", "exit": 0}
+        {
+          "kind": "script",
+          "script": "scripts/verify/P2-W7-F08.sh",
+          "exit": 0
+        }
       ],
-      "dependencies": ["P2-W7-F01"],
+      "dependencies": [
+        "P2-W7-F01"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -1097,11 +1436,16 @@
       "phase": 2,
       "week": 7,
       "crate": "ucil-daemon",
-      "description": "LanceDB per-branch vector store lifecycle: new branch \u2192 new LanceDB table created; branch deletion \u2192 table archived; delta indexing from parent branch on creation.",
+      "description": "LanceDB per-branch vector store lifecycle: new branch → new LanceDB table created; branch deletion → table archived; delta indexing from parent branch on creation.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-daemon branch_manager::test_lancedb_per_branch"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-daemon branch_manager::test_lancedb_per_branch"
+        }
       ],
-      "dependencies": ["P1-W2-F06"],
+      "dependencies": [
+        "P1-W2-F06"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -1116,9 +1460,14 @@
       "crate": "ucil-embeddings",
       "description": "ucil-embeddings crate wraps ONNX Runtime via ort crate; initialises session from a local .onnx model file; infer() accepts token IDs and returns embedding vectors.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-embeddings onnx_inference::"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-embeddings onnx_inference::"
+        }
       ],
-      "dependencies": ["P0-W1-F01"],
+      "dependencies": [
+        "P0-W1-F01"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -1133,9 +1482,14 @@
       "crate": "ucil-embeddings",
       "description": "CodeRankEmbed 137M model (Int8 quantized, ~137MB): downloaded to ml/models/, loaded via ort, produces 768-dim embeddings for code snippets.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-embeddings models::test_coderankembed_inference"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-embeddings models::test_coderankembed_inference"
+        }
       ],
-      "dependencies": ["P2-W8-F01"],
+      "dependencies": [
+        "P2-W8-F01"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -1148,11 +1502,16 @@
       "phase": 2,
       "week": 8,
       "crate": "ucil-embeddings",
-      "description": "Qwen3-Embedding 8B GPU upgrade path: config-gated via ucil.toml embedding_model=qwen3-embedding; Matryoshka dimension support (32\u20137168); skipped if no GPU detected.",
+      "description": "Qwen3-Embedding 8B GPU upgrade path: config-gated via ucil.toml embedding_model=qwen3-embedding; Matryoshka dimension support (32–7168); skipped if no GPU detected.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-embeddings models::test_qwen3_config_gate"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-embeddings models::test_qwen3_config_gate"
+        }
       ],
-      "dependencies": ["P2-W8-F01"],
+      "dependencies": [
+        "P2-W8-F01"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -1167,9 +1526,15 @@
       "crate": "ucil-daemon",
       "description": "LanceDB background chunk indexing: file changes trigger async embedding of new/changed chunks; incremental updates skip unchanged chunks via mtime check.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-daemon executor::test_lancedb_incremental_indexing"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-daemon executor::test_lancedb_incremental_indexing"
+        }
       ],
-      "dependencies": ["P2-W8-F02", "P2-W7-F09"],
+      "dependencies": [
+        "P2-W8-F02",
+        "P2-W7-F09"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -1182,11 +1547,17 @@
       "phase": 2,
       "week": 8,
       "crate": "ucil-embeddings",
-      "description": "Embedding chunker: splits source files at tree-sitter function/class boundaries into chunks of \u2264512 tokens; preserves file path and line-range metadata.",
+      "description": "Embedding chunker: splits source files at tree-sitter function/class boundaries into chunks of ≤512 tokens; preserves file path and line-range metadata.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-embeddings chunker::"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-embeddings chunker::"
+        }
       ],
-      "dependencies": ["P1-W2-F03", "P2-W8-F01"],
+      "dependencies": [
+        "P1-W2-F03",
+        "P2-W8-F01"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -1199,11 +1570,17 @@
       "phase": 2,
       "week": 8,
       "crate": "ucil-embeddings",
-      "description": "Embedding throughput benchmark: CodeRankEmbed produces \u226550 embeddings/second on CPU; measured by criterion on 100 fixture code snippets.",
+      "description": "Embedding throughput benchmark: CodeRankEmbed produces ≥50 embeddings/second on CPU; measured by criterion on 100 fixture code snippets.",
       "acceptance_tests": [
-        {"kind": "bench", "script": "scripts/bench-embed-throughput.sh", "assert": "cpu_emb_per_sec>=50"}
+        {
+          "kind": "bench",
+          "script": "scripts/bench-embed-throughput.sh",
+          "assert": "cpu_emb_per_sec>=50"
+        }
       ],
-      "dependencies": ["P2-W8-F02"],
+      "dependencies": [
+        "P2-W8-F02"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -1218,9 +1595,15 @@
       "crate": "ucil-embeddings",
       "description": "Vector query latency benchmark: p95 warm LanceDB semantic search on pre-indexed fixture rust-project completes in <100ms.",
       "acceptance_tests": [
-        {"kind": "bench", "script": "scripts/bench-vector-query.sh", "assert": "p95_warm_ms<100"}
+        {
+          "kind": "bench",
+          "script": "scripts/bench-vector-query.sh",
+          "assert": "p95_warm_ms<100"
+        }
       ],
-      "dependencies": ["P2-W8-F04"],
+      "dependencies": [
+        "P2-W8-F04"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -1235,9 +1618,15 @@
       "crate": "ucil-daemon",
       "description": "find_similar MCP tool returns semantically similar code snippets via LanceDB vector search using CodeRankEmbed query embeddings.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-daemon server::test_find_similar_tool"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-daemon server::test_find_similar_tool"
+        }
       ],
-      "dependencies": ["P2-W8-F04", "P2-W7-F06"],
+      "dependencies": [
+        "P2-W8-F04",
+        "P2-W7-F06"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -1250,11 +1639,16 @@
       "phase": 3,
       "week": 9,
       "crate": "ucil-core",
-      "description": "Deterministic query classifier: maps (tool_name, reason_keywords) \u2192 QueryType with intent, domain tags, and group weight overrides; used as fallback when provider=none.",
+      "description": "Deterministic query classifier: maps (tool_name, reason_keywords) → QueryType with intent, domain tags, and group weight overrides; used as fallback when provider=none.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-core fusion::test_deterministic_classifier"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-core fusion::test_deterministic_classifier"
+        }
       ],
-      "dependencies": ["P0-W1-F02"],
+      "dependencies": [
+        "P0-W1-F02"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -1269,9 +1663,14 @@
       "crate": "ucil-core",
       "description": "CEQP reason parser: extracts intent (add_feature/fix_bug/refactor/understand/review), domains, planned_action, and knowledge_gaps from the free-text reason parameter.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-core ceqp::test_reason_parser"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-core ceqp::test_reason_parser"
+        }
       ],
-      "dependencies": ["P3-W9-F01"],
+      "dependencies": [
+        "P3-W9-F01"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -1286,9 +1685,14 @@
       "crate": "ucil-daemon",
       "description": "Parallel executor: fans out queries to all relevant tool groups concurrently via tokio::join_all; per-group 5s timeout returns empty results + _meta.degraded_groups on timeout.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-daemon executor::test_parallel_executor"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-daemon executor::test_parallel_executor"
+        }
       ],
-      "dependencies": ["P2-W7-F01"],
+      "dependencies": [
+        "P2-W7-F01"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -1301,11 +1705,17 @@
       "phase": 3,
       "week": 9,
       "crate": "ucil-core",
-      "description": "Cross-group RRF fusion engine: implements \u03a3(w_g \u00d7 1/(k+rank_g(d))) with k=60 using the 10\u00d78 query-type weight matrix from \u00a76.2.",
+      "description": "Cross-group RRF fusion engine: implements Σ(w_g × 1/(k+rank_g(d))) with k=60 using the 10×8 query-type weight matrix from §6.2.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-core fusion::test_cross_group_rrf"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-core fusion::test_cross_group_rrf"
+        }
       ],
-      "dependencies": ["P3-W9-F01", "P2-W7-F03"],
+      "dependencies": [
+        "P3-W9-F01",
+        "P2-W7-F03"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -1320,9 +1730,15 @@
       "crate": "plugins/knowledge/codebase-memory",
       "description": "Codebase-Memory MCP plugin installed; MCP client sends a symbol lookup query and receives structured knowledge graph results.",
       "acceptance_tests": [
-        {"kind": "script", "script": "scripts/verify/P3-W9-F05.sh", "exit": 0}
+        {
+          "kind": "script",
+          "script": "scripts/verify/P3-W9-F05.sh",
+          "exit": 0
+        }
       ],
-      "dependencies": ["P2-W6-F01"],
+      "dependencies": [
+        "P2-W6-F01"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -1337,9 +1753,15 @@
       "crate": "plugins/knowledge/mem0",
       "description": "Mem0 plugin installed; Python SDK available; agent memory CRUD (store observation, retrieve by key, list recent) works via MCP.",
       "acceptance_tests": [
-        {"kind": "script", "script": "scripts/verify/P3-W9-F06.sh", "exit": 0}
+        {
+          "kind": "script",
+          "script": "scripts/verify/P3-W9-F06.sh",
+          "exit": 0
+        }
       ],
-      "dependencies": ["P2-W6-F01"],
+      "dependencies": [
+        "P2-W6-F01"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -1354,9 +1776,16 @@
       "crate": "ucil-daemon",
       "description": "G3 (Knowledge) parallel query: Codebase-Memory MCP and Mem0 queried concurrently; results merged by entity with temporal priority (newest wins on conflict).",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-daemon executor::test_g3_parallel_merge"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-daemon executor::test_g3_parallel_merge"
+        }
       ],
-      "dependencies": ["P3-W9-F05", "P3-W9-F06", "P3-W9-F03"],
+      "dependencies": [
+        "P3-W9-F05",
+        "P3-W9-F06",
+        "P3-W9-F03"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -1371,9 +1800,15 @@
       "crate": "plugins/architecture/codegraphcontext",
       "description": "CodeGraphContext plugin installed; blast radius query for a function in the fixture rust-project returns affected files and dependency chains.",
       "acceptance_tests": [
-        {"kind": "script", "script": "scripts/verify/P3-W9-F08.sh", "exit": 0}
+        {
+          "kind": "script",
+          "script": "scripts/verify/P3-W9-F08.sh",
+          "exit": 0
+        }
       ],
-      "dependencies": ["P2-W6-F01"],
+      "dependencies": [
+        "P2-W6-F01"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -1388,9 +1823,16 @@
       "crate": "ucil-daemon",
       "description": "G4 (Architecture) parallel query: CodeGraphContext blast radius + LSP call hierarchy combined; union of all dependency edges computed.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-daemon executor::test_g4_architecture_query"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-daemon executor::test_g4_architecture_query"
+        }
       ],
-      "dependencies": ["P3-W9-F08", "P1-W5-F06", "P3-W9-F03"],
+      "dependencies": [
+        "P3-W9-F08",
+        "P1-W5-F06",
+        "P3-W9-F03"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -1403,11 +1845,17 @@
       "phase": 3,
       "week": 9,
       "crate": "plugins/knowledge/graphiti",
-      "description": "Graphiti P1 plugin installed; bi-temporal knowledge graph query returns facts with validity windows; P95 \u2264300ms verified on fixture data.",
+      "description": "Graphiti P1 plugin installed; bi-temporal knowledge graph query returns facts with validity windows; P95 ≤300ms verified on fixture data.",
       "acceptance_tests": [
-        {"kind": "script", "script": "scripts/verify/P3-W9-F10.sh", "exit": 0}
+        {
+          "kind": "script",
+          "script": "scripts/verify/P3-W9-F10.sh",
+          "exit": 0
+        }
       ],
-      "dependencies": ["P2-W6-F01"],
+      "dependencies": [
+        "P2-W6-F01"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -1422,9 +1870,15 @@
       "crate": "tests/integration",
       "description": "Incremental computation integration test suite (tests/integration/test_incremental.rs): whitespace-only file change triggers early cutoff and does not re-run symbol extraction.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "--test test_incremental"}
+        {
+          "kind": "cargo_test",
+          "selector": "--test test_incremental"
+        }
       ],
-      "dependencies": ["P1-W3-F04", "P1-W4-F04"],
+      "dependencies": [
+        "P1-W3-F04",
+        "P1-W4-F04"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -1437,11 +1891,16 @@
       "phase": 3,
       "week": 10,
       "crate": "ucil-core",
-      "description": "Aider repo-map reimplemented in Rust: PageRank over call graph with 50\u00d7 relevance bias for recently-queried files; fits symbol list into a configurable token budget.",
+      "description": "Aider repo-map reimplemented in Rust: PageRank over call graph with 50× relevance bias for recently-queried files; fits symbol list into a configurable token budget.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-core context_compiler::test_repo_map_pagerank"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-core context_compiler::test_repo_map_pagerank"
+        }
       ],
-      "dependencies": ["P3-W9-F04"],
+      "dependencies": [
+        "P3-W9-F04"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -1454,11 +1913,17 @@
       "phase": 3,
       "week": 10,
       "crate": "plugins/context/context7",
-      "description": "Context7 plugin installed; real-time docs for \u22659000 libraries accessible; query for a library used in the fixture typescript-project returns current API docs.",
+      "description": "Context7 plugin installed; real-time docs for ≥9000 libraries accessible; query for a library used in the fixture typescript-project returns current API docs.",
       "acceptance_tests": [
-        {"kind": "script", "script": "scripts/verify/P3-W10-F02.sh", "exit": 0}
+        {
+          "kind": "script",
+          "script": "scripts/verify/P3-W10-F02.sh",
+          "exit": 0
+        }
       ],
-      "dependencies": ["P2-W6-F01"],
+      "dependencies": [
+        "P2-W6-F01"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -1471,11 +1936,17 @@
       "phase": 3,
       "week": 10,
       "crate": "plugins/context/repomix",
-      "description": "Repomix plugin installed; repo-to-context packing of fixture rust-project completes in <5s and produces \u226560% token reduction vs naive file concatenation.",
+      "description": "Repomix plugin installed; repo-to-context packing of fixture rust-project completes in <5s and produces ≥60% token reduction vs naive file concatenation.",
       "acceptance_tests": [
-        {"kind": "script", "script": "scripts/verify/P3-W10-F03.sh", "exit": 0}
+        {
+          "kind": "script",
+          "script": "scripts/verify/P3-W10-F03.sh",
+          "exit": 0
+        }
       ],
-      "dependencies": ["P2-W6-F01"],
+      "dependencies": [
+        "P2-W6-F01"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -1490,9 +1961,17 @@
       "crate": "ucil-daemon",
       "description": "G5 (Context) parallel query: Aider repo-map + Context7 + Repomix run concurrently; results ranked by PageRank relevance; session-deduped against files_in_context.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-daemon executor::test_g5_context_assembly"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-daemon executor::test_g5_context_assembly"
+        }
       ],
-      "dependencies": ["P3-W10-F01", "P3-W10-F02", "P3-W10-F03", "P3-W9-F03"],
+      "dependencies": [
+        "P3-W10-F01",
+        "P3-W10-F02",
+        "P3-W10-F03",
+        "P3-W9-F03"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -1507,9 +1986,15 @@
       "crate": "plugins/platform/github-mcp",
       "description": "GitHub MCP server installed; repository file list, PR list, and Actions workflow status queries succeed against a real or mocked GitHub API.",
       "acceptance_tests": [
-        {"kind": "script", "script": "scripts/verify/P3-W10-F05.sh", "exit": 0}
+        {
+          "kind": "script",
+          "script": "scripts/verify/P3-W10-F05.sh",
+          "exit": 0
+        }
       ],
-      "dependencies": ["P2-W6-F01"],
+      "dependencies": [
+        "P2-W6-F01"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -1524,9 +2009,15 @@
       "crate": "plugins/platform/git-mcp",
       "description": "Git MCP server installed; git log, git blame, and git diff queries succeed on the fixture rust-project repository.",
       "acceptance_tests": [
-        {"kind": "script", "script": "scripts/verify/P3-W10-F06.sh", "exit": 0}
+        {
+          "kind": "script",
+          "script": "scripts/verify/P3-W10-F06.sh",
+          "exit": 0
+        }
       ],
-      "dependencies": ["P2-W6-F01"],
+      "dependencies": [
+        "P2-W6-F01"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -1541,9 +2032,15 @@
       "crate": "plugins/platform/filesystem-mcp",
       "description": "Filesystem MCP server installed; secure file read and directory listing work within configured allowed paths.",
       "acceptance_tests": [
-        {"kind": "script", "script": "scripts/verify/P3-W10-F07.sh", "exit": 0}
+        {
+          "kind": "script",
+          "script": "scripts/verify/P3-W10-F07.sh",
+          "exit": 0
+        }
       ],
-      "dependencies": ["P2-W6-F01"],
+      "dependencies": [
+        "P2-W6-F01"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -1558,9 +2055,17 @@
       "crate": "ucil-daemon",
       "description": "G6 (Platform) aggregation layer: Git MCP + GitHub MCP + Filesystem MCP run concurrently and results merged into a unified platform context block.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-daemon executor::test_g6_platform_aggregation"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-daemon executor::test_g6_platform_aggregation"
+        }
       ],
-      "dependencies": ["P3-W10-F05", "P3-W10-F06", "P3-W10-F07", "P3-W9-F03"],
+      "dependencies": [
+        "P3-W10-F05",
+        "P3-W10-F06",
+        "P3-W10-F07",
+        "P3-W9-F03"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -1575,9 +2080,15 @@
       "crate": "ucil-core",
       "description": "Quality-maximalist response assembly: session dedup applied, results below relevance threshold excluded (score<0.1), remaining content included at full detail, _meta.token_count annotated.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-core context_compiler::test_response_assembly"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-core context_compiler::test_response_assembly"
+        }
       ],
-      "dependencies": ["P3-W9-F04", "P3-W10-F01"],
+      "dependencies": [
+        "P3-W9-F04",
+        "P3-W10-F01"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -1592,9 +2103,14 @@
       "crate": "ucil-core",
       "description": "Conflict resolution: source authority hierarchy (LSP/AST > SCIP > KG > text) as soft guidance; unresolvable conflicts returned with confidence metadata.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-core fusion::test_conflict_resolution"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-core fusion::test_conflict_resolution"
+        }
       ],
-      "dependencies": ["P3-W9-F04"],
+      "dependencies": [
+        "P3-W9-F04"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -1607,11 +2123,16 @@
       "phase": 3,
       "week": 10,
       "crate": "ucil-core",
-      "description": "Bonus context selector: conventions, pitfalls, quality_issues, related_code, tests_to_update, blast_radius, history, and security entries attached when relevance score \u22650.1.",
+      "description": "Bonus context selector: conventions, pitfalls, quality_issues, related_code, tests_to_update, blast_radius, history, and security entries attached when relevance score ≥0.1.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-core bonus_selector::test_bonus_context_selection"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-core bonus_selector::test_bonus_context_selection"
+        }
       ],
-      "dependencies": ["P3-W10-F09"],
+      "dependencies": [
+        "P3-W10-F09"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -1626,9 +2147,14 @@
       "crate": "ucil-core",
       "description": "Multi-tier query merging: hot_staging, warm, and cold tier results merged into a single response with tier provenance metadata.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-core tier_merger::"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-core tier_merger::"
+        }
       ],
-      "dependencies": ["P1-W4-F08"],
+      "dependencies": [
+        "P1-W4-F08"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -1643,9 +2169,14 @@
       "crate": "ucil-daemon",
       "description": "Warm processors: four rule-based processors (observation: 60s, convention_signal: 60s, architecture_delta: 120s, decision_linker: 60s) promote hot data to warm tier on schedule.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-daemon agent_scheduler::test_warm_processors"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-daemon agent_scheduler::test_warm_processors"
+        }
       ],
-      "dependencies": ["P3-W10-F12"],
+      "dependencies": [
+        "P3-W10-F12"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -1660,9 +2191,15 @@
       "crate": "plugins/architecture/dep-cruiser",
       "description": "dependency-cruiser P0 (JS/TS) plugin installed; module rule validation on the fixture typescript-project detects a circular dependency.",
       "acceptance_tests": [
-        {"kind": "script", "script": "scripts/verify/P3-W10-F14.sh", "exit": 0}
+        {
+          "kind": "script",
+          "script": "scripts/verify/P3-W10-F14.sh",
+          "exit": 0
+        }
       ],
-      "dependencies": ["P2-W6-F01"],
+      "dependencies": [
+        "P2-W6-F01"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -1677,9 +2214,15 @@
       "crate": "plugins/search/zoekt",
       "description": "Zoekt P1 plugin installed; trigram index built over the fixture projects; multi-file search query returns results faster than ripgrep on warm index.",
       "acceptance_tests": [
-        {"kind": "script", "script": "scripts/verify/P3-W10-F15.sh", "exit": 0}
+        {
+          "kind": "script",
+          "script": "scripts/verify/P3-W10-F15.sh",
+          "exit": 0
+        }
       ],
-      "dependencies": ["P2-W6-F01"],
+      "dependencies": [
+        "P2-W6-F01"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -1694,9 +2237,14 @@
       "crate": "ucil-daemon",
       "description": "get_architecture MCP tool returns a structured architecture overview: module boundaries, key components, and data flow from G4 blast radius + CodeGraphContext.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-daemon server::test_get_architecture_tool"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-daemon server::test_get_architecture_tool"
+        }
       ],
-      "dependencies": ["P3-W9-F09"],
+      "dependencies": [
+        "P3-W9-F09"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -1711,9 +2259,14 @@
       "crate": "ucil-daemon",
       "description": "trace_dependencies MCP tool returns upstream and downstream dependency chains for a file/module/symbol via G4 analysis with depth configurable.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-daemon server::test_trace_dependencies_tool"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-daemon server::test_trace_dependencies_tool"
+        }
       ],
-      "dependencies": ["P3-W9-F09"],
+      "dependencies": [
+        "P3-W9-F09"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -1728,9 +2281,14 @@
       "crate": "ucil-daemon",
       "description": "blast_radius MCP tool returns impacted files from a hypothetical change using BFS over the dependency graph weighted by coupling strength.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-daemon server::test_blast_radius_tool"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-daemon server::test_blast_radius_tool"
+        }
       ],
-      "dependencies": ["P3-W9-F09"],
+      "dependencies": [
+        "P3-W9-F09"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -1745,9 +2303,15 @@
       "crate": "ucil-daemon",
       "description": "G7 quality pipeline entry: LSP diagnostics bridge registered as the always-available G7 source; type errors and lint warnings appear in every check_quality response.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-daemon executor::test_g7_lsp_always_runs"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-daemon executor::test_g7_lsp_always_runs"
+        }
       ],
-      "dependencies": ["P1-W5-F05", "P3-W9-F03"],
+      "dependencies": [
+        "P1-W5-F05",
+        "P3-W9-F03"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -1762,9 +2326,15 @@
       "crate": "plugins/quality/eslint",
       "description": "ESLint built-in MCP plugin installed; JS/TS lint errors from the fixture typescript-project returned with file, line, rule, and severity.",
       "acceptance_tests": [
-        {"kind": "script", "script": "scripts/verify/P3-W11-F02.sh", "exit": 0}
+        {
+          "kind": "script",
+          "script": "scripts/verify/P3-W11-F02.sh",
+          "exit": 0
+        }
       ],
-      "dependencies": ["P2-W6-F01"],
+      "dependencies": [
+        "P2-W6-F01"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -1779,9 +2349,15 @@
       "crate": "plugins/quality/ruff",
       "description": "Ruff MCP plugin installed; Python lint errors and format violations from the fixture python-project returned with file, line, rule, and fix suggestion.",
       "acceptance_tests": [
-        {"kind": "script", "script": "scripts/verify/P3-W11-F03.sh", "exit": 0}
+        {
+          "kind": "script",
+          "script": "scripts/verify/P3-W11-F03.sh",
+          "exit": 0
+        }
       ],
-      "dependencies": ["P2-W6-F01"],
+      "dependencies": [
+        "P2-W6-F01"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -1794,11 +2370,17 @@
       "phase": 3,
       "week": 11,
       "crate": "plugins/quality/semgrep",
-      "description": "Semgrep MCP plugin installed; SAST scan of the fixture mixed-project detects \u22651 security finding using the OWASP rule set.",
+      "description": "Semgrep MCP plugin installed; SAST scan of the fixture mixed-project detects ≥1 security finding using the OWASP rule set.",
       "acceptance_tests": [
-        {"kind": "script", "script": "scripts/verify/P3-W11-F04.sh", "exit": 0}
+        {
+          "kind": "script",
+          "script": "scripts/verify/P3-W11-F04.sh",
+          "exit": 0
+        }
       ],
-      "dependencies": ["P2-W6-F01"],
+      "dependencies": [
+        "P2-W6-F01"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -1813,9 +2395,15 @@
       "crate": "ucil-core",
       "description": "G7 severity-weighted merge fusion: issues from all G7 tools merged by severity (critical>high>medium>low), deduplicated by (file, line, category), highest severity kept.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-core fusion::test_g7_severity_merge"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-core fusion::test_g7_severity_merge"
+        }
       ],
-      "dependencies": ["P3-W11-F01", "P3-W9-F04"],
+      "dependencies": [
+        "P3-W11-F01",
+        "P3-W9-F04"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -1830,9 +2418,14 @@
       "crate": "ucil-core",
       "description": "quality_issues table tracking: first_seen, last_seen, resolved timestamps updated per-issue; resolved issues soft-deleted after 7 days; trend metrics queryable.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-core quality_tracker::"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-core quality_tracker::"
+        }
       ],
-      "dependencies": ["P1-W4-F01"],
+      "dependencies": [
+        "P1-W4-F01"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -1847,9 +2440,15 @@
       "crate": "plugins/testing/test-runner",
       "description": "test-runner-mcp plugin installed; unified test execution covers Rust (cargo nextest), Python (pytest), and TypeScript (vitest) via MCP protocol.",
       "acceptance_tests": [
-        {"kind": "script", "script": "scripts/verify/P3-W11-F07.sh", "exit": 0}
+        {
+          "kind": "script",
+          "script": "scripts/verify/P3-W11-F07.sh",
+          "exit": 0
+        }
       ],
-      "dependencies": ["P2-W6-F01"],
+      "dependencies": [
+        "P2-W6-F01"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -1864,9 +2463,15 @@
       "crate": "plugins/testing/pytest-runner",
       "description": "mcp-pytest-runner plugin installed; pytest hierarchical test discovery and selective re-run by node ID verified on the fixture python-project.",
       "acceptance_tests": [
-        {"kind": "script", "script": "scripts/verify/P3-W11-F08.sh", "exit": 0}
+        {
+          "kind": "script",
+          "script": "scripts/verify/P3-W11-F08.sh",
+          "exit": 0
+        }
       ],
-      "dependencies": ["P2-W6-F01"],
+      "dependencies": [
+        "P2-W6-F01"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -1879,11 +2484,18 @@
       "phase": 3,
       "week": 11,
       "crate": "ucil-daemon",
-      "description": "G8 test discovery uses all three methods concurrently: convention-based (src/foo.rs \u2192 tests/test_foo.rs), import-based (which test files import changed module), and KG tested_by relations.",
+      "description": "G8 test discovery uses all three methods concurrently: convention-based (src/foo.rs → tests/test_foo.rs), import-based (which test files import changed module), and KG tested_by relations.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-daemon executor::test_g8_test_discovery_all_methods"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-daemon executor::test_g8_test_discovery_all_methods"
+        }
       ],
-      "dependencies": ["P3-W11-F07", "P3-W11-F08", "P3-W9-F03"],
+      "dependencies": [
+        "P3-W11-F07",
+        "P3-W11-F08",
+        "P3-W9-F03"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -1898,9 +2510,15 @@
       "crate": "ucil-daemon",
       "description": "check_quality MCP tool routes to G7+G8, returning issues[] with severity/category/file/line/fix_suggestion and untested_functions[] for changed code.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-daemon server::test_check_quality_tool"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-daemon server::test_check_quality_tool"
+        }
       ],
-      "dependencies": ["P3-W11-F05", "P3-W11-F09"],
+      "dependencies": [
+        "P3-W11-F05",
+        "P3-W11-F09"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -1915,9 +2533,15 @@
       "crate": "ucil-daemon",
       "description": "review_changes MCP tool analyses a diff against conventions, quality, security, test coverage, and blast radius; returns structured review with severity-ranked findings.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-daemon server::test_review_changes_tool"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-daemon server::test_review_changes_tool"
+        }
       ],
-      "dependencies": ["P3-W11-F10", "P3-W10-F11"],
+      "dependencies": [
+        "P3-W11-F10",
+        "P3-W10-F11"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -1932,9 +2556,14 @@
       "crate": "ucil-core",
       "description": "Feedback loop post-hoc analyser: after each response, tracks which bonus context categories were used by the agent (via subsequent calls); boosts/decays importance scores.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-core feedback::"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-core feedback::"
+        }
       ],
-      "dependencies": ["P3-W10-F11"],
+      "dependencies": [
+        "P3-W10-F11"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -1947,11 +2576,18 @@
       "phase": 3,
       "week": 11,
       "crate": "tests/integration",
-      "description": "Quality pipeline integration test suite (tests/integration/test_quality_pipeline.rs): runs against mixed-project fixture and asserts \u22653 severity-classified issues detected.",
+      "description": "Quality pipeline integration test suite (tests/integration/test_quality_pipeline.rs): runs against mixed-project fixture and asserts ≥3 severity-classified issues detected.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "--test test_quality_pipeline"}
+        {
+          "kind": "cargo_test",
+          "selector": "--test test_quality_pipeline"
+        }
       ],
-      "dependencies": ["P3-W11-F05", "P3-W11-F06", "P0-W1-F14"],
+      "dependencies": [
+        "P3-W11-F05",
+        "P3-W11-F06",
+        "P0-W1-F14"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -1966,9 +2602,14 @@
       "crate": "tests/integration",
       "description": "Testing pipeline integration test suite (tests/integration/test_testing_pipeline.rs): test discovery finds all tests in fixture projects; run results and coverage returned.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "--test test_testing_pipeline"}
+        {
+          "kind": "cargo_test",
+          "selector": "--test test_testing_pipeline"
+        }
       ],
-      "dependencies": ["P3-W11-F09"],
+      "dependencies": [
+        "P3-W11-F09"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -1983,9 +2624,14 @@
       "crate": "ucil-daemon",
       "description": "type_check MCP tool returns type error diagnostics for specified files via the LSP diagnostics bridge, covering at least Python, TypeScript, and Rust.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-daemon server::test_type_check_tool"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-daemon server::test_type_check_tool"
+        }
       ],
-      "dependencies": ["P1-W5-F05"],
+      "dependencies": [
+        "P1-W5-F05"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -2000,9 +2646,16 @@
       "crate": "tests/integration",
       "description": "Full query pipeline integration test suite (tests/integration/test_query_pipeline.rs + test_fusion.rs): golden queries assert correct fused results with expected group provenance.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "--test test_query_pipeline --test test_fusion"}
+        {
+          "kind": "cargo_test",
+          "selector": "--test test_query_pipeline --test test_fusion"
+        }
       ],
-      "dependencies": ["P3-W9-F04", "P3-W10-F09", "P3-W11-F05"],
+      "dependencies": [
+        "P3-W9-F04",
+        "P3-W10-F09",
+        "P3-W11-F05"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -2017,9 +2670,14 @@
       "crate": "ucil-agents",
       "description": "LlmProvider trait defined in ucil-agents/src/provider.rs: async complete(), is_available(), cost_per_1k_tokens(), max_context_tokens(), name(); all providers implement it.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-agents provider::"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-agents provider::"
+        }
       ],
-      "dependencies": ["P0-W1-F02"],
+      "dependencies": [
+        "P0-W1-F02"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -2034,9 +2692,14 @@
       "crate": "ucil-agents",
       "description": "Ollama local provider: connects to http://localhost:11434, sends chat completion request, handles streaming response, 10s timeout per request.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-agents provider::test_ollama_provider"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-agents provider::test_ollama_provider"
+        }
       ],
-      "dependencies": ["P3.5-W12-F01"],
+      "dependencies": [
+        "P3.5-W12-F01"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -2051,9 +2714,14 @@
       "crate": "ucil-agents",
       "description": "Claude API provider: calls Anthropic API with prompt caching enabled, streaming support, configurable model, 15s timeout.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-agents provider::test_claude_provider"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-agents provider::test_claude_provider"
+        }
       ],
-      "dependencies": ["P3.5-W12-F01"],
+      "dependencies": [
+        "P3.5-W12-F01"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -2068,9 +2736,14 @@
       "crate": "ucil-agents",
       "description": "OpenAI API provider: calls OpenAI completions API with streaming support, configurable model (default gpt-4o), 15s timeout.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-agents provider::test_openai_provider"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-agents provider::test_openai_provider"
+        }
       ],
-      "dependencies": ["P3.5-W12-F01"],
+      "dependencies": [
+        "P3.5-W12-F01"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -2085,9 +2758,14 @@
       "crate": "ucil-agents",
       "description": "Host passthrough provider: embeds synthesis instructions and key facts in response _synthesis_hint field; is_available() always true; zero LLM calls.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-agents provider::test_host_passthrough"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-agents provider::test_host_passthrough"
+        }
       ],
-      "dependencies": ["P3.5-W12-F01"],
+      "dependencies": [
+        "P3.5-W12-F01"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -2102,9 +2780,14 @@
       "crate": "ucil-agents",
       "description": "None (deterministic) provider: is_available() returns false; triggers keyword-based classifier and source-authority conflict resolution; no LLM calls made.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-agents provider::test_none_provider"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-agents provider::test_none_provider"
+        }
       ],
-      "dependencies": ["P3.5-W12-F01"],
+      "dependencies": [
+        "P3.5-W12-F01"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -2119,9 +2802,15 @@
       "crate": "ucil-agents",
       "description": "Query Interpreter agent: analyses reason+target+session context via LLM to produce QueryPlan with intent, domains, sub-queries, and knowledge_gaps; runs on every query.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-agents interpreter::"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-agents interpreter::"
+        }
       ],
-      "dependencies": ["P3.5-W12-F02", "P3-W9-F02"],
+      "dependencies": [
+        "P3.5-W12-F02",
+        "P3-W9-F02"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -2136,9 +2825,15 @@
       "crate": "ucil-agents",
       "description": "Synthesis Agent: takes fused group results and produces a coherent narrative via LLM; in host-passthrough mode embeds instructions in _synthesis_hint.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-agents synthesis::"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-agents synthesis::"
+        }
       ],
-      "dependencies": ["P3.5-W12-F05", "P3.5-W12-F02"],
+      "dependencies": [
+        "P3.5-W12-F05",
+        "P3.5-W12-F02"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -2153,9 +2848,15 @@
       "crate": "tests/integration",
       "description": "Agent framework smoke test: Interpreter and Synthesis agents both produce non-empty output for a find_definition query against fixture rust-project with provider=ollama.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "--test test_agents_smoke"}
+        {
+          "kind": "cargo_test",
+          "selector": "--test test_agents_smoke"
+        }
       ],
-      "dependencies": ["P3.5-W12-F07", "P3.5-W12-F08"],
+      "dependencies": [
+        "P3.5-W12-F07",
+        "P3.5-W12-F08"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -2170,9 +2871,15 @@
       "crate": "ucil-agents",
       "description": "Conflict Mediator agent: detects disagreements between group outputs, reasons about them using LLM with source authority as soft guidance, returns resolution with confidence.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-agents conflict::"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-agents conflict::"
+        }
       ],
-      "dependencies": ["P3.5-W12-F02", "P3-W10-F10"],
+      "dependencies": [
+        "P3.5-W12-F02",
+        "P3-W10-F10"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -2185,11 +2892,16 @@
       "phase": 3.5,
       "week": 13,
       "crate": "ucil-agents",
-      "description": "Clarification Agent: uses MCP Elicitation protocol to ask user for clarification when query intent is genuinely ambiguous; \u22642 clarifications per query.",
+      "description": "Clarification Agent: uses MCP Elicitation protocol to ask user for clarification when query intent is genuinely ambiguous; ≤2 clarifications per query.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-agents clarification::"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-agents clarification::"
+        }
       ],
-      "dependencies": ["P3.5-W12-F02"],
+      "dependencies": [
+        "P3.5-W12-F02"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -2204,9 +2916,14 @@
       "crate": "ucil-daemon",
       "description": "Background agent scheduler: async task queue dispatches Convention Extractor, Memory Curator, and Architecture Narrator on their configured schedules without blocking query-path.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-daemon agent_scheduler::test_background_scheduler"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-daemon agent_scheduler::test_background_scheduler"
+        }
       ],
-      "dependencies": ["P1-W3-F04"],
+      "dependencies": [
+        "P1-W3-F04"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -2221,9 +2938,15 @@
       "crate": "ucil-agents",
       "description": "Convention Extractor background agent: samples 50-100 files every 10 commits, sends to LLM to discover coding patterns, stores to conventions table with evidence counts.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-agents convention::test_convention_extractor"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-agents convention::test_convention_extractor"
+        }
       ],
-      "dependencies": ["P3.5-W13-F03", "P3.5-W12-F02"],
+      "dependencies": [
+        "P3.5-W13-F03",
+        "P3.5-W12-F02"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -2238,9 +2961,15 @@
       "crate": "ucil-agents",
       "description": "Memory Curator background agent: deduplicates and merges agent observations every 24h and after each session; clusters by semantic similarity; prunes low-importance entries.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-agents memory_curator::"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-agents memory_curator::"
+        }
       ],
-      "dependencies": ["P3.5-W13-F03", "P3-W9-F06"],
+      "dependencies": [
+        "P3.5-W13-F03",
+        "P3-W9-F06"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -2253,11 +2982,17 @@
       "phase": 3.5,
       "week": 13,
       "crate": "ucil-agents",
-      "description": "Architecture Narrator background agent: produces \u22642000-token architectural narrative every 50 commits; stored in knowledge graph with generation timestamp.",
+      "description": "Architecture Narrator background agent: produces ≤2000-token architectural narrative every 50 commits; stored in knowledge graph with generation timestamp.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-agents architecture::"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-agents architecture::"
+        }
       ],
-      "dependencies": ["P3.5-W13-F03", "P3-W9-F09"],
+      "dependencies": [
+        "P3.5-W13-F03",
+        "P3-W9-F09"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -2272,9 +3007,16 @@
       "crate": "tests/integration",
       "description": "Full agent integration test suite (tests/integration/test_multi_agent.rs): 5 concurrent agent sessions run without data races; branch isolation verified; shared knowledge propagated.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "--test test_multi_agent"}
+        {
+          "kind": "cargo_test",
+          "selector": "--test test_multi_agent"
+        }
       ],
-      "dependencies": ["P3.5-W13-F01", "P3.5-W13-F02", "P3.5-W13-F03"],
+      "dependencies": [
+        "P3.5-W13-F01",
+        "P3.5-W13-F02",
+        "P3.5-W13-F03"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -2289,9 +3031,15 @@
       "crate": "tests/integration",
       "description": "CEQP integration test suite (tests/integration/test_ceqp.rs): golden queries with rich reason strings assert expected bonus context categories are populated.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "--test test_ceqp"}
+        {
+          "kind": "cargo_test",
+          "selector": "--test test_ceqp"
+        }
       ],
-      "dependencies": ["P3.5-W12-F07", "P3-W10-F11"],
+      "dependencies": [
+        "P3.5-W12-F07",
+        "P3-W10-F11"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -2306,9 +3054,15 @@
       "crate": "tests/integration",
       "description": "Resilience integration test suite skeleton (tests/integration/test_resilience.rs): fault injection framework scaffolded; plugin crash and DB corruption cases as pending tests.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "--test test_resilience"}
+        {
+          "kind": "cargo_test",
+          "selector": "--test test_resilience"
+        }
       ],
-      "dependencies": ["P2-W6-F04", "P1-W4-F01"],
+      "dependencies": [
+        "P2-W6-F04",
+        "P1-W4-F01"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -2323,9 +3077,15 @@
       "crate": "plugin",
       "description": "Claude Code plugin package built: plugin/.claude-plugin/plugin.json and plugin/.mcp.json wired to ucil-mcp server; plugin installs cleanly via ucil init --install-claude-plugin.",
       "acceptance_tests": [
-        {"kind": "script", "script": "scripts/verify/P4-W14-F01.sh", "exit": 0}
+        {
+          "kind": "script",
+          "script": "scripts/verify/P4-W14-F01.sh",
+          "exit": 0
+        }
       ],
-      "dependencies": ["P1-W3-F07"],
+      "dependencies": [
+        "P1-W3-F07"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -2340,9 +3100,15 @@
       "crate": "plugin",
       "description": "PostToolUse hook (plugin/hooks/post-write-analyze.py) notifies ucild of file changes immediately, bypassing the 100ms notify debounce window.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-daemon watcher::test_post_tool_use_bypass"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-daemon watcher::test_post_tool_use_bypass"
+        }
       ],
-      "dependencies": ["P4-W14-F01", "P1-W3-F02"],
+      "dependencies": [
+        "P4-W14-F01",
+        "P1-W3-F02"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -2357,9 +3123,16 @@
       "crate": "plugin",
       "description": "Skills: /ucil-lint skill invokes check_quality MCP tool and displays a structured lint report with file, line, severity, and fix suggestion.",
       "acceptance_tests": [
-        {"kind": "script", "script": "scripts/verify/P4-W14-F03.sh", "exit": 0}
+        {
+          "kind": "script",
+          "script": "scripts/verify/P4-W14-F03.sh",
+          "exit": 0
+        }
       ],
-      "dependencies": ["P4-W14-F01", "P3-W11-F10"],
+      "dependencies": [
+        "P4-W14-F01",
+        "P3-W11-F10"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -2374,9 +3147,15 @@
       "crate": "plugin",
       "description": "Skills: /ucil-security skill invokes security_scan MCP tool and displays security findings with CVE references and remediation guidance.",
       "acceptance_tests": [
-        {"kind": "script", "script": "scripts/verify/P4-W14-F04.sh", "exit": 0}
+        {
+          "kind": "script",
+          "script": "scripts/verify/P4-W14-F04.sh",
+          "exit": 0
+        }
       ],
-      "dependencies": ["P4-W14-F01"],
+      "dependencies": [
+        "P4-W14-F01"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -2391,9 +3170,15 @@
       "crate": "plugin",
       "description": "Skills: /ucil-test skill invokes run_tests MCP tool and displays test results with pass/fail counts, duration, and coverage delta.",
       "acceptance_tests": [
-        {"kind": "script", "script": "scripts/verify/P4-W14-F05.sh", "exit": 0}
+        {
+          "kind": "script",
+          "script": "scripts/verify/P4-W14-F05.sh",
+          "exit": 0
+        }
       ],
-      "dependencies": ["P4-W14-F01"],
+      "dependencies": [
+        "P4-W14-F01"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -2408,9 +3193,16 @@
       "crate": "plugin",
       "description": "Skills: /ucil-review skill invokes review_changes MCP tool on the current git diff and displays a structured code review.",
       "acceptance_tests": [
-        {"kind": "script", "script": "scripts/verify/P4-W14-F06.sh", "exit": 0}
+        {
+          "kind": "script",
+          "script": "scripts/verify/P4-W14-F06.sh",
+          "exit": 0
+        }
       ],
-      "dependencies": ["P4-W14-F01", "P3-W11-F11"],
+      "dependencies": [
+        "P4-W14-F01",
+        "P3-W11-F11"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -2425,9 +3217,15 @@
       "crate": "plugin",
       "description": "ucil-lint.md subagent (haiku model) defined: lint-focused agent that calls check_quality, interprets results, and proposes fixes in concise form.",
       "acceptance_tests": [
-        {"kind": "script", "script": "scripts/verify/P4-W14-F07.sh", "exit": 0}
+        {
+          "kind": "script",
+          "script": "scripts/verify/P4-W14-F07.sh",
+          "exit": 0
+        }
       ],
-      "dependencies": ["P4-W14-F01"],
+      "dependencies": [
+        "P4-W14-F01"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -2442,9 +3240,15 @@
       "crate": "plugin",
       "description": "ucil-security.md subagent (sonnet model) defined: security-focused agent that calls security_scan, ranks findings by exploitability, and drafts remediation PRs.",
       "acceptance_tests": [
-        {"kind": "script", "script": "scripts/verify/P4-W14-F08.sh", "exit": 0}
+        {
+          "kind": "script",
+          "script": "scripts/verify/P4-W14-F08.sh",
+          "exit": 0
+        }
       ],
-      "dependencies": ["P4-W14-F01"],
+      "dependencies": [
+        "P4-W14-F01"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -2459,9 +3263,15 @@
       "crate": "plugin",
       "description": "ucil-test.md subagent defined: test discovery + execution agent that calls run_tests, analyses failures, and suggests fixes.",
       "acceptance_tests": [
-        {"kind": "script", "script": "scripts/verify/P4-W14-F09.sh", "exit": 0}
+        {
+          "kind": "script",
+          "script": "scripts/verify/P4-W14-F09.sh",
+          "exit": 0
+        }
       ],
-      "dependencies": ["P4-W14-F01"],
+      "dependencies": [
+        "P4-W14-F01"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -2476,9 +3286,15 @@
       "crate": "plugin",
       "description": "ucil-review.md subagent defined: code review agent that calls review_changes and get_conventions, then produces a structured PR review comment.",
       "acceptance_tests": [
-        {"kind": "script", "script": "scripts/verify/P4-W14-F10.sh", "exit": 0}
+        {
+          "kind": "script",
+          "script": "scripts/verify/P4-W14-F10.sh",
+          "exit": 0
+        }
       ],
-      "dependencies": ["P4-W14-F01"],
+      "dependencies": [
+        "P4-W14-F01"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -2493,9 +3309,14 @@
       "crate": "ucil-cli",
       "description": "ucil init --install-claude-plugin copies the plugin package to ~/.claude/plugins/ucil/ and writes .mcp.json entry; subsequent claude --tools list shows ucil-mcp.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-cli commands::init::test_install_claude_plugin"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-cli commands::init::test_install_claude_plugin"
+        }
       ],
-      "dependencies": ["P4-W14-F01"],
+      "dependencies": [
+        "P4-W14-F01"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -2510,9 +3331,14 @@
       "crate": "adapters",
       "description": "Codex CLI adapter: generates AGENTS.md with UCIL context, applies aggressive compression for 10KB tool output limit, paginates large results with continuation tokens.",
       "acceptance_tests": [
-        {"kind": "vitest", "selector": "adapters/tests/codex.test.ts"}
+        {
+          "kind": "vitest",
+          "selector": "adapters/tests/codex.test.ts"
+        }
       ],
-      "dependencies": ["P1-W3-F07"],
+      "dependencies": [
+        "P1-W3-F07"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -2527,9 +3353,14 @@
       "crate": "adapters",
       "description": "Cursor adapter: writes .cursor/mcp.json pointing to ucil-mcp server; exposes core 5 tools (understand_code, find_definition, search_code, get_context_for_edit, blast_radius).",
       "acceptance_tests": [
-        {"kind": "vitest", "selector": "adapters/tests/cursor.test.ts"}
+        {
+          "kind": "vitest",
+          "selector": "adapters/tests/cursor.test.ts"
+        }
       ],
-      "dependencies": ["P1-W3-F07"],
+      "dependencies": [
+        "P1-W3-F07"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -2544,9 +3375,14 @@
       "crate": "adapters",
       "description": "Cline/Roo Code adapter: generates cline_mcp_settings.json with mode-specific tool filtering and alwaysAllow list; full response format preserved.",
       "acceptance_tests": [
-        {"kind": "vitest", "selector": "adapters/tests/cline.test.ts"}
+        {
+          "kind": "vitest",
+          "selector": "adapters/tests/cline.test.ts"
+        }
       ],
-      "dependencies": ["P1-W3-F07"],
+      "dependencies": [
+        "P1-W3-F07"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -2561,9 +3397,14 @@
       "crate": "adapters",
       "description": "Aider adapter: HTTP bridge (FastAPI) exposes UCIL tools over REST; enhanced repo-map embedded in Aider's --map-tokens context.",
       "acceptance_tests": [
-        {"kind": "vitest", "selector": "adapters/tests/aider.test.ts"}
+        {
+          "kind": "vitest",
+          "selector": "adapters/tests/aider.test.ts"
+        }
       ],
-      "dependencies": ["P1-W3-F07"],
+      "dependencies": [
+        "P1-W3-F07"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -2578,9 +3419,14 @@
       "crate": "adapters",
       "description": "Ollama adapter: aggressive compression applied (signature-only mode for code blocks, 4K-32K context window respected, no bonus context for simple queries).",
       "acceptance_tests": [
-        {"kind": "vitest", "selector": "adapters/tests/ollama.test.ts"}
+        {
+          "kind": "vitest",
+          "selector": "adapters/tests/ollama.test.ts"
+        }
       ],
-      "dependencies": ["P1-W3-F07"],
+      "dependencies": [
+        "P1-W3-F07"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -2595,9 +3441,16 @@
       "crate": "adapters",
       "description": "Auto-detect adapter: detects host environment from env vars (CLAUDE_MCP_SERVER, CURSOR_EXTENSION_HOST, CLINE_MCP, AIDER_MODEL) and applies the correct adapter.",
       "acceptance_tests": [
-        {"kind": "vitest", "selector": "adapters/tests/auto-detect.test.ts"}
+        {
+          "kind": "vitest",
+          "selector": "adapters/tests/auto-detect.test.ts"
+        }
       ],
-      "dependencies": ["P4-W15-F01", "P4-W15-F02", "P4-W15-F03"],
+      "dependencies": [
+        "P4-W15-F01",
+        "P4-W15-F02",
+        "P4-W15-F03"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -2612,9 +3465,15 @@
       "crate": "plugins/platform/playwright-mcp",
       "description": "Playwright MCP P1 plugin installed; browser automation via accessibility tree works; a page title extraction smoke test passes.",
       "acceptance_tests": [
-        {"kind": "script", "script": "scripts/verify/P4-W15-F07.sh", "exit": 0}
+        {
+          "kind": "script",
+          "script": "scripts/verify/P4-W15-F07.sh",
+          "exit": 0
+        }
       ],
-      "dependencies": ["P2-W6-F01"],
+      "dependencies": [
+        "P2-W6-F01"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -2629,9 +3488,18 @@
       "crate": "tests/integration",
       "description": "Host adapter integration test suite (tests/integration/test_host_adapters.rs): each adapter applies correct response transformation for its host's constraints.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "--test test_host_adapters"}
+        {
+          "kind": "cargo_test",
+          "selector": "--test test_host_adapters"
+        }
       ],
-      "dependencies": ["P4-W15-F01", "P4-W15-F02", "P4-W15-F03", "P4-W15-F04", "P4-W15-F05"],
+      "dependencies": [
+        "P4-W15-F01",
+        "P4-W15-F02",
+        "P4-W15-F03",
+        "P4-W15-F04",
+        "P4-W15-F05"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -2646,9 +3514,15 @@
       "crate": "ucil-daemon",
       "description": "Git post-commit hook integration: ucild re-indexes changed files within 2s of a commit; KG updated with new commit SHA as provenance.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-daemon watcher::test_post_commit_reindex"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-daemon watcher::test_post_commit_reindex"
+        }
       ],
-      "dependencies": ["P1-W3-F02", "P1-W4-F04"],
+      "dependencies": [
+        "P1-W3-F02",
+        "P1-W4-F04"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -2663,9 +3537,15 @@
       "crate": "ucil-daemon",
       "description": "PR context extraction: on branch merge or PR event (via GitHub MCP), PR title, description, review comments, and diff summary stored as KG history entries.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-daemon executor::test_pr_context_extraction"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-daemon executor::test_pr_context_extraction"
+        }
       ],
-      "dependencies": ["P3-W10-F05", "P1-W4-F02"],
+      "dependencies": [
+        "P3-W10-F05",
+        "P1-W4-F02"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -2680,9 +3560,14 @@
       "crate": "ucil-daemon",
       "description": "remember MCP tool full implementation: stores agent observations, decisions, and learnings to Mem0 with three-tier scoping (user/session/agent); retrieves by semantic similarity.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-daemon server::test_remember_tool"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-daemon server::test_remember_tool"
+        }
       ],
-      "dependencies": ["P3-W9-F06"],
+      "dependencies": [
+        "P3-W9-F06"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -2695,11 +3580,17 @@
       "phase": 5,
       "week": 16,
       "crate": "plugins/quality/snyk",
-      "description": "Snyk MCP P1 plugin installed; SCA dependency vulnerability scan of the fixture python-project returns \u22650 CVEs from Snyk database.",
+      "description": "Snyk MCP P1 plugin installed; SCA dependency vulnerability scan of the fixture python-project returns ≥0 CVEs from Snyk database.",
       "acceptance_tests": [
-        {"kind": "script", "script": "scripts/verify/P5-W16-F04.sh", "exit": 0}
+        {
+          "kind": "script",
+          "script": "scripts/verify/P5-W16-F04.sh",
+          "exit": 0
+        }
       ],
-      "dependencies": ["P2-W6-F01"],
+      "dependencies": [
+        "P2-W6-F01"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -2714,9 +3605,15 @@
       "crate": "plugins/quality/osv",
       "description": "OSV MCP P1 plugin installed; CVE database query for npm, PyPI, Go, and Maven ecosystems returns structured vulnerability data.",
       "acceptance_tests": [
-        {"kind": "script", "script": "scripts/verify/P5-W16-F05.sh", "exit": 0}
+        {
+          "kind": "script",
+          "script": "scripts/verify/P5-W16-F05.sh",
+          "exit": 0
+        }
       ],
-      "dependencies": ["P2-W6-F01"],
+      "dependencies": [
+        "P2-W6-F01"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -2731,9 +3628,15 @@
       "crate": "plugins/quality/trufflehog",
       "description": "TruffleHog installed; secrets detection scan of the fixture mixed-project detects the intentional test API key with live verification disabled.",
       "acceptance_tests": [
-        {"kind": "script", "script": "scripts/verify/P5-W16-F06.sh", "exit": 0}
+        {
+          "kind": "script",
+          "script": "scripts/verify/P5-W16-F06.sh",
+          "exit": 0
+        }
       ],
-      "dependencies": ["P2-W6-F01"],
+      "dependencies": [
+        "P2-W6-F01"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -2748,9 +3651,15 @@
       "crate": "plugins/quality/gitleaks",
       "description": "Gitleaks installed; git history scan of the fixture mixed-project repository detects the intentional test secret in commit history.",
       "acceptance_tests": [
-        {"kind": "script", "script": "scripts/verify/P5-W16-F07.sh", "exit": 0}
+        {
+          "kind": "script",
+          "script": "scripts/verify/P5-W16-F07.sh",
+          "exit": 0
+        }
       ],
-      "dependencies": ["P2-W6-F01"],
+      "dependencies": [
+        "P2-W6-F01"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -2765,9 +3674,18 @@
       "crate": "ucil-daemon",
       "description": "Security tools wired into G7 fusion: Snyk + OSV + TruffleHog + Gitleaks results severity-merged with existing LSP and SAST findings.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-daemon executor::test_security_tools_g7_fusion"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-daemon executor::test_security_tools_g7_fusion"
+        }
       ],
-      "dependencies": ["P5-W16-F04", "P5-W16-F05", "P5-W16-F06", "P5-W16-F07", "P3-W11-F05"],
+      "dependencies": [
+        "P5-W16-F04",
+        "P5-W16-F05",
+        "P5-W16-F06",
+        "P5-W16-F07",
+        "P3-W11-F05"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -2782,9 +3700,14 @@
       "crate": "ucil-daemon",
       "description": "security_scan MCP tool full implementation: routes to G7 SAST+SCA+secrets+container pipeline, returns findings[] with severity/CVE/remediation sorted by exploitability.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-daemon server::test_security_scan_tool"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-daemon server::test_security_scan_tool"
+        }
       ],
-      "dependencies": ["P5-W16-F08"],
+      "dependencies": [
+        "P5-W16-F08"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -2799,9 +3722,14 @@
       "crate": "ucil-daemon",
       "description": "lint_code MCP tool full implementation: routes to G7 language-specific linters (ESLint/Ruff/cargo-clippy), returns lint issues[] with fix suggestions.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-daemon server::test_lint_code_tool"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-daemon server::test_lint_code_tool"
+        }
       ],
-      "dependencies": ["P3-W11-F05"],
+      "dependencies": [
+        "P3-W11-F05"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -2816,9 +3744,14 @@
       "crate": "ucil-daemon",
       "description": "Coverage analysis wired into G8: lcov and cobertura report parsing extracts per-file line and branch coverage; changed-file coverage delta included in G8 results.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-daemon executor::test_coverage_analysis"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-daemon executor::test_coverage_analysis"
+        }
       ],
-      "dependencies": ["P3-W11-F09"],
+      "dependencies": [
+        "P3-W11-F09"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -2833,9 +3766,14 @@
       "crate": "ucil-core",
       "description": "Importance decay rules for cold tier: entity_decay=0.99, observation_decay=0.95, decision_decay=0.999 applied per compaction cycle; entries below min_importance=0.05 pruned.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-core compaction::test_decay_rules"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-core compaction::test_decay_rules"
+        }
       ],
-      "dependencies": ["P1-W4-F02"],
+      "dependencies": [
+        "P1-W4-F02"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -2850,9 +3788,15 @@
       "crate": "ucil-core",
       "description": "Periodic compaction: stale KG nodes pruned, invalid relations removed, resolved quality_issues soft-deleted, triggered every 6 hours and on explicit ucil compact.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-core compaction::test_periodic_compaction"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-core compaction::test_periodic_compaction"
+        }
       ],
-      "dependencies": ["P5-W17-F01", "P3-W11-F06"],
+      "dependencies": [
+        "P5-W17-F01",
+        "P3-W11-F06"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -2867,9 +3811,14 @@
       "crate": "ucil-core",
       "description": "Tiered GC: hot staging entries older than 60 minutes deleted; warm entries older than 7 days and not promoted deleted; promoted entries kept 24 hours after promotion.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-core compaction::test_tiered_gc"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-core compaction::test_tiered_gc"
+        }
       ],
-      "dependencies": ["P3-W10-F13"],
+      "dependencies": [
+        "P3-W10-F13"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -2884,9 +3833,15 @@
       "crate": "ucil-daemon",
       "description": "Background agents consume warm tier data: Convention Extractor and Memory Curator read from warm tier (faster, cheaper) rather than querying all live sources.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-daemon agent_scheduler::test_warm_data_consumption"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-daemon agent_scheduler::test_warm_data_consumption"
+        }
       ],
-      "dependencies": ["P3.5-W13-F04", "P5-W17-F03"],
+      "dependencies": [
+        "P3.5-W13-F04",
+        "P5-W17-F03"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -2901,9 +3856,15 @@
       "crate": "plugins/knowledge/arc-memory",
       "description": "Arc Memory P1 plugin installed; git-native knowledge graph built from fixture rust-project; ADRs and commit messages linked to code symbols via MCP query.",
       "acceptance_tests": [
-        {"kind": "script", "script": "scripts/verify/P5-W17-F05.sh", "exit": 0}
+        {
+          "kind": "script",
+          "script": "scripts/verify/P5-W17-F05.sh",
+          "exit": 0
+        }
       ],
-      "dependencies": ["P2-W6-F01"],
+      "dependencies": [
+        "P2-W6-F01"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -2918,9 +3879,15 @@
       "crate": "ucil-daemon",
       "description": "explain_history MCP tool: returns why code was written (PR/issue/ADR context) via Arc Memory G6 git integration; response includes linked PR descriptions and author rationale.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-daemon server::test_explain_history_tool"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-daemon server::test_explain_history_tool"
+        }
       ],
-      "dependencies": ["P5-W17-F05", "P5-W16-F02"],
+      "dependencies": [
+        "P5-W17-F05",
+        "P5-W16-F02"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -2935,9 +3902,15 @@
       "crate": "plugins/quality/sonarqube",
       "description": "SonarQube MCP P1 plugin installed; code quality metrics for the fixture rust-project returned (code smells, duplications, coverage); 19+ language support confirmed.",
       "acceptance_tests": [
-        {"kind": "script", "script": "scripts/verify/P5-W17-F07.sh", "exit": 0}
+        {
+          "kind": "script",
+          "script": "scripts/verify/P5-W17-F07.sh",
+          "exit": 0
+        }
       ],
-      "dependencies": ["P2-W6-F01"],
+      "dependencies": [
+        "P2-W6-F01"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -2952,9 +3925,15 @@
       "crate": "plugins/quality/trivy",
       "description": "Trivy P1 plugin installed; container image and filesystem vulnerability scan of fixture projects produces SARIF-format output; wired into G7 severity merge.",
       "acceptance_tests": [
-        {"kind": "script", "script": "scripts/verify/P5-W17-F08.sh", "exit": 0}
+        {
+          "kind": "script",
+          "script": "scripts/verify/P5-W17-F08.sh",
+          "exit": 0
+        }
       ],
-      "dependencies": ["P2-W6-F01"],
+      "dependencies": [
+        "P2-W6-F01"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -2969,9 +3948,15 @@
       "crate": "plugins/context/open-context",
       "description": "Open Context P1 plugin installed; Go, npm, Python, Rust, Docker, K8s, Terraform docs retrieved for symbols in fixture projects via MCP.",
       "acceptance_tests": [
-        {"kind": "script", "script": "scripts/verify/P5-W17-F09.sh", "exit": 0}
+        {
+          "kind": "script",
+          "script": "scripts/verify/P5-W17-F09.sh",
+          "exit": 0
+        }
       ],
-      "dependencies": ["P2-W6-F01"],
+      "dependencies": [
+        "P2-W6-F01"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -2986,9 +3971,15 @@
       "crate": "plugins/architecture/axon",
       "description": "Axon P1 plugin installed; dependency analysis, call chains, and module clusters generated for the fixture typescript-project; wired into G4 parallel query.",
       "acceptance_tests": [
-        {"kind": "script", "script": "scripts/verify/P5-W17-F10.sh", "exit": 0}
+        {
+          "kind": "script",
+          "script": "scripts/verify/P5-W17-F10.sh",
+          "exit": 0
+        }
       ],
-      "dependencies": ["P2-W6-F01"],
+      "dependencies": [
+        "P2-W6-F01"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -3001,11 +3992,17 @@
       "phase": 5,
       "week": 17,
       "crate": "tests/integration",
-      "description": "Knowledge tiering integration test suite (tests/integration/test_knowledge_tiering.rs): timed assertions verify hot\u2192warm\u2192cold promotion and GC within configured time windows.",
+      "description": "Knowledge tiering integration test suite (tests/integration/test_knowledge_tiering.rs): timed assertions verify hot→warm→cold promotion and GC within configured time windows.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "--test test_knowledge_tiering"}
+        {
+          "kind": "cargo_test",
+          "selector": "--test test_knowledge_tiering"
+        }
       ],
-      "dependencies": ["P5-W17-F03", "P3-W10-F13"],
+      "dependencies": [
+        "P5-W17-F03",
+        "P3-W10-F13"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -3020,9 +4017,14 @@
       "crate": "ucil-core",
       "description": "Cross-project knowledge groups: ~/.ucil/groups/ stores group metadata and shared conventions; per-project group membership persisted in ucil.toml.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-core cross_project::test_group_storage"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-core cross_project::test_group_storage"
+        }
       ],
-      "dependencies": ["P1-W4-F01"],
+      "dependencies": [
+        "P1-W4-F01"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -3037,9 +4039,14 @@
       "crate": "ucil-cli",
       "description": "Cross-project CLI commands: ucil group create/join/leave/list/sync all functional; sync propagates group conventions to project knowledge graph.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-cli commands::group::"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-cli commands::group::"
+        }
       ],
-      "dependencies": ["P5-W18-F01"],
+      "dependencies": [
+        "P5-W18-F01"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -3052,11 +4059,17 @@
       "phase": 5,
       "week": 18,
       "crate": "ucil-core",
-      "description": "Convention promotion pipeline: conventions seen in \u22653 projects within a group auto-promoted to group scope; ucil convention promote <id> allows manual promotion.",
+      "description": "Convention promotion pipeline: conventions seen in ≥3 projects within a group auto-promoted to group scope; ucil convention promote <id> allows manual promotion.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-core cross_project::test_convention_promotion"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-core cross_project::test_convention_promotion"
+        }
       ],
-      "dependencies": ["P5-W18-F01", "P3.5-W13-F04"],
+      "dependencies": [
+        "P5-W18-F01",
+        "P3.5-W13-F04"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -3071,9 +4084,15 @@
       "crate": "ucil-daemon",
       "description": "review_changes MCP tool full implementation: complete diff analysis routing to G1/G4/G7/G8 for conventions, quality, security, test coverage, and blast radius.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-daemon server::test_review_changes_full"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-daemon server::test_review_changes_full"
+        }
       ],
-      "dependencies": ["P3-W11-F11", "P5-W16-F08"],
+      "dependencies": [
+        "P3-W11-F11",
+        "P5-W16-F08"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -3088,9 +4107,16 @@
       "crate": "ucil-daemon",
       "description": "generate_docs MCP tool: generates architecture overview, module-level docs, API reference, and onboarding guide from G3+G4+G5 data using the Synthesis agent.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-daemon server::test_generate_docs_tool"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-daemon server::test_generate_docs_tool"
+        }
       ],
-      "dependencies": ["P3.5-W12-F08", "P3-W9-F07", "P3-W9-F09"],
+      "dependencies": [
+        "P3.5-W12-F08",
+        "P3-W9-F07",
+        "P3-W9-F09"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -3105,9 +4131,15 @@
       "crate": "plugins/testing/pytest-mcp",
       "description": "pytest-mcp P1 plugin installed; pytest plugin exposes test results as MCP resources; selective re-run by node ID verified on the fixture python-project.",
       "acceptance_tests": [
-        {"kind": "script", "script": "scripts/verify/P5-W18-F06.sh", "exit": 0}
+        {
+          "kind": "script",
+          "script": "scripts/verify/P5-W18-F06.sh",
+          "exit": 0
+        }
       ],
-      "dependencies": ["P2-W6-F01"],
+      "dependencies": [
+        "P2-W6-F01"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -3122,9 +4154,15 @@
       "crate": "plugins/architecture/deptry",
       "description": "deptry P1 (Python) plugin installed; Python dependency hygiene check on the fixture python-project detects unused and missing transitive dependencies.",
       "acceptance_tests": [
-        {"kind": "script", "script": "scripts/verify/P5-W18-F07.sh", "exit": 0}
+        {
+          "kind": "script",
+          "script": "scripts/verify/P5-W18-F07.sh",
+          "exit": 0
+        }
       ],
-      "dependencies": ["P2-W6-F01"],
+      "dependencies": [
+        "P2-W6-F01"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -3139,9 +4177,14 @@
       "crate": "tests/integration",
       "description": "Cross-project integration test suite (tests/integration/test_cross_project.rs): multi-project fixture verifies convention sync, promotion, and group-scoped knowledge.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "--test test_cross_project"}
+        {
+          "kind": "cargo_test",
+          "selector": "--test test_cross_project"
+        }
       ],
-      "dependencies": ["P5-W18-F03"],
+      "dependencies": [
+        "P5-W18-F03"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -3156,9 +4199,14 @@
       "crate": "tests/integration",
       "description": "Feedback loop integration test suite (tests/integration/test_feedback_loop.rs): simulated agent sequences verify importance boost/decay from bonus context usage tracking.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "--test test_feedback_loop"}
+        {
+          "kind": "cargo_test",
+          "selector": "--test test_feedback_loop"
+        }
       ],
-      "dependencies": ["P3-W11-F12"],
+      "dependencies": [
+        "P3-W11-F12"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -3173,9 +4221,14 @@
       "crate": "ucil-core",
       "description": "L0 in-memory LRU cache: content-addressed hash of (query_params + file_state_hash) as key; max 1000 entries; cache hit measured at <1ms on identical queries.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-core cache::test_l0_lru"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-core cache::test_l0_lru"
+        }
       ],
-      "dependencies": ["P3-W9-F04"],
+      "dependencies": [
+        "P3-W9-F04"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -3190,9 +4243,15 @@
       "crate": "ucil-core",
       "description": "L1 LMDB cache: serialised query results persisted in LMDB; max 100MB; TTL=300s; hit measured at <10ms; invalidated by Salsa dependency graph change.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-core cache::test_l1_lmdb"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-core cache::test_l1_lmdb"
+        }
       ],
-      "dependencies": ["P1-W2-F04", "P6-W19-F01"],
+      "dependencies": [
+        "P1-W2-F04",
+        "P6-W19-F01"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -3207,9 +4266,14 @@
       "crate": "ucil-core",
       "description": "L2 full invocation cache: per-tool result cached keyed by tool_name + normalised query + plugin versions; TTL=300s; saves 100ms-seconds on repeated expensive plugin calls.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-core cache::test_l2_invocation"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-core cache::test_l2_invocation"
+        }
       ],
-      "dependencies": ["P6-W19-F02"],
+      "dependencies": [
+        "P6-W19-F02"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -3224,9 +4288,15 @@
       "crate": "ucil-core",
       "description": "Cache invalidation tied to Salsa: when a file change invalidates a Salsa query, all cache tiers (L0/L1/L2) for dependent results are evicted atomically.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-core cache::test_salsa_invalidation"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-core cache::test_salsa_invalidation"
+        }
       ],
-      "dependencies": ["P6-W19-F03", "P1-W3-F04"],
+      "dependencies": [
+        "P6-W19-F03",
+        "P1-W3-F04"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -3239,11 +4309,16 @@
       "phase": 6,
       "week": 19,
       "crate": "ucil-core",
-      "description": "OTel full span hierarchy: all spans from \u00a715.2 implemented with correct parent-child relationships, span names matching ucil.<layer>.<operation> convention.",
+      "description": "OTel full span hierarchy: all spans from §15.2 implemented with correct parent-child relationships, span names matching ucil.<layer>.<operation> convention.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-core otel::test_span_hierarchy"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-core otel::test_span_hierarchy"
+        }
       ],
-      "dependencies": ["P0-W1-F09"],
+      "dependencies": [
+        "P0-W1-F09"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -3256,11 +4331,16 @@
       "phase": 6,
       "week": 19,
       "crate": "ucil-core",
-      "description": "OTel metrics: all 11 metrics from \u00a715.3 exported (query duration histogram, cache hit rate gauge, group duration histogram, plugin state gauge, etc.).",
+      "description": "OTel metrics: all 11 metrics from §15.3 exported (query duration histogram, cache hit rate gauge, group duration histogram, plugin state gauge, etc.).",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-core otel::test_all_metrics_exported"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-core otel::test_all_metrics_exported"
+        }
       ],
-      "dependencies": ["P6-W19-F05"],
+      "dependencies": [
+        "P6-W19-F05"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -3275,9 +4355,14 @@
       "crate": "ucil-core",
       "description": "Jaeger export via OTLP gRPC: configurable endpoint (default localhost:4317), configurable sample_rate; spans reach Jaeger on a local test instance.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-core otel::test_jaeger_export"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-core otel::test_jaeger_export"
+        }
       ],
-      "dependencies": ["P6-W19-F05"],
+      "dependencies": [
+        "P6-W19-F05"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -3292,9 +4377,14 @@
       "crate": "ucil-daemon",
       "description": "Resource limits: RSS monitoring warns at 512MB and throttles background indexing at 640MB; disk usage tracking warns at 80% of configured max (2048MB); LRU eviction on pressure.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-daemon health::test_resource_limits"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-daemon health::test_resource_limits"
+        }
       ],
-      "dependencies": ["P1-W3-F01"],
+      "dependencies": [
+        "P1-W3-F01"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -3309,9 +4399,15 @@
       "crate": "ucil-treesitter",
       "description": "Indexing benchmark suite (benches/bench_indexing.rs): criterion measures initial index time and incremental update time for fixture rust-project.",
       "acceptance_tests": [
-        {"kind": "bench", "script": "scripts/bench-indexing.sh", "assert": "incremental_update_ms<200"}
+        {
+          "kind": "bench",
+          "script": "scripts/bench-indexing.sh",
+          "assert": "incremental_update_ms<200"
+        }
       ],
-      "dependencies": ["P1-W2-F04"],
+      "dependencies": [
+        "P1-W2-F04"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -3326,9 +4422,16 @@
       "crate": "ucil-daemon",
       "description": "Query latency benchmark: p95 for all 22 MCP tools under sustained load is <500ms; measured by criterion against fixture projects with warm cache.",
       "acceptance_tests": [
-        {"kind": "bench", "script": "scripts/bench-query.sh", "assert": "p95_query_ms<500"}
+        {
+          "kind": "bench",
+          "script": "scripts/bench-query.sh",
+          "assert": "p95_query_ms<500"
+        }
       ],
-      "dependencies": ["P6-W19-F04", "P3-W9-F03"],
+      "dependencies": [
+        "P6-W19-F04",
+        "P3-W9-F03"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -3341,11 +4444,17 @@
       "phase": 6,
       "week": 20,
       "crate": "ucil-core",
-      "description": "Token efficiency benchmark: UCIL enriched response provides \u22652\u00d7 more unique relevant information per output token than naive ripgrep + file-cat baseline.",
+      "description": "Token efficiency benchmark: UCIL enriched response provides ≥2× more unique relevant information per output token than naive ripgrep + file-cat baseline.",
       "acceptance_tests": [
-        {"kind": "bench", "script": "scripts/bench-token-efficiency.sh", "assert": "relevance_ratio>=2.0"}
+        {
+          "kind": "bench",
+          "script": "scripts/bench-token-efficiency.sh",
+          "assert": "relevance_ratio>=2.0"
+        }
       ],
-      "dependencies": ["P3-W10-F09"],
+      "dependencies": [
+        "P3-W10-F09"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -3360,9 +4469,15 @@
       "crate": "ucil-daemon",
       "description": "Memory usage benchmark: daemon RSS remains <512MB under a sustained 1-hour load test with 5 concurrent agent sessions and background indexing active.",
       "acceptance_tests": [
-        {"kind": "bench", "script": "scripts/bench-memory.sh", "assert": "peak_rss_mb<512"}
+        {
+          "kind": "bench",
+          "script": "scripts/bench-memory.sh",
+          "assert": "peak_rss_mb<512"
+        }
       ],
-      "dependencies": ["P6-W19-F08"],
+      "dependencies": [
+        "P6-W19-F08"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -3375,11 +4490,17 @@
       "phase": 6,
       "week": 20,
       "crate": "ucil-core",
-      "description": "Cache hit rate benchmark: after 10-minute warm-up, L0 hit rate \u226570% and L1 hit rate \u226585% for a realistic query replay trace.",
+      "description": "Cache hit rate benchmark: after 10-minute warm-up, L0 hit rate ≥70% and L1 hit rate ≥85% for a realistic query replay trace.",
       "acceptance_tests": [
-        {"kind": "bench", "script": "scripts/bench-cache.sh", "assert": "l0_hit_rate>=0.70"}
+        {
+          "kind": "bench",
+          "script": "scripts/bench-cache.sh",
+          "assert": "l0_hit_rate>=0.70"
+        }
       ],
-      "dependencies": ["P6-W19-F04"],
+      "dependencies": [
+        "P6-W19-F04"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -3392,11 +4513,17 @@
       "phase": 6,
       "week": 20,
       "crate": "ucil-daemon",
-      "description": "Multi-agent contention benchmark: 5 concurrent agent sessions achieve \u226550% of single-agent throughput with p99 latency <2000ms.",
+      "description": "Multi-agent contention benchmark: 5 concurrent agent sessions achieve ≥50% of single-agent throughput with p99 latency <2000ms.",
       "acceptance_tests": [
-        {"kind": "bench", "script": "scripts/bench-multiagent.sh", "assert": "throughput_ratio>=0.50"}
+        {
+          "kind": "bench",
+          "script": "scripts/bench-multiagent.sh",
+          "assert": "throughput_ratio>=0.50"
+        }
       ],
-      "dependencies": ["P3.5-W13-F07"],
+      "dependencies": [
+        "P3.5-W13-F07"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -3409,11 +4536,17 @@
       "phase": 6,
       "week": 20,
       "crate": "ucil-embeddings",
-      "description": "Embedding throughput benchmark phase-6: CodeRankEmbed \u226550 embeddings/sec CPU, Qwen3-Embedding \u226510 embeddings/sec GPU (if GPU available), measured with criterion.",
+      "description": "Embedding throughput benchmark phase-6: CodeRankEmbed ≥50 embeddings/sec CPU, Qwen3-Embedding ≥10 embeddings/sec GPU (if GPU available), measured with criterion.",
       "acceptance_tests": [
-        {"kind": "bench", "script": "scripts/bench-embeddings.sh", "assert": "cpu_emb_per_sec>=50"}
+        {
+          "kind": "bench",
+          "script": "scripts/bench-embeddings.sh",
+          "assert": "cpu_emb_per_sec>=50"
+        }
       ],
-      "dependencies": ["P2-W8-F02"],
+      "dependencies": [
+        "P2-W8-F02"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -3428,9 +4561,15 @@
       "crate": "ucil-lsp-diagnostics",
       "description": "Serena + LSP diagnostics bridge latency benchmark: p95 for textDocument/diagnostic fetch per language is <500ms on a warm LSP server.",
       "acceptance_tests": [
-        {"kind": "bench", "script": "scripts/bench-lsp.sh", "assert": "p95_diag_fetch_ms<500"}
+        {
+          "kind": "bench",
+          "script": "scripts/bench-lsp.sh",
+          "assert": "p95_diag_fetch_ms<500"
+        }
       ],
-      "dependencies": ["P1-W5-F04"],
+      "dependencies": [
+        "P1-W5-F04"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -3445,9 +4584,16 @@
       "crate": "scripts",
       "description": "Benchmark regression CI: compares current benchmark results against stored baseline; fails CI if any p95 metric regresses by >20%.",
       "acceptance_tests": [
-        {"kind": "script", "script": "scripts/verify/P6-W20-F09.sh", "exit": 0}
+        {
+          "kind": "script",
+          "script": "scripts/verify/P6-W20-F09.sh",
+          "exit": 0
+        }
       ],
-      "dependencies": ["P6-W20-F02", "P6-W20-F04"],
+      "dependencies": [
+        "P6-W20-F02",
+        "P6-W20-F04"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -3462,9 +4608,15 @@
       "crate": "docs",
       "description": "docs/benchmarks.md: full benchmark report with methodology, hardware environment, results tables for all benchmarks, and comparison baseline.",
       "acceptance_tests": [
-        {"kind": "script", "script": "scripts/verify/P6-W20-F10.sh", "exit": 0}
+        {
+          "kind": "script",
+          "script": "scripts/verify/P6-W20-F10.sh",
+          "exit": 0
+        }
       ],
-      "dependencies": ["P6-W20-F09"],
+      "dependencies": [
+        "P6-W20-F09"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -3479,9 +4631,14 @@
       "crate": "tests/integration",
       "description": "OTel observability integration test suite (tests/integration/test_otel.rs): span assertion library verifies correct span hierarchy, names, attributes, and metric values.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "--test test_otel"}
+        {
+          "kind": "cargo_test",
+          "selector": "--test test_otel"
+        }
       ],
-      "dependencies": ["P6-W19-F06"],
+      "dependencies": [
+        "P6-W19-F06"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -3496,9 +4653,16 @@
       "crate": "tests/integration",
       "description": "Resilience integration test suite completion (tests/integration/test_resilience.rs): plugin crash recovery, SQLite corruption handling, missing dependency graceful degradation, and progressive startup all pass.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "--test test_resilience"}
+        {
+          "kind": "cargo_test",
+          "selector": "--test test_resilience"
+        }
       ],
-      "dependencies": ["P6-W19-F08", "P2-W6-F04", "P1-W3-F09"],
+      "dependencies": [
+        "P6-W19-F08",
+        "P2-W6-F04",
+        "P1-W3-F09"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -3513,9 +4677,15 @@
       "crate": "plugins/context/dbhub",
       "description": "DBHub MCP plugin installed; universal database schema access returns table definitions and relationships for a test SQLite database.",
       "acceptance_tests": [
-        {"kind": "script", "script": "scripts/verify/P7-W21-F01.sh", "exit": 0}
+        {
+          "kind": "script",
+          "script": "scripts/verify/P7-W21-F01.sh",
+          "exit": 0
+        }
       ],
-      "dependencies": ["P2-W6-F01"],
+      "dependencies": [
+        "P2-W6-F01"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -3530,9 +4700,15 @@
       "crate": "plugins/context/prisma-mcp",
       "description": "Prisma MCP plugin installed; migration management queries return pending migration list and schema diff for a Prisma-based fixture project.",
       "acceptance_tests": [
-        {"kind": "script", "script": "scripts/verify/P7-W21-F02.sh", "exit": 0}
+        {
+          "kind": "script",
+          "script": "scripts/verify/P7-W21-F02.sh",
+          "exit": 0
+        }
       ],
-      "dependencies": ["P2-W6-F01"],
+      "dependencies": [
+        "P2-W6-F01"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -3547,9 +4723,17 @@
       "crate": "ucil-daemon",
       "description": "Database tools wired into G5 (schema as context) and G4 (database entity relationships in architecture graph): DBHub and Prisma MCP results integrated.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-daemon executor::test_database_tools_in_g5_g4"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-daemon executor::test_database_tools_in_g5_g4"
+        }
       ],
-      "dependencies": ["P7-W21-F01", "P7-W21-F02", "P3-W10-F04", "P3-W9-F09"],
+      "dependencies": [
+        "P7-W21-F01",
+        "P7-W21-F02",
+        "P3-W10-F04",
+        "P3-W9-F09"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -3564,9 +4748,14 @@
       "crate": "ucil-daemon",
       "description": "query_database MCP tool full implementation: schema inspection, migration status, and query analysis routed to G5/G4 database tools.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-daemon server::test_query_database_tool"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-daemon server::test_query_database_tool"
+        }
       ],
-      "dependencies": ["P7-W21-F03"],
+      "dependencies": [
+        "P7-W21-F03"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -3581,9 +4770,15 @@
       "crate": "plugins/platform/docker-mcp",
       "description": "Docker MCP P1 plugin installed; container list, Dockerfile analysis, and image inspection queries succeed; three-tier safety model verified.",
       "acceptance_tests": [
-        {"kind": "script", "script": "scripts/verify/P7-W21-F05.sh", "exit": 0}
+        {
+          "kind": "script",
+          "script": "scripts/verify/P7-W21-F05.sh",
+          "exit": 0
+        }
       ],
-      "dependencies": ["P2-W6-F01"],
+      "dependencies": [
+        "P2-W6-F01"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -3598,9 +4793,15 @@
       "crate": "plugins/platform/terraform-mcp",
       "description": "Terraform MCP plugin installed; IaC provider docs and module search queries succeed for a fixture Terraform project.",
       "acceptance_tests": [
-        {"kind": "script", "script": "scripts/verify/P7-W21-F06.sh", "exit": 0}
+        {
+          "kind": "script",
+          "script": "scripts/verify/P7-W21-F06.sh",
+          "exit": 0
+        }
       ],
-      "dependencies": ["P2-W6-F01"],
+      "dependencies": [
+        "P2-W6-F01"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -3615,9 +4816,15 @@
       "crate": "plugins/platform/sentry-mcp",
       "description": "Sentry MCP plugin installed; runtime error query, trace lookup, and performance data retrieval succeed against a Sentry test project.",
       "acceptance_tests": [
-        {"kind": "script", "script": "scripts/verify/P7-W21-F07.sh", "exit": 0}
+        {
+          "kind": "script",
+          "script": "scripts/verify/P7-W21-F07.sh",
+          "exit": 0
+        }
       ],
-      "dependencies": ["P2-W6-F01"],
+      "dependencies": [
+        "P2-W6-F01"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -3632,9 +4839,14 @@
       "crate": "ucil-daemon",
       "description": "check_runtime MCP tool full implementation: queries Sentry/Datadog for errors, traces, and performance data for the current project via G6 platform tools.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-daemon server::test_check_runtime_tool"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-daemon server::test_check_runtime_tool"
+        }
       ],
-      "dependencies": ["P7-W21-F07"],
+      "dependencies": [
+        "P7-W21-F07"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -3649,9 +4861,15 @@
       "crate": "plugins/architecture/gitnexus",
       "description": "GitNexus plugin installed; blast radius and git-diff impact mapping for the fixture rust-project returns affected modules; registered as G4 alternative to CodeGraphContext.",
       "acceptance_tests": [
-        {"kind": "script", "script": "scripts/verify/P7-W21-F09.sh", "exit": 0}
+        {
+          "kind": "script",
+          "script": "scripts/verify/P7-W21-F09.sh",
+          "exit": 0
+        }
       ],
-      "dependencies": ["P2-W6-F01"],
+      "dependencies": [
+        "P2-W6-F01"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -3666,9 +4884,14 @@
       "crate": "ucil-daemon",
       "description": "refactor MCP tool: safe cross-file refactoring using Serena replace_symbol_body for body replacement and find_references for call-site updates; atomic rollback on failure.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-daemon server::test_refactor_tool"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-daemon server::test_refactor_tool"
+        }
       ],
-      "dependencies": ["P1-W5-F02"],
+      "dependencies": [
+        "P1-W5-F02"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -3683,9 +4906,15 @@
       "crate": "docs",
       "description": "docs/architecture.md written: full architecture documentation covering all 7 layers, 8 tool groups, query pipeline, agent layer, and storage schema with diagrams.",
       "acceptance_tests": [
-        {"kind": "script", "script": "scripts/verify/P8-W22-F01.sh", "exit": 0}
+        {
+          "kind": "script",
+          "script": "scripts/verify/P8-W22-F01.sh",
+          "exit": 0
+        }
       ],
-      "dependencies": ["P5-W18-F04"],
+      "dependencies": [
+        "P5-W18-F04"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -3700,9 +4929,15 @@
       "crate": "docs",
       "description": "docs/plugin-development.md written: plugin.toml schema reference, lifecycle state machine, activation rules, health check protocol, and two worked examples.",
       "acceptance_tests": [
-        {"kind": "script", "script": "scripts/verify/P8-W22-F02.sh", "exit": 0}
+        {
+          "kind": "script",
+          "script": "scripts/verify/P8-W22-F02.sh",
+          "exit": 0
+        }
       ],
-      "dependencies": ["P2-W6-F02"],
+      "dependencies": [
+        "P2-W6-F02"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -3717,9 +4952,15 @@
       "crate": "docs",
       "description": "docs/host-adapter-guide.md written: per-host installation and configuration guide for Claude Code, Codex CLI, Cursor, Cline, Aider, and Ollama.",
       "acceptance_tests": [
-        {"kind": "script", "script": "scripts/verify/P8-W22-F03.sh", "exit": 0}
+        {
+          "kind": "script",
+          "script": "scripts/verify/P8-W22-F03.sh",
+          "exit": 0
+        }
       ],
-      "dependencies": ["P4-W15-F06"],
+      "dependencies": [
+        "P4-W15-F06"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -3734,9 +4975,15 @@
       "crate": "docs",
       "description": "docs/configuration.md written: complete ucil.toml reference documenting all configuration keys with types, defaults, and examples.",
       "acceptance_tests": [
-        {"kind": "script", "script": "scripts/verify/P8-W22-F04.sh", "exit": 0}
+        {
+          "kind": "script",
+          "script": "scripts/verify/P8-W22-F04.sh",
+          "exit": 0
+        }
       ],
-      "dependencies": ["P0-W1-F03"],
+      "dependencies": [
+        "P0-W1-F03"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -3751,9 +4998,15 @@
       "crate": "docs",
       "description": "docs/observability.md written: OTel span hierarchy reference, metrics catalogue, Jaeger setup instructions, and MCPcat integration guide.",
       "acceptance_tests": [
-        {"kind": "script", "script": "scripts/verify/P8-W22-F05.sh", "exit": 0}
+        {
+          "kind": "script",
+          "script": "scripts/verify/P8-W22-F05.sh",
+          "exit": 0
+        }
       ],
-      "dependencies": ["P6-W19-F07"],
+      "dependencies": [
+        "P6-W19-F07"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -3768,9 +5021,15 @@
       "crate": "docs",
       "description": "docs/serena-diagnostics-guide.md written: Serena + LSP diagnostics bridge setup, language coverage table, degraded mode behaviour, and troubleshooting FAQ.",
       "acceptance_tests": [
-        {"kind": "script", "script": "scripts/verify/P8-W22-F06.sh", "exit": 0}
+        {
+          "kind": "script",
+          "script": "scripts/verify/P8-W22-F06.sh",
+          "exit": 0
+        }
       ],
-      "dependencies": ["P1-W5-F07"],
+      "dependencies": [
+        "P1-W5-F07"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -3785,9 +5044,15 @@
       "crate": "docs",
       "description": "docs/claude-code-integration.md written: Claude Code plugin install guide, skill and hook reference, subagent descriptions, and example session transcripts.",
       "acceptance_tests": [
-        {"kind": "script", "script": "scripts/verify/P8-W22-F07.sh", "exit": 0}
+        {
+          "kind": "script",
+          "script": "scripts/verify/P8-W22-F07.sh",
+          "exit": 0
+        }
       ],
-      "dependencies": ["P4-W14-F11"],
+      "dependencies": [
+        "P4-W14-F11"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -3802,9 +5067,15 @@
       "crate": "docs",
       "description": "docs/benchmarks.md final: updated benchmark report with production results, environment details, methodology, and comparison against Aider and Cursor baselines.",
       "acceptance_tests": [
-        {"kind": "script", "script": "scripts/verify/P8-W22-F08.sh", "exit": 0}
+        {
+          "kind": "script",
+          "script": "scripts/verify/P8-W22-F08.sh",
+          "exit": 0
+        }
       ],
-      "dependencies": ["P6-W20-F10"],
+      "dependencies": [
+        "P6-W20-F10"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -3819,9 +5090,14 @@
       "crate": "ucil-core",
       "description": "Schema migration system: versioned SQL migration runner with auto-backup before each migration; migration history tracked in schema_version table.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-core schema_migration::test_versioned_runner"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-core schema_migration::test_versioned_runner"
+        }
       ],
-      "dependencies": ["P0-W1-F07"],
+      "dependencies": [
+        "P0-W1-F07"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -3836,9 +5112,14 @@
       "crate": "ucil-cli",
       "description": "ucil export-brain command: exports knowledge.db, memory.db, history.db, ucil.toml, and plugin manifests to a tar.gz archive; excludes branch indexes and session data.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-cli commands::export_brain::"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-cli commands::export_brain::"
+        }
       ],
-      "dependencies": ["P1-W4-F01"],
+      "dependencies": [
+        "P1-W4-F01"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -3853,9 +5134,14 @@
       "crate": "ucil-cli",
       "description": "ucil import-brain command: merge mode deduplicates entities and observations; replace mode overwrites shared knowledge; both modes preserve local branch indexes.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-cli commands::import_brain::"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-cli commands::import_brain::"
+        }
       ],
-      "dependencies": ["P8-W23-F02"],
+      "dependencies": [
+        "P8-W23-F02"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -3870,9 +5156,14 @@
       "crate": "ucil-cli",
       "description": "ucil backup / ucil restore commands: full daemon state backup (compressed tar.gz) and restore with integrity check; max 3 rolling backups retained.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-cli commands::backup::"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-cli commands::backup::"
+        }
       ],
-      "dependencies": ["P8-W23-F02"],
+      "dependencies": [
+        "P8-W23-F02"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -3887,9 +5178,15 @@
       "crate": "ucil-daemon",
       "description": "run_tests MCP tool full implementation: executes tests for changed code via G8 test runner, returns results[], coverage_for_changed_lines, and untested_functions[].",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "-p ucil-daemon server::test_run_tests_tool"}
+        {
+          "kind": "cargo_test",
+          "selector": "-p ucil-daemon server::test_run_tests_tool"
+        }
       ],
-      "dependencies": ["P3-W11-F09", "P5-W16-F11"],
+      "dependencies": [
+        "P3-W11-F09",
+        "P5-W16-F11"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -3904,9 +5201,14 @@
       "crate": "tests/integration",
       "description": "Progressive startup integration test suite (tests/integration/test_progressive_startup.rs): verifies MCP server responds within 2s, priority file indexed within 30s, full index complete within 5min.",
       "acceptance_tests": [
-        {"kind": "cargo_test", "selector": "--test test_progressive_startup"}
+        {
+          "kind": "cargo_test",
+          "selector": "--test test_progressive_startup"
+        }
       ],
-      "dependencies": ["P1-W3-F08"],
+      "dependencies": [
+        "P1-W3-F08"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -3921,9 +5223,15 @@
       "crate": "scripts",
       "description": "Install script (scripts/install.sh): one-line curl-pipe install downloads the correct binary for the current OS/arch, sets up .ucil/ in the home directory, and runs ucil init.",
       "acceptance_tests": [
-        {"kind": "script", "script": "scripts/verify/P8-W24-F01.sh", "exit": 0}
+        {
+          "kind": "script",
+          "script": "scripts/verify/P8-W24-F01.sh",
+          "exit": 0
+        }
       ],
-      "dependencies": ["P0-W1-F03"],
+      "dependencies": [
+        "P0-W1-F03"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -3938,9 +5246,15 @@
       "crate": "plugin",
       "description": "Claude Code plugin published: GitHub release tagged v0.1.0 contains plugin.json, .mcp.json, agents/, skills/, hooks/, and install instructions.",
       "acceptance_tests": [
-        {"kind": "script", "script": "scripts/verify/P8-W24-F02.sh", "exit": 0}
+        {
+          "kind": "script",
+          "script": "scripts/verify/P8-W24-F02.sh",
+          "exit": 0
+        }
       ],
-      "dependencies": ["P4-W14-F11"],
+      "dependencies": [
+        "P4-W14-F11"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -3953,11 +5267,18 @@
       "phase": 8,
       "week": 24,
       "crate": "docs",
-      "description": "Public v0.1.0 release: README.md contains badges (build, license, stars), architecture screenshot, benchmark highlights, and quick-start in \u22645 steps.",
+      "description": "Public v0.1.0 release: README.md contains badges (build, license, stars), architecture screenshot, benchmark highlights, and quick-start in ≤5 steps.",
       "acceptance_tests": [
-        {"kind": "script", "script": "scripts/verify/P8-W24-F03.sh", "exit": 0}
+        {
+          "kind": "script",
+          "script": "scripts/verify/P8-W24-F03.sh",
+          "exit": 0
+        }
       ],
-      "dependencies": ["P8-W22-F01", "P6-W20-F10"],
+      "dependencies": [
+        "P8-W22-F01",
+        "P6-W20-F10"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
@@ -3972,9 +5293,15 @@
       "crate": "docs",
       "description": "Submission to awesome-mcp-servers, awesome-claude-mcp, and related MCP ecosystem lists completed; at least one merged submission PR link committed to docs/.",
       "acceptance_tests": [
-        {"kind": "script", "script": "scripts/verify/P8-W24-F04.sh", "exit": 0}
+        {
+          "kind": "script",
+          "script": "scripts/verify/P8-W24-F04.sh",
+          "exit": 0
+        }
       ],
-      "dependencies": ["P8-W24-F03"],
+      "dependencies": [
+        "P8-W24-F03"
+      ],
       "passes": false,
       "last_verified_ts": null,
       "last_verified_by": null,
