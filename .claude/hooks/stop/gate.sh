@@ -18,6 +18,12 @@ if [[ "${CLAUDE_STOP_HOOK_ACTIVE:-}" == "1" ]]; then
   exit 0
 fi
 
+# Bypass all Stop checks during one-shot seeding: the planner writes
+# feature-list.json but leaves it uncommitted for human review.
+if [[ "${UCIL_SEEDING:-}" == "1" ]]; then
+  exit 0
+fi
+
 # --- Check 1: dirty tree ---
 if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   DIRTY=$(git status --porcelain 2>/dev/null | wc -l)
