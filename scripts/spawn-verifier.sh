@@ -30,8 +30,17 @@ if [[ -z "${ANTHROPIC_API_KEY:-}" && -f .env ]]; then
   set +a
 fi
 
-# Generate a fresh session id
-NEW_SESSION="vrf-$(date -u +%Y%m%dT%H%M%SZ)-$RANDOM"
+# Generate a fresh session id — Claude CLI requires a valid UUID.
+if command -v uuidgen >/dev/null 2>&1; then
+  NEW_SESSION=$(uuidgen)
+else
+  # Fallback: RFC 4122 v4 UUID from /proc/sys/kernel/random/uuid
+  NEW_SESSION=$(cat /proc/sys/kernel/random/uuid 2>/dev/null)
+fi
+if [[ -z "$NEW_SESSION" ]]; then
+  echo "ERROR: could not generate a UUID (install uuid-runtime)" >&2
+  exit 4
+fi
 MARKER_FILE="ucil-build/.verifier-lock"
 
 echo "$NEW_SESSION" > "$MARKER_FILE"
