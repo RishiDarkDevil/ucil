@@ -97,7 +97,7 @@ Invoke /replan or root-cause-finder." > "ucil-build/escalations/$(date -u +%Y%m%
   EXISTING_WOS=$(ls ucil-build/work-orders/*.json 2>/dev/null | xargs -I{} basename {} .json | paste -sd, - || echo "none")
   PASSING_IN_PHASE=$(jq -r --arg p "$PHASE" '[.features[] | select((.phase|tostring)==$p) | select(.passes==true) | .id] | join(",")' ucil-build/feature-list.json 2>/dev/null || echo "")
   # List feature_ids already claimed by any work-order (regardless of status)
-  CLAIMED_FEATS=$(jq -s '[.[] | (.feature_ids // .features // [])[]] | unique | join(",")' ucil-build/work-orders/*.json 2>/dev/null || echo "")
+  CLAIMED_FEATS=$(jq -rs '[.[] | (.feature_ids // .features // [])[]] | unique | join(",")' ucil-build/work-orders/*.json 2>/dev/null || echo "")
 
   PLAN_PROMPT="You are the UCIL planner. Phase: $PHASE.
 
