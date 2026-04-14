@@ -49,3 +49,15 @@ WO-0002 implementation is sound.  No stub, no skip, no ignored test.  This
 escalation is purely administrative — the stop-hook cannot distinguish "gate
 incomplete because work is in progress" from "gate incomplete because something
 is broken".
+
+---
+
+## Resolution
+
+Resolved 2026-04-15T17:30Z: WO-0002 verifier retry (session
+266e9762) flipped P0-W1-F02, P0-W1-F07, P0-W1-F09 to passes=true
+and auto-merged into main at commit d78f59e. Gate state is now
+5/14 features green for phase 0 — still expected-incomplete,
+which is normal mid-phase.
+
+resolved: true

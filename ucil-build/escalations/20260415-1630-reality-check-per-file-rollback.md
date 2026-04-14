@@ -5,7 +5,7 @@ created_at: 2026-04-15T16:30:00Z
 created_by: verifier-266e9762-c7ef-48d6-a620-38dac16056fa
 work_order: WO-0002
 requires_planner_action: true
-resolved: false
+resolved: true
 ---
 
 # scripts/reality-check.sh: per-file rollback needed for multi-commit features
