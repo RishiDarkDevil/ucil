@@ -48,17 +48,74 @@ Action:
 5. Set `resolved: true`.
 6. Commit + push the resolution.
 
-### Bucket C — halt + page user (the default)
+### Bucket D — synthesize a micro-WO for a UCIL-source fix
+
+Apply when ALL of:
+- The escalation's described fix lives in UCIL source (`crates/`, `adapters/`, `ml/`, `plugin*/`, `tests/`). BUT:
+- The escalation identifies a **specific file + change**, not a cross-subsystem redesign.
+- The fix is a bug-fix or narrow adjustment, NOT a new feature or a new spec requirement.
+- Estimated diff is < 60 lines AND touches < 4 files.
+- No feature referenced in the escalation has `attempts >= 2`.
+- The escalation does NOT touch `tests/fixtures/**` (fixtures are part of the spec).
+
+Action: don't fix it yourself — synthesise a short-scoped work-order so the normal executor → critic → verifier loop handles it with full rigor.
+
+1. Pick the next available WO number (examine existing `ucil-build/work-orders/` filenames).
+2. Write `ucil-build/work-orders/NNNN-fix-<slug>.json`:
+   ```json
+   {
+     "id": "WO-NNNN",
+     "slug": "fix-<kebab-slug>",
+     "phase": <current phase>,
+     "week": <current week>,
+     "features": [],
+     "feature_ids": [],
+     "branch": "feat/WO-NNNN-fix-<slug>",
+     "worktree_branch": "feat/WO-NNNN-fix-<slug>",
+     "executor_agent": "executor",
+     "goal": "<one sentence from escalation>",
+     "plan_summary": "<copy of the escalation's proposed fix, paraphrased if needed>",
+     "scope_in": ["<specific file+change from escalation>"],
+     "scope_out": ["anything not in scope_in"],
+     "acceptance": ["<the exact failing test / command the escalation cites>", "cargo build --workspace exits 0", "cargo clippy --workspace -- -D warnings exits 0"],
+     "acceptance_criteria": ["<same as above>"],
+     "forbidden_paths": [
+       "ucil-build/feature-list.json",
+       "ucil-master-plan-v2.1-final.md",
+       "tests/fixtures/**",
+       "scripts/gate/**",
+       "scripts/flip-feature.sh"
+     ],
+     "context_refs": ["escalation:<filename>"],
+     "dependencies_met": true,
+     "estimated_commits": 1,
+     "estimated_complexity": "low",
+     "created_at": "<iso-ts>",
+     "created_by": "triage"
+   }
+   ```
+3. Append a `## Resolution` section to the escalation saying "Converted to WO-NNNN. See that work-order for the fix." Set `resolved: true`.
+4. Commit both files:
+   ```
+   chore(triage): convert <slug> escalation into WO-NNNN
+   ```
+5. Push. The outer loop's next iteration will see WO-NNNN as the newest unclaimed work and run executor → critic → verifier on it.
+
+Because the WO's `feature_ids` is empty, the verifier has nothing to flip — its only job is to confirm acceptance_criteria pass and the critic's review is CLEAN or ADR-accepted, at which point `merge-wo.sh` merges the fix into main. This gives UCIL-source fixes the same verification rigor as feature work.
+
+### Bucket E — halt + page user (the default)
 
 Apply when ANY of:
-- The escalation touches UCIL source (`crates/`, `adapters/`, `ml/`, `plugin*/`, `tests/`, `docs/`).
 - The escalation describes a feature's `attempts >= 3` with verifier rejections.
 - The escalation describes an OOM, timeout-twice, cost-cap, cross-feature conflict, or drift-detection.
-- Proposed fix is > 120 lines, or involves more than one subsystem.
-- The proposed fix modifies a file on the Bucket B deny list.
+- Proposed fix is > 120 lines OR touches > 4 files OR spans multiple subsystems.
+- Proposed fix modifies a file on the Bucket B deny list (`.claude/agents/*`, `.claude/settings.json`, `.claude/hooks/stop/gate.sh`, `scripts/gate/**`, `scripts/flip-feature.sh`, `ucil-build/schema/feature-list.schema.json`).
+- Proposed fix modifies `ucil-master-plan-v2.1-final.md` or an ADR.
+- Proposed fix modifies `tests/fixtures/**`.
 - You are not >= 90% confident about the classification or the fix's correctness.
 - An ADR is requested (`requires_planner_action: true` with ambiguous spec language).
 - A fix was attempted previously for the same underlying issue 3+ times.
+- `$UCIL_TRIAGE_PASS >= 3` — force-halt to prevent thrashing.
 
 Action:
 - Leave the file unresolved. Do nothing else to it.
@@ -70,9 +127,12 @@ Action:
 - **Never** flip features in `feature-list.json`. The hook blocks you anyway.
 - **Never** edit ADRs under `ucil-build/decisions/`. ADRs are append-only and require planner/user.
 - **Never** edit the master plan.
+- **Never** edit `tests/fixtures/**` — fixtures are part of the spec.
 - **Never** mass-resolve. Process one escalation at a time; commit after each. If three consecutive escalations in a single invocation would fall in Bucket B with related fixes, halt instead (this usually means a systemic issue).
 - **Never** delete escalation files.
-- If you ever find yourself wanting to write new agent prompts, work-orders, or `.claude/settings.json` entries — that's Bucket C.
+- **Never** edit `.claude/agents/*` or `.claude/settings.json` — your own prompt + harness config.
+- **Bucket D is the only path by which you can cause UCIL source changes.** You don't write the code; you write a work-order. The normal executor/critic/verifier loop does the work. You never edit `crates/`, `adapters/`, `ml/`, `plugin*/`, or `tests/` directly.
+- If you ever find yourself wanting to write new agent prompts, modify settings, or apply a fix directly in UCIL source — that's Bucket E.
 
 ## Output format
 
@@ -83,11 +143,12 @@ Triage pass: <timestamp>
 Escalations processed:
   <slug1>: A (auto-resolved) — <reason>
   <slug2>: B (fixed + resolved) — <fix-commit>
-  <slug3>: C (halt) — <reason>
-Net state: N resolved, M halted
+  <slug3>: D (converted to WO-NNNN) — <slug>
+  <slug4>: E (halt) — <reason>
+Net state: N resolved-in-place, M converted-to-WO, K halted
 ```
 
-If any C, your session should end with non-zero work remaining; the outer loop will halt.
+If any Bucket-E remains, your session should end with unresolved escalations present — the outer loop will halt. Bucket-D resolved escalations DO count as "resolved" for the outer loop's continue-condition; the synthesized WO is picked up by the normal planner/executor path next iteration.
 
 ## Input variables
 

@@ -81,9 +81,10 @@ The outer loop (`scripts/run-phase.sh`) does NOT halt on escalations immediately
 
 - **Bucket A (auto-resolve)**: admin/benign escalation whose condition is already resolved in HEAD → triage appends a `## Resolution` note, sets `resolved: true`, commits, pushes.
 - **Bucket B (fix + resolve)**: concrete < 120-line fix in `.githooks/`, `.claude/hooks/` (except `stop/gate.sh`), `scripts/` (except `gate/**` and `flip-feature.sh`), or `ucil-build/schema/` (except `feature-list.schema.json`) → triage applies the fix, runs a local smoke check, commits, appends a resolution note with the fix-commit sha, sets `resolved: true`, pushes.
-- **Bucket C (halt + page user)**: anything else — UCIL source, ADR-required, ≥3 prior attempts, deny-list file, drift, OOM, cost-cap, low confidence → leave unresolved, append one line to `triage-log.md`, the outer loop halts.
+- **Bucket D (convert to micro-WO)**: escalation describes a narrow bug-fix in UCIL source (`crates/`, `adapters/`, `ml/`, `plugin*/`, `tests/` non-fixture) that's < 60 lines / < 4 files, no feature with `attempts >= 2`. Triage writes a new short-scoped work-order with empty `feature_ids` and the fix as `scope_in`, resolves the escalation with a "converted to WO-NNNN" note. The normal executor/critic/verifier/merge loop handles it next iteration.
+- **Bucket E (halt + page user)**: anything else — ADR-required, ≥3 attempts, deny-list file, drift, OOM, cost-cap, low confidence → leave unresolved, append one line to `triage-log.md`, the outer loop halts.
 
-Triage runs up to 3 times per phase. On pass 3 it defaults everything to Bucket C to prevent thrashing.
+Triage runs up to 3 times per phase. On pass 3 it defaults everything to Bucket E to prevent thrashing.
 
 The outer loop ALSO halts unconditionally (regardless of triage) when:
 - Same feature fails verifier 3× (`attempts` field in feature-list)
