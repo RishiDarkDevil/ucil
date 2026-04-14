@@ -1,0 +1,70 @@
+{
+  "id": "WO-0002",
+  "slug": "ucil-core-foundations",
+  "phase": 0,
+  "week": 1,
+  "features": ["P0-W1-F02", "P0-W1-F07", "P0-W1-F09"],
+  "feature_ids": ["P0-W1-F02", "P0-W1-F07", "P0-W1-F09"],
+  "branch": "feat/WO-0002-ucil-core-foundations",
+  "worktree_branch": "feat/WO-0002-ucil-core-foundations",
+  "executor_agent": "executor",
+  "goal": "Implement the three ucil-core skeleton submodules: core type system (types.rs), schema version tracking (schema_migration.rs), and OpenTelemetry stdout exporter (otel.rs).",
+  "plan_summary": "All three features live in crates/ucil-core/ and share only the P0-W1-F01 prerequisite. Add the required Cargo dependencies (serde+derive, rusqlite, opentelemetry_sdk+opentelemetry-stdout). Create each submodule with real logic (no stubs, no todo!()), expose them from lib.rs as re-exports, and back each with unit tests that satisfy the exact cargo-test selectors in feature-list.json. Commit one module at a time (deps → impl → tests) to stay within the 50-line-per-commit target.",
+  "scope_in": [
+    "crates/ucil-core/Cargo.toml — add workspace-pinned or inline deps: `serde` (features=[\"derive\"]), `rusqlite` (features=[\"bundled\"]), `opentelemetry` (API crate), `opentelemetry_sdk` (with `trace` feature), `opentelemetry-stdout` (with `trace` feature). All versions pinned; add to [workspace.dependencies] in root Cargo.toml if not already there.",
+    "crates/ucil-core/src/types.rs — define all seven public types with full fields: `QueryPlan` (intent, domains, sub_queries, knowledge_gaps, inferred_context, fallback_mode), `Symbol` (name, kind, file_path, line, col, language, doc_comment), `Diagnostic` (file_path, line, col, severity, code, message, source), `KnowledgeEntry` (id, symbol, content, embedding_vec, created_at, updated_at, meta), `ToolGroup` (id, name, tools, parallelism), `CeqpParams` (reason, target, session_id, branch, depth_limit, timeout_ms), `ResponseEnvelope` (request_id, tool_name, result, meta, degraded_plugins, indexing_status, otel_trace_id). Use `serde::{Serialize, Deserialize}` on all types. Use `#[derive(Debug, Clone, PartialEq)]` where appropriate. Every public field documented with rustdoc.",
+    "crates/ucil-core/src/schema_migration.rs — implement: `pub const SCHEMA_VERSION: &str = \"1.0.0\"`, `pub fn stamp_version(db_path: &std::path::Path) -> Result<(), crate::schema_migration::MigrationError>` (opens/creates SQLite via rusqlite, creates `schema_versions` table if absent, inserts current SCHEMA_VERSION row with timestamp), `pub fn check_version(db_path: &std::path::Path) -> Result<(), crate::schema_migration::MigrationError>` (reads latest stamped version, returns `Err(MigrationError::Downgrade { ... })` if stamped version > SCHEMA_VERSION, else Ok). Define `pub enum MigrationError` with `thiserror::Error`.",
+    "crates/ucil-core/src/otel.rs — implement: `pub fn init_tracer() -> opentelemetry_sdk::trace::Tracer` that installs a `SimpleSpanProcessor` wired to `opentelemetry_stdout::SpanExporter`, sets the global tracer provider, and returns a named tracer (`ucil.core`). Also expose `pub fn shutdown_tracer()` that calls `global::shutdown_tracer_provider()`. No Jaeger, no OTLP. Stdout-only per phase-log invariant 8.",
+    "crates/ucil-core/src/lib.rs — add `pub mod types; pub mod schema_migration; pub mod otel;` declarations. Re-export key symbols: `pub use types::{QueryPlan, Symbol, Diagnostic, KnowledgeEntry, ToolGroup, CeqpParams, ResponseEnvelope}; pub use schema_migration::{SCHEMA_VERSION, MigrationError}; pub use otel::{init_tracer, shutdown_tracer};`.",
+    "Unit tests co-located in each module under `#[cfg(test)]`: types:: tests assert round-trip serde (JSON serialize/deserialize) for each struct and that Debug/Clone/PartialEq derive correctly. schema_migration:: tests use a tempfile-backed SQLite path to assert stamp_version creates the table and inserts a row, check_version returns Ok after stamping, and Downgrade error is returned when db has a newer-than-current version. otel:: tests call init_tracer(), create a span, record an attribute, end the span, then call shutdown_tracer() — asserts no panic throughout.",
+    "crates/ucil-core/Cargo.toml [dev-dependencies] — add `tempfile = \"3\"` for schema_migration tests that need a scratch directory."
+  ],
+  "scope_out": [
+    "ucil init CLI command (P0-W1-F03 through F06) — depends on F02; scheduled for WO-0003.",
+    "CI YAML / GitHub Actions workflow (P0-W1-F08) — scheduled for its own WO.",
+    "Test fixtures rust/python/typescript/mixed projects (P0-W1-F11 through F14) — scheduled for WO-0004+.",
+    "Any logic in ucil-daemon, ucil-cli, ucil-treesitter, ucil-lsp-diagnostics, ucil-agents, ucil-embeddings — those crates remain stub shells.",
+    "OTLP or Jaeger exporter wiring — Phase 6 only (phase-log invariant 8).",
+    "Real SQLite migration scripts — P0 schema_migration is 'stamp + refuse downgrade' only; no actual schema DDL migrations.",
+    "Any field on the seven types beyond what is listed in scope_in — do not add speculative fields; type signatures are considered frozen once the verifier passes.",
+    "LanceDB, vector_store, incremental engine, fusion, CEQP evaluation logic — later phases."
+  ],
+  "acceptance": [
+    "`cargo test -p ucil-core types::` exits 0 with at least one passing test per type (round-trip serde, Clone, PartialEq).",
+    "`cargo test -p ucil-core schema_migration::` exits 0: stamp creates table+row, check returns Ok after stamp, check returns Downgrade error for future version.",
+    "`cargo test -p ucil-core otel::` exits 0: init_tracer + span + shutdown completes without panic.",
+    "`cargo clippy -p ucil-core -- -D warnings` exits 0 (pedantic warnings included).",
+    "`cargo fmt -p ucil-core --check` exits 0.",
+    "`cargo doc -p ucil-core --no-deps 2>&1 | grep -v '^$'` exits 0 with no broken intra-doc links.",
+    "`cargo build --workspace` exits 0 after adding new deps (no regressions in other crates)."
+  ],
+  "acceptance_criteria": [
+    "cargo test -p ucil-core types:: exits 0",
+    "cargo test -p ucil-core schema_migration:: exits 0",
+    "cargo test -p ucil-core otel:: exits 0",
+    "cargo clippy -p ucil-core -- -D warnings exits 0",
+    "cargo fmt -p ucil-core --check exits 0",
+    "cargo build --workspace exits 0"
+  ],
+  "forbidden_paths": [
+    "ucil-build/feature-list.json",
+    "ucil-build/feature-list.schema.json",
+    "ucil-master-plan-v2.1-final.md",
+    "tests/fixtures/**",
+    "scripts/gate/**",
+    "scripts/flip-feature.sh",
+    "ucil-build/phase-log/00-phase-0/CLAUDE.md"
+  ],
+  "context_refs": [
+    "master-plan:§17 crates/ucil-core src/ file list (types.rs, schema_migration.rs, otel.rs)",
+    "master-plan:§18 Phase 0 task 4 (core type system), task 6 (schema version), task 8 (OTel stdout)",
+    "phase-log:ucil-build/phase-log/00-phase-0/CLAUDE.md invariants 4–5 (no unwrap, lib.rs re-exports only), invariant 7 (F07 v1.0.0 stamp+refuse-downgrade), invariant 8 (F09 stdout only)",
+    "rules:.claude/rules/rust-style.md (thiserror for libs, no unwrap outside tests, one crate per Cargo.toml, lib.rs re-exports only, deny warnings+pedantic clippy)",
+    "rules:.claude/rules/commit-style.md (one logical change per commit, ~50 lines diff, push after every commit)"
+  ],
+  "dependencies_met": true,
+  "estimated_commits": 7,
+  "estimated_complexity": "medium",
+  "created_at": "2026-04-15T06:10:00Z",
+  "created_by": "planner"
+}
