@@ -29,19 +29,26 @@ if ! command -v jq >/dev/null; then
   exit 1
 fi
 
-OLD=$(git show HEAD:"$FILE")
-NEW=$(cat "$FILE")
+# Use temp files + --slurpfile rather than --argjson. argv strings are capped
+# at 128KB by MAX_ARG_STRLEN; feature-list.json grows past that quickly. jq
+# `--slurpfile` reads a JSON array from a file and binds element 0 as the
+# scalar value we want.
+OLD_TMP=$(mktemp)
+NEW_TMP=$(mktemp)
+trap 'rm -f "$OLD_TMP" "$NEW_TMP"' EXIT
+git show HEAD:"$FILE" > "$OLD_TMP"
+cp "$FILE" "$NEW_TMP"
 
-# Produce a diff at the feature-object level using jq.
-# For each feature in NEW, compare to OLD counterpart by id.
 # Permitted mutable keys:
 MUTABLE='["passes","last_verified_ts","last_verified_by","last_verified_commit","attempts","blocked_reason"]'
 
 VIOLATIONS=$(jq -n \
-  --argjson old "$OLD" \
-  --argjson new "$NEW" \
+  --slurpfile old_arr "$OLD_TMP" \
+  --slurpfile new_arr "$NEW_TMP" \
   --argjson mutable "$MUTABLE" '
   def by_id(list): list | map({key: .id, value: .}) | from_entries;
+  ($old_arr[0]) as $old |
+  ($new_arr[0]) as $new |
   ($old.features // []) as $o_list |
   ($new.features // []) as $n_list |
   by_id($o_list) as $o |

@@ -21,19 +21,52 @@ if [[ -z "$ENTRY" ]]; then
   exit 2
 fi
 
-# Find the files changed by this feature's last commit (the one recorded as
-# last_verified_commit) — if missing, fall back to the commits whose message
-# trailer "Feature: $FEATURE_ID" matches.
-LAST_COMMIT=$(echo "$ENTRY" | jq -r '.last_verified_commit // empty')
-if [[ -z "$LAST_COMMIT" || "$LAST_COMMIT" == "null" ]]; then
-  LAST_COMMIT=$(git log --grep="Feature: $FEATURE_ID" --format='%H' -1)
+# Find the files changed by this feature's last substantive commit. The
+# `last_verified_commit` field or the most-recent `Feature: $FEATURE_ID`
+# trailer may point at an administrative commit (ready-for-review marker,
+# verifier sign-off) that touches no source — walk backwards from there
+# until we find a commit that actually changed source files.
+extract_changed_source() {
+  # `|| true` guards against pipefail tripping on a grep no-match (exit 1).
+  git show --no-color --name-only --pretty=format: "$1" 2>/dev/null \
+    | grep -E '\.(rs|ts|tsx|py)$' \
+    | grep -v '^tests/' \
+    | grep -v '^ucil-build/' \
+    | sort -u \
+    || true
+}
+
+START_COMMIT=$(echo "$ENTRY" | jq -r '.last_verified_commit // empty')
+if [[ -z "$START_COMMIT" || "$START_COMMIT" == "null" ]]; then
+  START_COMMIT=$(git log --grep="Feature: $FEATURE_ID" --format='%H' -1 || true)
 fi
-if [[ -z "$LAST_COMMIT" ]]; then
+if [[ -z "$START_COMMIT" ]]; then
   echo "No commit found for feature $FEATURE_ID." >&2
   exit 3
 fi
 
-CHANGED_FILES=$(git show --no-color --name-only --pretty=format: "$LAST_COMMIT" | grep -E '\.(rs|ts|tsx|py)$' | grep -v '^tests/' | grep -v '^ucil-build/' | sort -u)
+# Candidate commits, newest first: every commit trailed "Feature: $FEATURE_ID".
+# Fall back to the chain START_COMMIT..HEAD~history.
+CANDIDATES=$(git log --grep="Feature: $FEATURE_ID" --format='%H' || true)
+if [[ -z "$CANDIDATES" ]]; then
+  CANDIDATES="$START_COMMIT"
+fi
+
+LAST_COMMIT=""
+CHANGED_FILES=""
+for sha in $CANDIDATES; do
+  files=$(extract_changed_source "$sha")
+  if [[ -n "$files" ]]; then
+    LAST_COMMIT="$sha"
+    CHANGED_FILES="$files"
+    break
+  fi
+done
+
+if [[ -z "$LAST_COMMIT" ]]; then
+  echo "No commit with source-file changes found for feature $FEATURE_ID — nothing to mutation-check."
+  exit 0
+fi
 
 if [[ -z "$CHANGED_FILES" ]]; then
   echo "No source files changed by $LAST_COMMIT — nothing to mutation-check."
