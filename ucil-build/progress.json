@@ -1,0 +1,11 @@
+{
+  "schema_version": "1.0.0",
+  "phase": 0,
+  "week": 1,
+  "last_shipped_phase": null,
+  "last_shipped_at": null,
+  "active_worktree": null,
+  "active_branch": "main",
+  "last_commit": null,
+  "seeded": false
+}
