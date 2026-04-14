@@ -1,0 +1,19 @@
+[package]
+name = "ucil-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "UCIL CLI binary: init, daemon, plugin, status, compact, query, config, lsp, quality, group commands"
+
+[[bin]]
+name = "ucil"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+ucil-core = { path = "../ucil-core" }
