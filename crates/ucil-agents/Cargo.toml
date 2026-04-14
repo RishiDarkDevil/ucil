@@ -1,0 +1,14 @@
+[package]
+name = "ucil-agents"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "UCIL internal agent implementations: provider, interpreter, synthesis, conflict resolution"
+
+[dependencies]
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+ucil-core = { path = "../ucil-core" }

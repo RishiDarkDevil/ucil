@@ -26,6 +26,12 @@ __pycache__/
 .env.*.local
 .claude/settings.local.json
 
+# --- UCIL runtime (per-project) ---
+.ucil/
+
+# --- Adapter build outputs ---
+adapters/*/dist/
+
 # --- Build harness scratch ---
 ucil-build/telemetry/
 ucil-build/runs/

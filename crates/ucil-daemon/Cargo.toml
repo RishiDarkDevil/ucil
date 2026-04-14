@@ -1,0 +1,19 @@
+[package]
+name = "ucil-daemon"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "UCIL daemon binary: file watcher, plugin manager, query router, session manager"
+
+[[bin]]
+name = "ucil-daemon"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+ucil-core = { path = "../ucil-core" }
