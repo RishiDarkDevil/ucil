@@ -83,7 +83,7 @@ done
 for tool in git jq rustc cargo node npm python3 docker gh; do
   warn_check "tool: $tool"             command -v "$tool" >/dev/null 2>&1
 done
-for tool in gitleaks trufflehog semgrep trivy ast-grep ollama; do
+for tool in gitleaks trufflehog semgrep trivy ast-grep ollama uvx; do
   warn_check "tool (optional): $tool"  command -v "$tool" >/dev/null 2>&1
 done
 
