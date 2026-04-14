@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Aggregator: runs each pre-commit guard. Any non-zero aborts the commit.
+set -euo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT"
+
+# Block --no-verify usage: if someone bypasses this hook, a companion pre-push hook
+# will still block. But also refuse to run entirely if a bypass marker is set.
+if [[ -n "${GIT_COMMIT_NO_VERIFY:-}" || -n "${CLAUDE_HOOKS_SKIP:-}" ]]; then
+  echo "[pre-commit] refusing to run with bypass marker set (GIT_COMMIT_NO_VERIFY/CLAUDE_HOOKS_SKIP)." >&2
+  exit 1
+fi
+
+FAIL=0
+for hook in .githooks/pre-commit-feature-list .githooks/pre-commit-no-ignore .githooks/pre-commit-secret-scan; do
+  if [[ -x "$hook" ]]; then
+    if ! "$hook"; then
+      echo "[pre-commit] FAILED: $hook" >&2
+      FAIL=1
+    fi
+  fi
+done
+
+exit $FAIL

@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+# Enforces feature-list.json whitelist: only `passes`, `last_verified_ts`,
+# `last_verified_by`, `last_verified_commit`, `attempts`, `blocked_reason`
+# may change. Any change to id/phase/week/crate/description/acceptance_tests/
+# dependencies is rejected.
+set -euo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+FILE="ucil-build/feature-list.json"
+
+# No change to the file? OK.
+if ! git diff --cached --name-only | grep -qxF "$FILE"; then
+  exit 0
+fi
+
+# File doesn't exist in HEAD yet (initial seeding commit) — allow.
+if ! git cat-file -e HEAD:"$FILE" 2>/dev/null; then
+  exit 0
+fi
+
+# Allow commits with message starting with "freeze:" — used for the one-time seed commit.
+# Git hooks don't see the message here; use an env marker set by seed-features.sh.
+if [[ "${UCIL_SEEDING:-}" == "1" ]]; then
+  exit 0
+fi
+
+if ! command -v jq >/dev/null; then
+  echo "[pre-commit-feature-list] jq is required" >&2
+  exit 1
+fi
+
+OLD=$(git show HEAD:"$FILE")
+NEW=$(cat "$FILE")
+
+# Produce a diff at the feature-object level using jq.
+# For each feature in NEW, compare to OLD counterpart by id.
+# Permitted mutable keys:
+MUTABLE='["passes","last_verified_ts","last_verified_by","last_verified_commit","attempts","blocked_reason"]'
+
+VIOLATIONS=$(jq -n \
+  --argjson old "$OLD" \
+  --argjson new "$NEW" \
+  --argjson mutable "$MUTABLE" '
+  def by_id(list): list | map({key: .id, value: .}) | from_entries;
+  ($old.features // []) as $o_list |
+  ($new.features // []) as $n_list |
+  by_id($o_list) as $o |
+  by_id($n_list) as $n |
+  # Detect added/removed features (not allowed post-seed).
+  ( ($n | keys) - ($o | keys) ) as $added |
+  ( ($o | keys) - ($n | keys) ) as $removed |
+  ( [ $o | to_entries[]
+       | . as $e
+       | ($n[$e.key] // null) as $newf
+       | if $newf == null then empty
+         else ($e.value | to_entries | map(.key) | sort) as $ok |
+              ($newf    | to_entries | map(.key) | sort) as $nk |
+              if $ok != $nk then {id:$e.key, changed_keys:"key set differs"}
+              else [ $e.value | to_entries[]
+                     | select( ($newf[.key]) != .value )
+                     | .key ]
+                   | map(select(. as $k | ($mutable | index($k)) == null))
+                   | if length == 0 then empty
+                     else {id:$e.key, disallowed_mutations:.}
+                     end
+              end
+         end
+     ]
+  ) as $mutations |
+  {
+    added_ids: $added,
+    removed_ids: $removed,
+    disallowed_field_mutations: $mutations
+  }
+  | select(.added_ids != [] or .removed_ids != [] or .disallowed_field_mutations != [])')
+
+if [[ -n "$VIOLATIONS" ]]; then
+  echo "[pre-commit-feature-list] feature-list.json contains disallowed changes:" >&2
+  echo "$VIOLATIONS" >&2
+  echo "" >&2
+  echo "Only these fields may change post-freeze:" >&2
+  echo "  passes, last_verified_ts, last_verified_by, last_verified_commit, attempts, blocked_reason" >&2
+  exit 1
+fi
+
+exit 0

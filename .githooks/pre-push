@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# Block force-pushes to any branch.
+set -euo pipefail
+
+# Git passes refs via stdin: "<local_ref> <local_sha> <remote_ref> <remote_sha>"
+# We also read PUSH_OPTIONS via env to catch --force variants.
+# Simplest: refuse if the push is not a fast-forward on protected branches.
+
+while IFS=' ' read -r LOCAL_REF LOCAL_SHA REMOTE_REF REMOTE_SHA; do
+  [[ -z "$LOCAL_SHA" ]] && continue
+  # Skip deletes (LOCAL_SHA == 0000..)
+  [[ "$LOCAL_SHA" =~ ^0+$ ]] && continue
+  # Skip new branches (REMOTE_SHA == 0000..)
+  [[ "$REMOTE_SHA" =~ ^0+$ ]] && continue
+
+  # Check if remote sha is an ancestor of local sha (fast-forward)
+  if ! git merge-base --is-ancestor "$REMOTE_SHA" "$LOCAL_SHA" 2>/dev/null; then
+    echo "[pre-push] non-fast-forward push to $REMOTE_REF blocked." >&2
+    echo "  LOCAL  = $LOCAL_SHA" >&2
+    echo "  REMOTE = $REMOTE_SHA" >&2
+    echo "Rebase or merge instead of force-pushing." >&2
+    exit 1
+  fi
+done
+
+exit 0

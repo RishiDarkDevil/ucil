@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# Rejects any staged diff that adds #[ignore], it.skip, xit, xfail, @pytest.skip,
+# or commented-out assertion lines.
+set -euo pipefail
+
+# Only check lines being ADDED (prefix "+"). Diff against HEAD if it exists, else nothing to check.
+if ! git rev-parse --verify HEAD >/dev/null 2>&1; then
+  exit 0
+fi
+
+# Allowed file patterns (exempt — docs/markdown/config explaining these patterns).
+# Pattern is applied against the "file:+line" prefix we emit below.
+ALLOW_PREFIX='^(docs/|[^:]*\.md:|[^:]*CLAUDE\.md:|\.githooks/|\.claude/|scripts/|ucil-build/)'
+
+# Get added lines, filter out exempt files
+ADDED=$(git diff --cached --unified=0 --diff-filter=AM | \
+  awk '
+    /^diff --git/ { file=$4; sub(/^b\//,"",file); next }
+    /^\+\+\+/ { next }
+    /^\+/ && file != "" { print file ":" $0 }
+  ' | grep -Ev "$ALLOW_PREFIX" || true)
+
+# Patterns that are BANNED
+PATTERNS=(
+  '#\[ignore\b'
+  '#\[test_log::test\(ignore'
+  '\bit\.skip\s*\('
+  '\bxit\s*\('
+  '\bit\.only\s*\('
+  '\bdescribe\.skip\s*\('
+  '\bdescribe\.only\s*\('
+  '@pytest\.mark\.skip\b'
+  '@pytest\.mark\.xfail\b'
+  '\.skip\s*\('
+  '\bpytest\.skip\s*\('
+  '\bsetup\.cfg.*skip'
+  '\btest.*\bxfail\b'
+)
+
+VIOLATIONS=()
+for pat in "${PATTERNS[@]}"; do
+  while IFS= read -r line; do
+    [[ -n "$line" ]] && VIOLATIONS+=("$line :: pattern=$pat")
+  done < <(echo "$ADDED" | grep -nE "$pat" || true)
+done
+
+if (( ${#VIOLATIONS[@]} > 0 )); then
+  echo "[pre-commit-no-ignore] staged diff introduces skipped/ignored/xfailed tests:" >&2
+  printf '  %s\n' "${VIOLATIONS[@]}" >&2
+  echo "" >&2
+  echo "If a test is legitimately flaky, invoke the flake-hunter subagent," >&2
+  echo "write an ADR under ucil-build/decisions/flake-<id>.md with evidence," >&2
+  echo "and only then add the skip (the critic will still review)." >&2
+  exit 1
+fi
+
+exit 0
