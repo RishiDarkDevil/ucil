@@ -70,6 +70,21 @@ If you get blocked, write an escalation to ucil-build/escalations/ rather than s
 EOF
 )
 
+# Clean up any stale worktree from a prior attempt. Git refuses `worktree add`
+# if the target path already exists, which otherwise stalls a retry.
+WT_PATH="../ucil-wt/${WO_ID}"
+SLUG=$(jq -r .slug "$WO_FILE" 2>/dev/null || echo "")
+BRANCH="feat/${WO_ID}-${SLUG}"
+if [[ -d "$WT_PATH" ]]; then
+  echo "[run-executor] stale worktree at $WT_PATH — removing before retry"
+  git worktree remove --force "$WT_PATH" 2>/dev/null || true
+  rm -rf "$WT_PATH"
+fi
+# Branch may still exist locally even if worktree is gone. For a clean retry,
+# let the executor reuse the existing branch (keeps prior commits) rather than
+# deleting it — executor's workflow will `git worktree add` and cd in.
+# If the branch itself needs rebuilding (e.g. force-restart), delete manually.
+
 echo "[run-executor] work-order: ${WO_FILE}"
 echo "[run-executor] log: ${LOG}"
 echo "[run-executor] starting in ~5s..."
