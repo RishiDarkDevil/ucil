@@ -1,0 +1,41 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ucil-ml"
+version = "0.1.0"
+description = "UCIL ML pipelines: embedding inference, chunking, model management"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "RishiDarkDevil", email = "rishi8001100192@gmail.com" }]
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.9.0",
+    "mypy>=1.14.0",
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.25.0",
+    "hypothesis>=6.124.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ucil_ml"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = []
+
+[tool.mypy]
+strict = true
+python_version = "3.11"
+ignore_missing_imports = false
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
