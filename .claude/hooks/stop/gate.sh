@@ -75,13 +75,19 @@ if [[ "${UCIL_GATE_SKIP:-}" == "1" ]]; then
   exit 0
 fi
 
-# Honor the bypass the block-message advertises: if HEAD adds/modifies a
-# tracked file under ucil-build/escalations/, treat it as an active
-# escalation and skip the gate for this turn. Close an escalation by
-# deleting/moving the file in a later commit.
-if git log -1 --name-only --pretty=format: 2>/dev/null \
-    | grep -q '^ucil-build/escalations/[^/]\+\.md$'; then
-  exit 0
+# Honor the bypass the block-message advertises: if any tracked escalation
+# file in ucil-build/escalations/ lacks `resolved: true` in its frontmatter,
+# treat it as active and skip the gate for this turn. Close an escalation
+# by adding `resolved: true` to its frontmatter (or deleting the file) in
+# a follow-up commit.
+if compgen -G "ucil-build/escalations/*.md" > /dev/null 2>&1; then
+  for f in ucil-build/escalations/*.md; do
+    # only consider tracked files (committed escalations)
+    git ls-files --error-unmatch "$f" >/dev/null 2>&1 || continue
+    if ! grep -qE '^resolved:[[:space:]]*true[[:space:]]*$' "$f"; then
+      exit 0
+    fi
+  done
 fi
 
 if ! CLAUDE_STOP_HOOK_ACTIVE=1 scripts/gate-check.sh "$PHASE" > /tmp/ucil-gate-check.log 2>&1; then
