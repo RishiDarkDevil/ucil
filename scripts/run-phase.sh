@@ -92,11 +92,30 @@ Invoke /replan or root-cause-finder." > "ucil-build/escalations/$(date -u +%Y%m%
 
   # 1. Planner — emit work-order
   echo "[run-phase] Step 1/4: planner"
+  # Build context the planner needs to avoid emitting duplicate WOs or
+  # selecting features already handled by open/recent WOs.
+  EXISTING_WOS=$(ls ucil-build/work-orders/*.json 2>/dev/null | xargs -I{} basename {} .json | paste -sd, - || echo "none")
+  PASSING_IN_PHASE=$(jq -r --arg p "$PHASE" '[.features[] | select((.phase|tostring)==$p) | select(.passes==true) | .id] | join(",")' ucil-build/feature-list.json 2>/dev/null || echo "")
+  # List feature_ids already claimed by any work-order (regardless of status)
+  CLAIMED_FEATS=$(jq -s '[.[] | (.feature_ids // .features // [])[]] | unique | join(",")' ucil-build/work-orders/*.json 2>/dev/null || echo "")
+
   PLAN_PROMPT="You are the UCIL planner. Phase: $PHASE.
+
+Current state:
+- Existing work-orders (do NOT create a duplicate): ${EXISTING_WOS}
+- Features already passing in phase ${PHASE}: ${PASSING_IN_PHASE:-none}
+- Feature IDs already claimed by any work-order (open or completed): ${CLAIMED_FEATS:-none}
+
 Read ucil-build/feature-list.json and ucil-build/progress.json.
-Emit the next work-order in ucil-build/work-orders/ for 1-5 features in phase $PHASE
-that are failing but whose dependencies are all passing. Commit the work-order and push.
-End your session cleanly."
+Emit the NEXT work-order in ucil-build/work-orders/NNNN-<slug>.json covering
+1-5 phase-${PHASE} features that:
+  (a) have passes=false,
+  (b) have all dependencies satisfied (deps with passes=true), AND
+  (c) are NOT in the claimed-features list above.
+If no eligible features exist (every non-passing feature's deps are blocked
+or every feature is already claimed by a pending WO), write an escalation
+to ucil-build/escalations/ explaining the blocker and end. Otherwise commit
+the new work-order + any ADRs and push. End your session cleanly."
   CLAUDE_SUBAGENT_NAME=planner claude -p "$PLAN_PROMPT" \
     --dangerously-skip-permissions \
     --append-system-prompt "$(cat .claude/agents/planner.md)" \
