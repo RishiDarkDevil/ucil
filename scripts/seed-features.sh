@@ -19,10 +19,16 @@ if ! command -v claude >/dev/null 2>&1; then
   exit 3
 fi
 
-if [[ -z "${ANTHROPIC_API_KEY:-}" && -f .env ]]; then
+if [[ -f .env ]]; then
   set -a
   source .env
   set +a
+fi
+
+if [[ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" && -z "${ANTHROPIC_API_KEY:-}" ]]; then
+  echo "ERROR: neither CLAUDE_CODE_OAUTH_TOKEN nor ANTHROPIC_API_KEY is set in .env." >&2
+  echo "Get an OAuth token with: claude setup-token" >&2
+  exit 3
 fi
 
 PROMPT=$(cat <<'EOF'
