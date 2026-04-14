@@ -48,11 +48,31 @@ Open for human review." > "ucil-build/escalations/$(date -u +%Y%m%dT%H%M%SZ)-max
     exit 0
   fi
 
-  # Escalation check — halt if any open escalation exists
-  if ls ucil-build/escalations/*.md >/dev/null 2>&1; then
-    echo "[run-phase] Open escalation(s) detected — halting."
-    ls -1 ucil-build/escalations/
-    exit 1
+  # Escalation check — try triage before halting.
+  # Count ONLY unresolved escalations (those missing `resolved: true`).
+  unresolved_count=0
+  shopt -s nullglob
+  for _esc in ucil-build/escalations/*.md; do
+    if ! grep -qE '^resolved:[[:space:]]*true[[:space:]]*$' "$_esc"; then
+      unresolved_count=$((unresolved_count+1))
+    fi
+  done
+  shopt -u nullglob
+
+  if [[ "$unresolved_count" -gt 0 ]]; then
+    TRIAGE_PASS_FILE=".ucil-triage-pass.phase-${PHASE}"
+    TRIAGE_PASS=$(cat "$TRIAGE_PASS_FILE" 2>/dev/null || echo 0)
+    TRIAGE_PASS=$((TRIAGE_PASS+1))
+    echo "$TRIAGE_PASS" > "$TRIAGE_PASS_FILE"
+    echo "[run-phase] ${unresolved_count} unresolved escalation(s); spawning triage (pass ${TRIAGE_PASS})..."
+    UCIL_PHASE="$PHASE" UCIL_TRIAGE_PASS="$TRIAGE_PASS" scripts/run-triage.sh "$PHASE"
+    triage_rc=$?
+    if [[ "$triage_rc" -ne 0 ]]; then
+      echo "[run-phase] triage could not resolve all escalations — halting for human review."
+      ls -1 ucil-build/escalations/
+      exit 1
+    fi
+    echo "[run-phase] triage resolved all escalations; continuing."
   fi
 
   # Drift check

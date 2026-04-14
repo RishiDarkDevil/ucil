@@ -38,6 +38,9 @@ ucil-build/runs/
 ucil-build/.verifier-lock
 ucil-build/drift-counters.json
 
+# Triage-pass counters (per phase, transient)
+.ucil-triage-pass.phase-*
+
 # --- Editor / OS ---
 .DS_Store
 .vscode/
