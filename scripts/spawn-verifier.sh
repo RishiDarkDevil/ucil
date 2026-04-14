@@ -57,5 +57,6 @@ CLAUDE_SUBAGENT_NAME=verifier \
 CLAUDE_SESSION_ID="$NEW_SESSION" \
 exec claude -p "$PROMPT" \
   --session-id "$NEW_SESSION" \
+  --dangerously-skip-permissions \
   --append-system-prompt "$(cat .claude/agents/verifier.md)" \
   "$@"

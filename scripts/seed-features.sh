@@ -97,9 +97,13 @@ echo "[seed-features] This may take 5-15 minutes and will consume ~2M tokens."
 echo ""
 
 # UCIL_SEEDING=1 bypasses the feature-list write guards for this one-shot run.
+# --dangerously-skip-permissions: headless mode has no human to click "Allow".
+# The PreToolUse / PostToolUse hooks still enforce every guard mechanically —
+# skipping permission prompts does NOT skip hooks.
 UCIL_SEEDING=1 \
 CLAUDE_SUBAGENT_NAME=planner \
 claude -p "$PROMPT" \
+  --dangerously-skip-permissions \
   --append-system-prompt "$(cat .claude/agents/planner.md)"
 
 echo ""

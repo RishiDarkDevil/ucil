@@ -78,6 +78,7 @@ Emit the next work-order in ucil-build/work-orders/ for 1-5 features in phase $P
 that are failing but whose dependencies are all passing. Commit the work-order and push.
 End your session cleanly."
   CLAUDE_SUBAGENT_NAME=planner claude -p "$PLAN_PROMPT" \
+    --dangerously-skip-permissions \
     --append-system-prompt "$(cat .claude/agents/planner.md)" \
     >/tmp/ucil-planner.log 2>&1 || {
       echo "[run-phase] planner failed — see /tmp/ucil-planner.log"
@@ -99,6 +100,7 @@ End your session cleanly."
 Work in a worktree; commit and push often; respect all anti-laziness rules.
 When all acceptance criteria pass locally, write the ready-for-review marker and end."
   CLAUDE_SUBAGENT_NAME=executor claude -p "$EXEC_PROMPT" \
+    --dangerously-skip-permissions \
     --append-system-prompt "$(cat .claude/agents/executor.md)" \
     >/tmp/ucil-executor.log 2>&1 || {
       echo "[run-phase] executor failed — see /tmp/ucil-executor.log"
@@ -111,6 +113,7 @@ When all acceptance criteria pass locally, write the ready-for-review marker and
   CRIT_PROMPT="You are the UCIL critic. Review the executor's diff for work-order $LATEST_WO.
 Apply every check in .claude/agents/critic.md. Write ucil-build/critic-reports/, commit, push."
   CLAUDE_SUBAGENT_NAME=critic claude -p "$CRIT_PROMPT" \
+    --dangerously-skip-permissions \
     --append-system-prompt "$(cat .claude/agents/critic.md)" \
     >/tmp/ucil-critic.log 2>&1 || true
 
