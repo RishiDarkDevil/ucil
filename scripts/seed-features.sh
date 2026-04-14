@@ -100,7 +100,6 @@ echo ""
 UCIL_SEEDING=1 \
 CLAUDE_SUBAGENT_NAME=planner \
 claude -p "$PROMPT" \
-  --no-resume \
   --append-system-prompt "$(cat .claude/agents/planner.md)"
 
 echo ""

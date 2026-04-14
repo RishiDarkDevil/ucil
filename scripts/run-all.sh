@@ -40,7 +40,6 @@ for P in "${PHASES[@]}"; do
   # Docs-writer: post-mortem
   PROMPT="You are the UCIL docs-writer. Phase $P shipped. Draft ucil-build/post-mortems/phase-${P}.md from verification reports and git log. Commit and push."
   CLAUDE_SUBAGENT_NAME=docs-writer claude -p "$PROMPT" \
-    --no-resume \
     --append-system-prompt "$(cat .claude/agents/docs-writer.md)" >/tmp/ucil-postmortem.log 2>&1 || true
 
   # Advance phase counter

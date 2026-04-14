@@ -3,7 +3,7 @@
 # - Generates a new session ID distinct from the caller
 # - Writes ucil-build/.verifier-lock with the session ID so feature-list-guard
 #   and flip-feature.sh accept its writes
-# - Launches `claude -p <prompt> --session-id=<new> --no-resume` with the verifier
+# - Launches `claude -p <prompt> --session-id=<new> ` with the verifier
 #   subagent prompt loaded via --append-system-prompt
 #
 # Usage:
@@ -57,6 +57,5 @@ CLAUDE_SUBAGENT_NAME=verifier \
 CLAUDE_SESSION_ID="$NEW_SESSION" \
 exec claude -p "$PROMPT" \
   --session-id "$NEW_SESSION" \
-  --no-resume \
   --append-system-prompt "$(cat .claude/agents/verifier.md)" \
   "$@"
