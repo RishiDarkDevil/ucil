@@ -5,6 +5,7 @@ created_at: 2026-04-15T06:00:00Z
 created_by: verifier-6c4f652d-b7fa-40fd-a006-15511bf9129c
 work_order: WO-0001
 requires_planner_action: true
+resolved: true
 ---
 
 # Hook/Script Bugs Found During WO-0001 Verification
