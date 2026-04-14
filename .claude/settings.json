@@ -1,0 +1,150 @@
+{
+  "env": {
+    "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "128000",
+    "MAX_THINKING_TOKENS": "64000",
+    "CLAUDE_CODE_EFFORT_LEVEL": "max",
+    "CLAUDE_CODE_PLAN_MODE_REQUIRED": "false",
+    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1",
+    "ENABLE_LSP_TOOL": "1",
+    "UCIL_REPO_ROOT": "/home/rishidarkdevil/Desktop/ucil"
+  },
+  "permissions": {
+    "allow": [
+      "Read(//home/rishidarkdevil/Desktop/ucil/**)",
+      "Bash(ls:*)",
+      "Bash(cat:*)",
+      "Bash(rg:*)",
+      "Bash(jq:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git show:*)",
+      "Bash(git branch:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(git pull:*)",
+      "Bash(git fetch:*)",
+      "Bash(git worktree:*)",
+      "Bash(git rev-parse:*)",
+      "Bash(cargo build:*)",
+      "Bash(cargo check:*)",
+      "Bash(cargo test:*)",
+      "Bash(cargo nextest:*)",
+      "Bash(cargo clippy:*)",
+      "Bash(cargo fmt:*)",
+      "Bash(cargo criterion:*)",
+      "Bash(cargo bench:*)",
+      "Bash(pnpm:*)",
+      "Bash(npm:*)",
+      "Bash(npx:*)",
+      "Bash(node:*)",
+      "Bash(vitest:*)",
+      "Bash(tsc:*)",
+      "Bash(biome:*)",
+      "Bash(uv:*)",
+      "Bash(python3:*)",
+      "Bash(pytest:*)",
+      "Bash(ruff:*)",
+      "Bash(mypy:*)",
+      "Bash(docker:*)",
+      "Bash(docker-compose:*)",
+      "Bash(docker compose:*)",
+      "Bash(gh:*)",
+      "Bash(scripts/*:*)",
+      "Bash(./scripts/*:*)",
+      "Bash(mkdir:*)",
+      "Bash(touch:*)",
+      "Bash(chmod:*)",
+      "Bash(find:*)",
+      "Bash(wc:*)",
+      "Bash(hyperfine:*)",
+      "Bash(ast-grep:*)",
+      "WebFetch(domain:docs.rs)",
+      "WebFetch(domain:doc.rust-lang.org)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:modelcontextprotocol.io)",
+      "WebFetch(domain:code.claude.com)",
+      "WebFetch(domain:claude.com)",
+      "WebFetch(domain:platform.claude.com)",
+      "WebFetch(domain:anthropic.com)"
+    ],
+    "deny": [
+      "Write(ucil-master-plan-v2.1-final.md)",
+      "Edit(ucil-master-plan-v2.1-final.md)",
+      "Bash(rm -rf /*)",
+      "Bash(rm -rf ~*)",
+      "Bash(rm -rf $HOME*)",
+      "Bash(sudo rm:*)",
+      "Bash(git push --force:*)",
+      "Bash(git push -f:*)",
+      "Bash(git push --force-with-lease:*)",
+      "Bash(git commit --amend:*)",
+      "Bash(cargo publish:*)",
+      "Bash(npm publish:*)",
+      "Bash(pnpm publish:*)",
+      "Bash(docker system prune -a:*)",
+      "Bash(dd:*)"
+    ]
+  },
+  "hooks": {
+    "SessionStart": [
+      {"hooks": [{"type": "command", "command": "bash .claude/hooks/session-start/dashboard.sh"}]}
+    ],
+    "UserPromptSubmit": [
+      {"hooks": [{"type": "command", "command": "bash .claude/hooks/user-prompt-submit/surface-escalations.sh"}]}
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [{"type": "command", "command": "bash .claude/hooks/pre-tool-use/block-dangerous.sh"}]
+      },
+      {
+        "matcher": "Write|Edit",
+        "hooks": [{"type": "command", "command": "bash .claude/hooks/pre-tool-use/path-guard.sh"}]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {"type": "command", "command": "bash .claude/hooks/post-tool-use/feature-list-guard.sh"},
+          {"type": "command", "command": "bash .claude/hooks/post-tool-use/format.sh"},
+          {"type": "command", "command": "bash .claude/hooks/post-tool-use/secret-scan.sh"}
+        ]
+      }
+    ],
+    "Stop": [
+      {"hooks": [{"type": "command", "command": "bash .claude/hooks/stop/gate.sh"}]}
+    ]
+  },
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/home/rishidarkdevil/Desktop/ucil"]
+    },
+    "github": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": {"GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_TOKEN}"}
+    },
+    "context7": {
+      "command": "npx",
+      "args": ["-y", "@upstash/context7-mcp@latest"]
+    },
+    "memory": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-memory"]
+    },
+    "sequential-thinking": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-sequential-thinking"]
+    },
+    "serena": {
+      "command": "uvx",
+      "args": ["--from", "git+https://github.com/oraios/serena", "serena-mcp-server", "--project", "/home/rishidarkdevil/Desktop/ucil"]
+    }
+  },
+  "effortLevel": "max"
+}
