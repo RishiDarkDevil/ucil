@@ -1,0 +1,80 @@
+{
+  "id": "WO-0001",
+  "slug": "workspace-skeleton",
+  "phase": 0,
+  "week": 1,
+  "features": ["P0-W1-F01", "P0-W1-F10"],
+  "feature_ids": ["P0-W1-F01", "P0-W1-F10"],
+  "branch": "feat/WO-0001-workspace-skeleton",
+  "worktree_branch": "feat/WO-0001-workspace-skeleton",
+  "executor_agent": "executor",
+  "goal": "Stand up the tri-toolchain workspace skeleton: Cargo workspace with seven empty-but-compilable crates, pnpm workspace under adapters/, and uv Python env under ml/, plus the full §17 top-level directory tree.",
+  "plan_summary": "Bundle F01 (workspace configs) and F10 (directory skeleton) since they overlap at the repo root. Executor creates Cargo.toml workspace, seven crate dirs under crates/ with lib.rs re-export shells, rust-toolchain.toml (stable, edition 2021), adapters/ pnpm workspace (package.json, tsconfig.json with strict settings, biome.json), ml/ uv project (pyproject.toml with ruff+mypy+pytest dev-deps), and all §17 directories committed with .gitkeep where empty. Populate scripts/verify/P0-W1-F10.sh with the real skeleton assertion. cargo build --workspace, pnpm -C adapters build, and uv build ml/ must all exit 0.",
+  "scope_in": [
+    "Top-level Cargo.toml defining the workspace with seven member crates: ucil-core, ucil-daemon, ucil-cli, ucil-treesitter, ucil-lsp-diagnostics, ucil-agents, ucil-embeddings (exact names per §17).",
+    "crates/<name>/Cargo.toml + crates/<name>/src/lib.rs (re-exports only, no logic) for each of the seven crates. ucil-daemon and ucil-cli additionally get src/main.rs shells that compile and return Ok(()).",
+    "rust-toolchain.toml pinning stable channel; edition 2021 in every crate Cargo.toml.",
+    "adapters/package.json declaring a pnpm workspace, adapters/pnpm-workspace.yaml, adapters/tsconfig.json with strict:true, noUncheckedIndexedAccess:true, exactOptionalPropertyTypes:true, adapters/biome.json with defaults, and a trivial adapters/src/index.ts so pnpm build has something to compile.",
+    "ml/pyproject.toml declaring the uv-managed project with ruff, mypy, pytest dev-deps, python >= 3.11, and ml/src/ucil_ml/__init__.py (empty but importable) so uv build succeeds.",
+    "Full §17 directory tree present and committed: crates/, adapters/, adapters/templates/, plugins/{structural,search,knowledge,architecture,context,platform,quality,testing}/, ml/, ml/models/, tests/fixtures/, tests/integration/, tests/benchmarks/, scripts/, docs/, plugin/, plugin/.claude-plugin/, plugin/agents/, plugin/skills/, plugin/hooks/, plugin/.claude/rules/. Use .gitkeep for dirs that are intentionally empty in Phase 0.",
+    "scripts/verify/P0-W1-F10.sh replaced with a real test that asserts each required directory exists (and exits 1 with a clear message naming the first missing one).",
+    "Baseline ucil-core test in crates/ucil-core/tests/ so `cargo test -p ucil-core` has at least one passing assertion (e.g. a smoke test that the crate compiles and exposes a const VERSION). This is needed so F01's acceptance_tests selector `-p ucil-core` returns non-empty.",
+    "A .gitignore covering target/, node_modules/, .venv/, dist/, __pycache__/, .ucil/, and adapters/*/dist/."
+  ],
+  "scope_out": [
+    "ucil-core types.rs content (QueryPlan, Symbol, etc.) — that is P0-W1-F02.",
+    "ucil init command wiring — that is P0-W1-F03 through F06.",
+    "Schema version tracking — P0-W1-F07.",
+    "CI YAML / workflow files — P0-W1-F08 (executor may stub a `.github/workflows/` dir with .gitkeep to satisfy the directory skeleton assertion, but no workflow logic).",
+    "OpenTelemetry wiring — P0-W1-F09.",
+    "Fixture project bodies (rust-project, python-project, typescript-project, mixed-project) — F11 through F14. Only the containing tests/fixtures/ directory exists in this WO.",
+    "Plugin manifests inside plugins/* — later phases.",
+    "Any src/ body beyond lib.rs re-exports and a single trivial smoke test per language.",
+    "Any adapter logic in adapters/src beyond an empty exported module."
+  ],
+  "acceptance": [
+    "cargo build --workspace exits 0 on a clean `cargo clean` run.",
+    "cargo clippy --workspace -- -D warnings exits 0.",
+    "cargo fmt --all --check exits 0.",
+    "cargo test -p ucil-core exits 0 (satisfies P0-W1-F01 acceptance_tests).",
+    "pnpm -C adapters install && pnpm -C adapters build exits 0.",
+    "cd ml && uv build exits 0.",
+    "bash scripts/verify/P0-W1-F10.sh exits 0 (satisfies P0-W1-F10 acceptance_tests).",
+    "Every directory named in §17 of the master plan is present (verified by P0-W1-F10.sh)."
+  ],
+  "acceptance_criteria": [
+    "cargo build --workspace exits 0",
+    "cargo clippy --workspace -- -D warnings exits 0",
+    "cargo fmt --all --check exits 0",
+    "cargo test -p ucil-core exits 0",
+    "pnpm -C adapters build exits 0",
+    "cd ml && uv build exits 0",
+    "bash scripts/verify/P0-W1-F10.sh exits 0"
+  ],
+  "forbidden_paths": [
+    "ucil-build/feature-list.json",
+    "ucil-build/feature-list.schema.json",
+    "ucil-master-plan-v2.1-final.md",
+    "ucil-build/phase-log/00-phase-0/CLAUDE.md",
+    "tests/fixtures/rust-project/**",
+    "tests/fixtures/python-project/**",
+    "tests/fixtures/typescript-project/**",
+    "tests/fixtures/mixed-project/**",
+    "scripts/gate/**",
+    "scripts/flip-feature.sh"
+  ],
+  "context_refs": [
+    "master-plan:§17 Directory structure",
+    "master-plan:§18 Phase 0 — Project bootstrap (Week 1)",
+    "phase-log:ucil-build/phase-log/00-phase-0/CLAUDE.md",
+    "rules:.claude/rules/rust-style.md",
+    "rules:.claude/rules/ts-style.md",
+    "rules:.claude/rules/py-style.md",
+    "rules:.claude/rules/commit-style.md"
+  ],
+  "dependencies_met": true,
+  "estimated_commits": 12,
+  "estimated_complexity": "medium",
+  "created_at": "2026-04-15T00:00:00Z",
+  "created_by": "planner"
+}
