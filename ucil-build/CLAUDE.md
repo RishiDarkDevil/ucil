@@ -68,13 +68,30 @@ Session transcripts and intermediate artifacts go in `phase-log/NN-phase-N/sessi
 
 When blocked, write `escalations/YYYYMMDD-HHMM-<slug>.md` (see `.claude/skills/escalate/SKILL.md`). Escalations are surfaced at next session-start via the user-prompt-submit hook.
 
-The outer loop (`scripts/run-phase.sh`) halts when:
-- Same feature fails verifier 3×
-- Drift counter ≥ 4
-- OOM / timeout twice consecutively
-- Cross-feature conflict
-- Any commit touches this file or feature-list.json outside the whitelist
+### Escalation frontmatter conventions
+
+- `blocks_loop: true|false` — if `false`, triage may auto-resolve when the underlying condition is already fixed in HEAD.
+- `severity: low|harness-config|high|critical` — `harness-config` is triage's sweet spot for Bucket B fixes.
+- `requires_planner_action: true|false` — when `true`, triage defaults to halt.
+- Always end the file with `resolved: true` (frontmatter field OR trailing line) when the issue is closed — the outer loop and triage both detect this marker.
+
+### Who handles what
+
+The outer loop (`scripts/run-phase.sh`) does NOT halt on escalations immediately. It first spawns the **triage subagent** (`.claude/agents/triage.md`), which classifies each unresolved escalation:
+
+- **Bucket A (auto-resolve)**: admin/benign escalation whose condition is already resolved in HEAD → triage appends a `## Resolution` note, sets `resolved: true`, commits, pushes.
+- **Bucket B (fix + resolve)**: concrete < 120-line fix in `.githooks/`, `.claude/hooks/` (except `stop/gate.sh`), `scripts/` (except `gate/**` and `flip-feature.sh`), or `ucil-build/schema/` (except `feature-list.schema.json`) → triage applies the fix, runs a local smoke check, commits, appends a resolution note with the fix-commit sha, sets `resolved: true`, pushes.
+- **Bucket C (halt + page user)**: anything else — UCIL source, ADR-required, ≥3 prior attempts, deny-list file, drift, OOM, cost-cap, low confidence → leave unresolved, append one line to `triage-log.md`, the outer loop halts.
+
+Triage runs up to 3 times per phase. On pass 3 it defaults everything to Bucket C to prevent thrashing.
+
+The outer loop ALSO halts unconditionally (regardless of triage) when:
+- Same feature fails verifier 3× (`attempts` field in feature-list)
+- Drift counter ≥ 4 (consecutive no-flip iterations) — auto-filed as an escalation
 - `attempts >= 10` on any feature
+- Cross-feature conflict
+- OOM / timeout twice consecutively
+- Any commit touches this file or `feature-list.json` outside the whitelist
 - Mutation-check failure
 - User manually `/escalate`s
 
