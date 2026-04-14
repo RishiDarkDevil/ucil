@@ -36,14 +36,20 @@ if command -v npm >/dev/null; then
   npm i -g pnpm@latest typescript vitest @playwright/test @biomejs/biome || true
 fi
 
-log "[4/10] Python 3.11 + uv"
+log "[4/10] Python 3.11+ + uv"
+# Install whatever python3 the distro ships — uv will manage the actual 3.11+
+# runtime used by UCIL's ml/ pipeline independently.
 if [[ "${SKIP_SUDO:-0}" != "1" ]]; then
-  sudo apt-get install -y python3.11 python3.11-venv python3.11-dev
+  sudo apt-get install -y python3 python3-venv python3-dev python3-pip || true
 fi
 if ! command -v uv >/dev/null; then
   curl -LsSf https://astral.sh/uv/install.sh | sh
 fi
 export PATH="$HOME/.local/bin:$PATH"
+# Let uv fetch a pinned Python 3.11 into ~/.local (doesn't touch apt).
+if command -v uv >/dev/null 2>&1; then
+  uv python install 3.11 || true
+fi
 for tool in ruff mypy pytest hypothesis; do
   uv tool install "$tool" 2>/dev/null || true
 done
