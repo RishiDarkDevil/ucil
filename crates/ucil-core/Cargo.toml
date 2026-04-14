@@ -11,6 +11,13 @@ description = "UCIL core: incremental engine, knowledge graph, cache, fusion, CE
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rusqlite.workspace = true
+opentelemetry.workspace = true
+opentelemetry_sdk.workspace = true
+opentelemetry-stdout.workspace = true
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros"] }
+tempfile.workspace = true

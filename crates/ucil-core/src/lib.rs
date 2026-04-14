@@ -7,5 +7,17 @@
 #![warn(clippy::all, clippy::pedantic, clippy::nursery)]
 #![deny(rustdoc::broken_intra_doc_links)]
 
+pub mod otel;
+pub mod schema_migration;
+pub mod types;
+
 /// Crate version, identical to the `Cargo.toml` package version.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+// ── Re-exports ────────────────────────────────────────────────────────────────
+
+pub use otel::{init_tracer, shutdown_tracer};
+pub use schema_migration::{MigrationError, SCHEMA_VERSION};
+pub use types::{
+    CeqpParams, Diagnostic, KnowledgeEntry, QueryPlan, ResponseEnvelope, Symbol, ToolGroup,
+};

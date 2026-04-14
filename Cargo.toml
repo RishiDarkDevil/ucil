@@ -29,6 +29,21 @@ tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# Serialisation
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Embedded SQLite (bundled = static link, no system libsqlite3 required)
+rusqlite = { version = "0.31", features = ["bundled"] }
+
+# OpenTelemetry — stdout-only exporter for Phase 0 (invariant 8)
+opentelemetry = { version = "0.27", features = ["trace"] }
+opentelemetry_sdk = { version = "0.27", features = ["trace"] }
+opentelemetry-stdout = { version = "0.27", features = ["trace"] }
+
+# Test helpers
+tempfile = "3"
+
 [profile.dev]
 opt-level = 0
 
