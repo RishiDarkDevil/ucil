@@ -46,30 +46,36 @@ if [[ -z "$START_COMMIT" ]]; then
 fi
 
 # Candidate commits, newest first: every commit trailed "Feature: $FEATURE_ID".
-# Fall back to the chain START_COMMIT..HEAD~history.
 CANDIDATES=$(git log --grep="Feature: $FEATURE_ID" --format='%H' || true)
 if [[ -z "$CANDIDATES" ]]; then
   CANDIDATES="$START_COMMIT"
 fi
 
-LAST_COMMIT=""
-CHANGED_FILES=""
+# UNION source files across every commit tagged for this feature. A feature
+# can span multiple commits (e.g. impl commit + lib.rs wiring commit + test
+# file commit) — stashing only one of those leaves the module intact via
+# the others, producing a fake-green mutation check. We must stash the
+# full set.
+LAST_COMMIT=""            # newest commit that still touched source (for reporting)
+declare -A _seen_files
+UNION_FILES=""
 for sha in $CANDIDATES; do
   files=$(extract_changed_source "$sha")
   if [[ -n "$files" ]]; then
-    LAST_COMMIT="$sha"
-    CHANGED_FILES="$files"
-    break
+    [[ -z "$LAST_COMMIT" ]] && LAST_COMMIT="$sha"
+    while IFS= read -r f; do
+      [[ -z "$f" ]] && continue
+      if [[ -z "${_seen_files[$f]:-}" ]]; then
+        _seen_files[$f]=1
+        UNION_FILES+="$f"$'\n'
+      fi
+    done <<< "$files"
   fi
 done
+CHANGED_FILES=$(echo "$UNION_FILES" | grep -v '^$' | sort -u)
 
-if [[ -z "$LAST_COMMIT" ]]; then
-  echo "No commit with source-file changes found for feature $FEATURE_ID — nothing to mutation-check."
-  exit 0
-fi
-
-if [[ -z "$CHANGED_FILES" ]]; then
-  echo "No source files changed by $LAST_COMMIT — nothing to mutation-check."
+if [[ -z "$LAST_COMMIT" ]] || [[ -z "$CHANGED_FILES" ]]; then
+  echo "No commits with source-file changes found for feature $FEATURE_ID — nothing to mutation-check."
   exit 0
 fi
 
