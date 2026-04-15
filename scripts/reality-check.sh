@@ -72,7 +72,10 @@ for sha in $CANDIDATES; do
     done <<< "$files"
   fi
 done
-CHANGED_FILES=$(echo "$UNION_FILES" | grep -v '^$' | sort -u)
+# `grep -v '^$' | sort -u` exits 1 on empty input (no non-blank lines),
+# which trips `set -e` before the next line gets to null-check. Guard with
+# `|| true` so empty UNION_FILES produces an empty CHANGED_FILES cleanly.
+CHANGED_FILES=$(echo "$UNION_FILES" | grep -v '^$' | sort -u || true)
 
 if [[ -z "$LAST_COMMIT" ]] || [[ -z "$CHANGED_FILES" ]]; then
   echo "No commits with source-file changes found for feature $FEATURE_ID — nothing to mutation-check."
@@ -93,8 +96,14 @@ run_acceptance() {
     case "$kind" in
       cargo_test)
         selector=$(echo "$t" | jq -r .selector)
+        # `--no-fail-fast` is a cargo/nextest flag, not a libtest flag.
+        # If a selector contains `--` (separator between cargo args and
+        # test-binary args), appending `--no-fail-fast` AFTER the selector
+        # lands it after `--` where libtest rejects it. Put it BEFORE the
+        # selector so it's unambiguously a cargo/nextest arg regardless of
+        # whether the selector contains `--`.
         # shellcheck disable=SC2086
-        cargo nextest run $selector --no-fail-fast 2>/dev/null || cargo test $selector --no-fail-fast
+        cargo nextest run --no-fail-fast $selector 2>/dev/null || cargo test --no-fail-fast $selector
         ;;
       pytest)
         selector=$(echo "$t" | jq -r .selector)
