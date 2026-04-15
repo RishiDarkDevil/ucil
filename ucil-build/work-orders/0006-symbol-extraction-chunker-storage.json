@@ -1,0 +1,83 @@
+{
+  "id": "WO-0006",
+  "slug": "symbol-extraction-chunker-storage",
+  "phase": 1,
+  "week": 2,
+  "features": ["P1-W2-F02", "P1-W2-F03", "P1-W2-F06"],
+  "feature_ids": ["P1-W2-F02", "P1-W2-F03", "P1-W2-F06"],
+  "branch": "feat/WO-0006-symbol-extraction-chunker-storage",
+  "worktree_branch": "feat/WO-0006-symbol-extraction-chunker-storage",
+  "executor_agent": "executor",
+  "goal": "Implement tree-sitter symbol extraction (P1-W2-F02) and AST-aware chunking (P1-W2-F03) in ucil-treesitter, and initialise the two-tier .ucil/ storage layout (P1-W2-F06) in ucil-daemon.",
+  "plan_summary": "Part 1 (ucil-treesitter/symbols.rs): add ExtractedSymbol, SymbolKind, and SymbolExtractor; extraction walks tree-sitter query results for named node types (function_item, class_definition, method_definition, struct_item, enum_item, trait_item, …) per language and returns Vec<ExtractedSymbol> with start_line, end_line, and a signature string. Part 2 (ucil-treesitter/chunker.rs): add Chunk and Chunker; chunker groups consecutive ExtractedSymbol spans into ≤512-token chunks (approximated as chars/4), never splits mid-symbol, truncates oversized single symbols to signature + first-paragraph doc comment. Part 3 (ucil-daemon/storage.rs): add StorageLayout and StorageError; StorageLayout::init(base: &Path, branch: &str) creates .ucil/shared/, .ucil/branches/<branch>/, .ucil/sessions/, .ucil/logs/, .ucil/plugins/ with std::fs::create_dir_all and returns a typed handle; test_two_tier_layout verifies the directories exist.",
+  "scope_in": [
+    "crates/ucil-treesitter/src/symbols.rs — NEW file: SymbolKind enum (Function, Class, Method, Struct, Enum, Trait, Const, TypeAlias, Module, Interface, Constructor, Field); ExtractedSymbol { name: String, kind: SymbolKind, start_line: u32, end_line: u32, signature: String }; SymbolExtractor struct with pub fn extract(tree: &tree_sitter::Tree, source: &str, lang: &crate::parser::Language) -> Vec<ExtractedSymbol>; per-language tree-sitter query strings covering at least: Rust (function_item, struct_item, enum_item, trait_item, impl_item, const_item, type_item, mod_item), Python (function_definition, class_definition, decorated_definition), TypeScript/JavaScript (function_declaration, method_definition, class_declaration, arrow_function with variable_declarator parent); unit tests in #[cfg(test)]: extract_rust_functions (Rust source with 2 fns → 2 ExtractedSymbol with kind=Function), extract_rust_struct (struct + impl → Struct + Function methods), extract_python_class (Python class with methods → Class + Methods), extract_typescript_functions (TS arrow fn + regular fn → 2 symbols), extract_empty_source_returns_empty_vec, all_symbols_have_nonempty_names",
+    "crates/ucil-treesitter/src/chunker.rs — NEW file: ChunkError (thiserror, variants: ParseRequired { reason: String }); Chunk { id: String ('{file_path}:{start_line}:{end_line}'), file_path: String, start_line: u32, end_line: u32, content: String, language: String, symbol_name: String, symbol_kind: String, token_count: u32 }; Chunker struct with pub fn chunk(tree: &tree_sitter::Tree, source: &str, lang: &crate::parser::Language, file_path: &str) -> Result<Vec<Chunk>, ChunkError>; token counting: approximate as (content.len() as u32) / 4 (chars/4 heuristic, no external tokenizer); chunking algorithm: iterate symbols from SymbolExtractor, each symbol becomes one chunk; if token_count > 512 then content = signature + '\\n' + first 512-token worth of chars of body; unit tests: chunk_rust_two_functions → 2 chunks each ≤512 tokens, chunk_oversized_function → 1 chunk with truncated content and token_count ≤512, chunk_empty_source → empty Vec, chunk_ids_match_expected_format",
+    "crates/ucil-treesitter/src/lib.rs — add 'pub mod symbols;' and 'pub mod chunker;'; add re-exports: pub use symbols::{ExtractedSymbol, SymbolExtractor, SymbolKind}; pub use chunker::{Chunk, ChunkError, Chunker}",
+    "crates/ucil-daemon/src/storage.rs — NEW file: StorageError (thiserror, variants: Io { path: PathBuf, source: std::io::Error }); StorageLayout { base: PathBuf, branch: String, shared_dir: PathBuf, branch_dir: PathBuf }; impl StorageLayout { pub fn init(base: &Path, branch: &str) -> Result<Self, StorageError> — creates .ucil/shared/, .ucil/branches/<branch>/, .ucil/sessions/, .ucil/logs/, .ucil/plugins/ via std::fs::create_dir_all; pub fn shared_dir(&self) -> &Path; pub fn branch_dir(&self) -> &Path; pub fn sessions_dir(&self) -> PathBuf; pub fn logs_dir(&self) -> PathBuf; pub fn plugins_dir(&self) -> PathBuf }; unit test test_two_tier_layout: creates StorageLayout::init in a tempfile::TempDir, asserts shared_dir() and branch_dir() exist, asserts branch_dir() contains the branch name, asserts sessions_dir() exists",
+    "crates/ucil-daemon/src/lib.rs — add 'pub mod storage;'; add re-exports: pub use storage::{StorageError, StorageLayout}"
+  ],
+  "scope_out": [
+    "P1-W2-F04 (LMDB tag cache via heed) — depends on P1-W2-F02 (this WO); goes in WO-0007",
+    "P1-W3-F02 (file watcher notify + debouncer) — depends on P1-W2-F06 (this WO); goes in WO-0008",
+    "P1-W3-F01 (process lifecycle / daemonize) — eligible but scoped to next WO to keep batch size coherent",
+    "Any embedding inference — ucil-embeddings crate is Phase 2+",
+    "No LanceDB, sqlite-vec, or vector store wiring in this WO — storage layout only creates directories, not databases",
+    "No SQLite schema creation in this WO — that is P1-W4-F01",
+    "No LMDB environment initialisation — that is P1-W2-F04",
+    "Do not touch tests/fixtures/** or modify existing parser.rs tests",
+    "Do not wire ucil-daemon/main.rs to call StorageLayout::init — keep as library module only"
+  ],
+  "acceptance": [
+    "cargo nextest run -p ucil-treesitter symbols:: exits 0 with all 6 symbol tests passing",
+    "cargo nextest run -p ucil-treesitter chunker:: exits 0 with all 4 chunker tests passing",
+    "cargo nextest run -p ucil-daemon storage::test_two_tier_layout exits 0",
+    "cargo clippy -p ucil-treesitter -- -D warnings exits 0 (no new clippy errors)",
+    "cargo clippy -p ucil-daemon -- -D warnings exits 0",
+    "cargo build --workspace exits 0",
+    "grep -c 'SymbolKind::' crates/ucil-treesitter/src/symbols.rs outputs ≥6 (coverage of Function, Class, Method, Struct, Enum, Trait at minimum)"
+  ],
+  "acceptance_criteria": [
+    "cargo nextest run -p ucil-treesitter symbols:: --test-threads 4 2>&1 | tail -5 | grep -q 'ok'",
+    "cargo nextest run -p ucil-treesitter chunker:: --test-threads 4 2>&1 | tail -5 | grep -q 'ok'",
+    "cargo nextest run -p ucil-daemon storage::test_two_tier_layout --test-threads 4 2>&1 | tail -5 | grep -q 'ok'",
+    "cargo clippy -p ucil-treesitter -- -D warnings 2>&1 | grep -c '^error' | awk '{exit ($1 > 0)}'",
+    "cargo clippy -p ucil-daemon -- -D warnings 2>&1 | grep -c '^error' | awk '{exit ($1 > 0)}'",
+    "cargo build --workspace 2>&1 | grep -c '^error' | awk '{exit ($1 > 0)}'",
+    "grep -c 'SymbolKind::' crates/ucil-treesitter/src/symbols.rs | awk '{exit ($1 < 6)}'"
+  ],
+  "implementation_notes": [
+    "Tree-sitter query syntax for Rust: use tree_sitter::Query::new(&lang, '(function_item name: (identifier) @name) @func') then iterate over QueryCursor matches. The @name capture gives the symbol name node, the @func capture gives the full span for start_line/end_line.",
+    "For signature extraction: signature = source[node.start_byte()..node.start_byte()+min(256, node.byte_range().len())].lines().take(1).collect() — just the first line of the node, trimmed.",
+    "For Python: tree_sitter_python nodes named 'function_definition' have child 'name' (identifier) and child 'parameters'; 'class_definition' has child 'name'. The 'decorated_definition' node wraps decorated functions/classes — use its span but extract the inner function/class name.",
+    "For TypeScript: 'function_declaration' has child 'name' (identifier). 'method_definition' inside 'class_body'. 'lexical_declaration' with 'variable_declarator' + 'arrow_function' value — use the declarator name. 'class_declaration' has child 'name'.",
+    "Token count heuristic: (content.chars().count() as u32).saturating_div(4). This is a reasonable approximation for LLM tokenizers at this stage; exact tiktoken-based counting is deferred to Phase 2 when ucil-embeddings lands.",
+    "Oversized symbol truncation: if approx_token_count > 512, take the first 512*4 = 2048 bytes of content. Always set token_count = (actual_content.chars().count() as u32) / 4 after truncation.",
+    "StorageLayout::init must be idempotent — create_dir_all does not error if the directory already exists. No need for a lock file in this WO.",
+    "The branch name passed to StorageLayout::init may contain slashes (e.g. 'feat/my-feature'). Use Path::new(branch).to_string_lossy().replace('/', '-') or just pass it through — create_dir_all handles nested paths. Preserve the raw branch string for naming, but sanitise slashes to hyphens when forming the dir name: branch.replace('/', \"-\").",
+    "For the Chunk.id field format '{file_path}:{start_line}:{end_line}' — use the file_path argument passed to Chunker::chunk, not an absolute path. Example: 'src/lib.rs:1:42'.",
+    "Commit cadence: symbols.rs skeleton → symbols unit tests → chunker.rs skeleton → chunker unit tests → storage.rs → storage unit test → lib.rs updates (2 crates) → final clippy clean-up. ~8 commits targeting ~50 lines each."
+  ],
+  "forbidden_paths": [
+    "ucil-build/feature-list.json",
+    "ucil-build/feature-list.schema.json",
+    "ucil-master-plan-v2.1-final.md",
+    "tests/fixtures/**",
+    "scripts/gate/**",
+    "scripts/flip-feature.sh"
+  ],
+  "context_refs": [
+    "master-plan:§18 Phase 1 Week 2 lines 1734 — symbol extraction + AST-aware chunking",
+    "master-plan:§12.2 lines 1324-1339 — code_chunks_schema: id, file_path, start_line, end_line, content, language, symbol_name, symbol_kind, token_count; chunking = AST-aware, ≤512 tokens, never split mid-function",
+    "master-plan:§11.2 lines 1063-1091 — storage layout: .ucil/shared/, .ucil/branches/<branch>/, .ucil/sessions/, .ucil/logs/, .ucil/plugins/",
+    "master-plan:§10.3 lines 1031 — Tier 1 Instant: tree-sitter symbol extraction in <5ms",
+    "phase-log:ucil-build/phase-log/01-phase-1/CLAUDE.md §Invariants — no mocks, real tree-sitter grammars, ucil-treesitter depends only on ucil-core",
+    ".claude/rules/rust-style.md — thiserror for libs, no unwrap outside test, lib.rs re-exports only, pub(crate) default visibility",
+    ".claude/rules/commit-style.md — conventional commits with Phase/Feature/Work-order trailers, ~50 lines per commit"
+  ],
+  "dependencies_met": true,
+  "estimated_commits": 9,
+  "estimated_complexity": "medium",
+  "created_at": "2026-04-15T21:00:00Z",
+  "created_by": "planner"
+}
