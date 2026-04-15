@@ -84,10 +84,10 @@
       "dependencies": [
         "P0-W1-F03"
       ],
-      "passes": false,
-      "last_verified_ts": null,
-      "last_verified_by": null,
-      "last_verified_commit": null,
+      "passes": true,
+      "last_verified_ts": "2026-04-15T05:21:32Z",
+      "last_verified_by": "verifier-e632b721-e2e3-4547-ad3e-ca2216470451",
+      "last_verified_commit": "441092165c5d0006c44aedd0866919215cd8fb3f",
       "attempts": 0,
       "blocked_reason": null
     },
@@ -106,10 +106,10 @@
       "dependencies": [
         "P0-W1-F03"
       ],
-      "passes": false,
-      "last_verified_ts": null,
-      "last_verified_by": null,
-      "last_verified_commit": null,
+      "passes": true,
+      "last_verified_ts": "2026-04-15T05:21:34Z",
+      "last_verified_by": "verifier-e632b721-e2e3-4547-ad3e-ca2216470451",
+      "last_verified_commit": "441092165c5d0006c44aedd0866919215cd8fb3f",
       "attempts": 0,
       "blocked_reason": null
     },
@@ -128,10 +128,10 @@
       "dependencies": [
         "P0-W1-F05"
       ],
-      "passes": false,
-      "last_verified_ts": null,
-      "last_verified_by": null,
-      "last_verified_commit": null,
+      "passes": true,
+      "last_verified_ts": "2026-04-15T05:21:37Z",
+      "last_verified_by": "verifier-e632b721-e2e3-4547-ad3e-ca2216470451",
+      "last_verified_commit": "441092165c5d0006c44aedd0866919215cd8fb3f",
       "attempts": 0,
       "blocked_reason": null
     },
@@ -173,10 +173,10 @@
       "dependencies": [
         "P0-W1-F01"
       ],
-      "passes": false,
-      "last_verified_ts": null,
-      "last_verified_by": null,
-      "last_verified_commit": null,
+      "passes": true,
+      "last_verified_ts": "2026-04-15T05:21:39Z",
+      "last_verified_by": "verifier-e632b721-e2e3-4547-ad3e-ca2216470451",
+      "last_verified_commit": "441092165c5d0006c44aedd0866919215cd8fb3f",
       "attempts": 0,
       "blocked_reason": null
     },
