@@ -124,7 +124,7 @@ impl Chunker {
 
         // Pre-split source into lines for O(symbols) content extraction.
         let lines: Vec<&str> = source.lines().collect();
-        let lang_str = lang_to_str(lang);
+        let lang_str = lang_to_str(*lang);
 
         let mut chunks = Vec::with_capacity(symbols.len());
 
@@ -139,11 +139,11 @@ impl Chunker {
             };
 
             // Approximate token count before truncation.
-            let raw_tokens = (raw_content.chars().count() as u32).saturating_div(4);
+            let raw_tokens = chars_to_u32(raw_content.chars().count()).saturating_div(4);
 
             let (content, token_count) = if raw_tokens > MAX_TOKENS {
                 let truncated: String = raw_content.chars().take(MAX_CHARS).collect();
-                let tc = (truncated.chars().count() as u32).saturating_div(4);
+                let tc = chars_to_u32(truncated.chars().count()).saturating_div(4);
                 (truncated, tc)
             } else {
                 (raw_content, raw_tokens)
@@ -170,7 +170,14 @@ impl Chunker {
 
 // ── Conversion helpers ─────────────────────────────────────────────────────
 
-fn lang_to_str(lang: &Language) -> &'static str {
+/// Convert a `chars().count()` result (`usize`) to `u32`.
+/// Strings longer than ~4 billion chars are not expected; cap defensively.
+#[inline]
+fn chars_to_u32(n: usize) -> u32 {
+    u32::try_from(n).unwrap_or(u32::MAX)
+}
+
+const fn lang_to_str(lang: Language) -> &'static str {
     match lang {
         Language::Rust => "rust",
         Language::Python => "python",
@@ -186,7 +193,7 @@ fn lang_to_str(lang: &Language) -> &'static str {
     }
 }
 
-fn symbol_kind_to_str(kind: SymbolKind) -> &'static str {
+const fn symbol_kind_to_str(kind: SymbolKind) -> &'static str {
     match kind {
         SymbolKind::Function => "function",
         SymbolKind::Class => "class",

@@ -145,6 +145,15 @@ fn has_ancestor_kind(mut node: Node<'_>, kind: &str) -> bool {
     false
 }
 
+/// Convert a tree-sitter row index (`usize`) to `u32`.
+///
+/// Source files never have more than ~4 billion lines; the `u32::MAX` cap is
+/// a safety net, not an expected code path.
+#[inline]
+fn usize_to_u32(n: usize) -> u32 {
+    u32::try_from(n).unwrap_or(u32::MAX)
+}
+
 /// Run a single compiled query and return `(sym_node, name_text)` pairs.
 ///
 /// `sym_capture` names the capture that gives the full symbol span;
@@ -160,13 +169,11 @@ fn run_query<'tree>(
 ) -> Vec<(Node<'tree>, String)> {
     use streaming_iterator::StreamingIterator as _;
 
-    let sym_idx = match query.capture_index_for_name(sym_capture) {
-        Some(i) => i,
-        None => return Vec::new(),
+    let Some(sym_idx) = query.capture_index_for_name(sym_capture) else {
+        return Vec::new();
     };
-    let name_idx = match query.capture_index_for_name(name_capture) {
-        Some(i) => i,
-        None => return Vec::new(),
+    let Some(name_idx) = query.capture_index_for_name(name_capture) else {
+        return Vec::new();
     };
 
     let mut cursor = QueryCursor::new();
@@ -248,8 +255,8 @@ fn extract_rust(tree: &Tree, source: &str) -> Vec<ExtractedSymbol> {
             symbols.push(ExtractedSymbol {
                 name,
                 kind: *kind,
-                start_line: sym_node.start_position().row as u32,
-                end_line: sym_node.end_position().row as u32,
+                start_line: usize_to_u32(sym_node.start_position().row),
+                end_line: usize_to_u32(sym_node.end_position().row),
                 signature: signature_from_node(sym_node, source),
             });
         }
@@ -270,7 +277,7 @@ fn extract_python(tree: &Tree, source: &str) -> Vec<ExtractedSymbol> {
             for (sym_node, name) in run_query(&q, tree.root_node(), source, "sym", "name") {
                 if sym_node
                     .parent()
-                    .map_or(false, |p| p.kind() == "decorated_definition")
+                    .is_some_and(|p| p.kind() == "decorated_definition")
                 {
                     // Handled by the decorated_definition pass below.
                     continue;
@@ -278,8 +285,8 @@ fn extract_python(tree: &Tree, source: &str) -> Vec<ExtractedSymbol> {
                 symbols.push(ExtractedSymbol {
                     name,
                     kind: SymbolKind::Class,
-                    start_line: sym_node.start_position().row as u32,
-                    end_line: sym_node.end_position().row as u32,
+                    start_line: usize_to_u32(sym_node.start_position().row),
+                    end_line: usize_to_u32(sym_node.end_position().row),
                     signature: signature_from_node(sym_node, source),
                 });
             }
@@ -293,7 +300,7 @@ fn extract_python(tree: &Tree, source: &str) -> Vec<ExtractedSymbol> {
             for (sym_node, name) in run_query(&q, tree.root_node(), source, "sym", "name") {
                 if sym_node
                     .parent()
-                    .map_or(false, |p| p.kind() == "decorated_definition")
+                    .is_some_and(|p| p.kind() == "decorated_definition")
                 {
                     // Handled by the decorated_definition pass below.
                     continue;
@@ -306,8 +313,8 @@ fn extract_python(tree: &Tree, source: &str) -> Vec<ExtractedSymbol> {
                 symbols.push(ExtractedSymbol {
                     name,
                     kind,
-                    start_line: sym_node.start_position().row as u32,
-                    end_line: sym_node.end_position().row as u32,
+                    start_line: usize_to_u32(sym_node.start_position().row),
+                    end_line: usize_to_u32(sym_node.end_position().row),
                     signature: signature_from_node(sym_node, source),
                 });
             }
@@ -329,8 +336,8 @@ fn extract_python(tree: &Tree, source: &str) -> Vec<ExtractedSymbol> {
                 symbols.push(ExtractedSymbol {
                     name,
                     kind,
-                    start_line: sym_node.start_position().row as u32,
-                    end_line: sym_node.end_position().row as u32,
+                    start_line: usize_to_u32(sym_node.start_position().row),
+                    end_line: usize_to_u32(sym_node.end_position().row),
                     signature: signature_from_node(sym_node, source),
                 });
             }
@@ -345,8 +352,8 @@ fn extract_python(tree: &Tree, source: &str) -> Vec<ExtractedSymbol> {
                 symbols.push(ExtractedSymbol {
                     name,
                     kind: SymbolKind::Class,
-                    start_line: sym_node.start_position().row as u32,
-                    end_line: sym_node.end_position().row as u32,
+                    start_line: usize_to_u32(sym_node.start_position().row),
+                    end_line: usize_to_u32(sym_node.end_position().row),
                     signature: signature_from_node(sym_node, source),
                 });
             }
@@ -376,8 +383,8 @@ fn extract_ts_js(tree: &Tree, source: &str, is_js: bool) -> Vec<ExtractedSymbol>
                 symbols.push(ExtractedSymbol {
                     name,
                     kind: SymbolKind::Function,
-                    start_line: sym_node.start_position().row as u32,
-                    end_line: sym_node.end_position().row as u32,
+                    start_line: usize_to_u32(sym_node.start_position().row),
+                    end_line: usize_to_u32(sym_node.end_position().row),
                     signature: signature_from_node(sym_node, source),
                 });
             }
@@ -396,8 +403,8 @@ fn extract_ts_js(tree: &Tree, source: &str, is_js: bool) -> Vec<ExtractedSymbol>
                 symbols.push(ExtractedSymbol {
                     name,
                     kind: SymbolKind::Class,
-                    start_line: sym_node.start_position().row as u32,
-                    end_line: sym_node.end_position().row as u32,
+                    start_line: usize_to_u32(sym_node.start_position().row),
+                    end_line: usize_to_u32(sym_node.end_position().row),
                     signature: signature_from_node(sym_node, source),
                 });
             }
@@ -412,8 +419,8 @@ fn extract_ts_js(tree: &Tree, source: &str, is_js: bool) -> Vec<ExtractedSymbol>
                 symbols.push(ExtractedSymbol {
                     name,
                     kind: SymbolKind::Method,
-                    start_line: sym_node.start_position().row as u32,
-                    end_line: sym_node.end_position().row as u32,
+                    start_line: usize_to_u32(sym_node.start_position().row),
+                    end_line: usize_to_u32(sym_node.end_position().row),
                     signature: signature_from_node(sym_node, source),
                 });
             }
@@ -429,8 +436,8 @@ fn extract_ts_js(tree: &Tree, source: &str, is_js: bool) -> Vec<ExtractedSymbol>
                 symbols.push(ExtractedSymbol {
                     name,
                     kind: SymbolKind::Function,
-                    start_line: sym_node.start_position().row as u32,
-                    end_line: sym_node.end_position().row as u32,
+                    start_line: usize_to_u32(sym_node.start_position().row),
+                    end_line: usize_to_u32(sym_node.end_position().row),
                     signature: signature_from_node(sym_node, source),
                 });
             }
