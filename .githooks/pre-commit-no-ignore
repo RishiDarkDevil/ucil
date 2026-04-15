@@ -16,7 +16,8 @@ fi
 
 # Allowed file patterns (exempt — docs/markdown/config explaining these patterns).
 # Pattern is applied against the "file:+line" prefix we emit below.
-ALLOW_PREFIX='^(docs/|[^:]*\.md:|[^:]*CLAUDE\.md:|\.githooks/|\.claude/|scripts/|ucil-build/)'
+# DEC-0004: tests/fixtures/mixed-project/ is a defect fixture and is exempt.
+ALLOW_PREFIX='^(docs/|[^:]*\.md:|[^:]*CLAUDE\.md:|\.githooks/|\.claude/|scripts/|ucil-build/|tests/fixtures/mixed-project/)'
 
 # Get added lines, filter out exempt files
 ADDED=$(git diff --cached --unified=0 --diff-filter=AM | \
