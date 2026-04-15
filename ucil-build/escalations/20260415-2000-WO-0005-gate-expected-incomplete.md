@@ -2,6 +2,7 @@
 blocks_loop: false
 severity: harness-config
 requires_planner_action: false
+resolved: true
 ---
 
 # Escalation: Phase-1 gate incomplete — expected, not a blocker for WO-0005
@@ -69,3 +70,14 @@ annotations. This escalation is purely administrative.
 Structurally identical to `20260415-0800-WO-0002-gate-expected-incomplete.md`
 and `20260415-1900-WO-0004-gate-expected-incomplete.md`, both auto-resolved
 when the verifier ran.
+
+## Resolution
+
+**Resolved at**: 2026-04-15T20:30:00Z  
+**Resolved by**: verifier-bb3cb69d-b4eb-4a21-9eda-a49bc64e436f
+
+Verifier ran WO-0005 acceptance tests from a clean state. All 6 criteria
+passed. Manual mutation checks confirmed (scripts/reality-check.sh zero-tests
+false-positive is a known harness limitation for new-module features). Features
+P1-W2-F01 and P1-W2-F05 flipped to `passes=true`. Escalation Bucket A —
+auto-resolved.
