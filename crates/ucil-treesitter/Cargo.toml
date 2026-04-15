@@ -11,6 +11,7 @@ description = "UCIL tree-sitter integration: multi-language parser, symbol extra
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+streaming-iterator.workspace = true
 ucil-core = { path = "../ucil-core" }
 
 # tree-sitter core + grammar crates (≥10 languages required)

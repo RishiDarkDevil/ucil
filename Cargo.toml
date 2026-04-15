@@ -69,6 +69,9 @@ tree-sitter-json = "0.24"
 # Unique IDs for session manager
 uuid = { version = "1", features = ["v4", "serde"] }
 
+# Streaming iterator — required by tree-sitter 0.25 QueryMatches/QueryCaptures
+streaming-iterator = "0.1"
+
 [profile.dev]
 opt-level = 0
 
