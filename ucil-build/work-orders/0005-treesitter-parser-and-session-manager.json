@@ -1,0 +1,79 @@
+{
+  "id": "WO-0005",
+  "slug": "treesitter-parser-and-session-manager",
+  "phase": 1,
+  "week": 2,
+  "features": ["P1-W2-F01", "P1-W2-F05"],
+  "feature_ids": ["P1-W2-F01", "P1-W2-F05"],
+  "branch": "feat/WO-0005-treesitter-parser-and-session-manager",
+  "worktree_branch": "feat/WO-0005-treesitter-parser-and-session-manager",
+  "executor_agent": "executor",
+  "goal": "Implement the ucil-treesitter multi-language parser (≥10 grammars, parser:: tests green) and the ucil-daemon session manager (session creation, branch detection, worktree discovery, session_manager:: tests green).",
+  "plan_summary": "Part 1 (ucil-treesitter): add tree-sitter + per-language grammar crates to ucil-treesitter/Cargo.toml, then implement crates/ucil-treesitter/src/parser.rs exposing a Parser struct with parse(source: &str, lang: Language) → Result<tree_sitter::Tree, ParseError> and a SUPPORTED_LANGUAGES const listing ≥10 entries. Part 2 (ucil-daemon): add session_manager.rs to crates/ucil-daemon/src/ exposing SessionManager with create_session() → SessionId, detect_branch(workdir: &Path) → Result<String>, and discover_worktrees(repo_root: &Path) → Result<Vec<WorktreeInfo>>; session state is kept in an in-memory HashMap guarded by a tokio::sync::RwLock. Both parts must pass cargo nextest and cargo clippy -D warnings with no warnings.",
+  "scope_in": [
+    "crates/ucil-treesitter/Cargo.toml — add tree-sitter ^0.22 and grammar crates: tree-sitter-rust, tree-sitter-python, tree-sitter-typescript, tree-sitter-javascript, tree-sitter-go, tree-sitter-java, tree-sitter-c, tree-sitter-cpp, tree-sitter-ruby, tree-sitter-kotlin (or tree-sitter-language-pack if ADR-approved); add to workspace [workspace.dependencies] as well",
+    "crates/ucil-treesitter/src/lib.rs — declare pub mod parser; and re-export pub use parser::{Language, ParseError, Parser, SUPPORTED_LANGUAGES}",
+    "crates/ucil-treesitter/src/parser.rs — Language enum (one variant per grammar), ParseError (thiserror), Parser struct (wraps tree_sitter::Parser), impl Parser { pub fn new() -> Self, pub fn parse(&mut self, source: &str, lang: Language) -> Result<tree_sitter::Tree, ParseError> }, SUPPORTED_LANGUAGES: &[Language]; unit tests in #[cfg(test)] covering: parse valid Rust snippet succeeds, parse valid Python snippet succeeds, parse valid TypeScript snippet succeeds, parse empty source returns an empty tree (not an error), parse unknown content as a wrong language does not panic",
+    "crates/ucil-daemon/src/lib.rs — declare pub mod session_manager; and re-export pub use session_manager::{SessionId, SessionInfo, SessionManager, WorktreeInfo}",
+    "crates/ucil-daemon/src/session_manager.rs — SessionId(Uuid), SessionInfo { id, branch, worktree_root, created_at }, WorktreeInfo { path, branch, head_sha }, SessionManager { sessions: RwLock<HashMap<SessionId, SessionInfo>> }, impl SessionManager { pub fn new() -> Self, pub async fn create_session(&self, workdir: &Path) -> Result<SessionId>, pub async fn detect_branch(workdir: &Path) -> Result<String>, pub async fn discover_worktrees(repo_root: &Path) -> Result<Vec<WorktreeInfo>>, pub async fn get_session(&self, id: &SessionId) -> Option<SessionInfo> }; unit tests in #[cfg(test)] covering: create_session returns a fresh UUID each call, detect_branch returns a non-empty string when called inside a git repo, detect_branch errors gracefully when called outside a git repo, discover_worktrees returns at least one entry for any git repo",
+    "Cargo.toml (workspace root) — add tree-sitter ^0.22, tree-sitter grammar crates, and uuid ^1 (features=[\"v4\",\"serde\"]) to [workspace.dependencies]",
+    "crates/ucil-daemon/Cargo.toml — add uuid.workspace = true and serde.workspace = true as dependencies"
+  ],
+  "scope_out": [
+    "Symbol extraction (P1-W2-F02), AST-aware chunking (P1-W2-F03), LMDB tag cache (P1-W2-F04) — next work-orders",
+    "Two-tier storage layout (P1-W2-F06) — depends on session manager (this WO) and is a separate WO",
+    "No daemon binary wiring — session_manager.rs is a library module; main.rs is not modified in this WO",
+    "No MCP protocol code in this WO",
+    "No tree-sitter incremental re-parse or tree diffing — basic parse only",
+    "No WASM-compiled grammars — use Rust-native grammar crates only"
+  ],
+  "acceptance": [
+    "cargo nextest run -p ucil-treesitter parser:: exits 0 with all tests passing",
+    "cargo nextest run -p ucil-daemon session_manager:: exits 0 with all tests passing",
+    "cargo clippy -p ucil-treesitter -- -D warnings exits 0",
+    "cargo clippy -p ucil-daemon -- -D warnings exits 0",
+    "cargo build --workspace exits 0 (no compilation errors introduced)",
+    "SUPPORTED_LANGUAGES contains ≥10 entries (grep-verifiable in source)"
+  ],
+  "acceptance_criteria": [
+    "cargo nextest run -p ucil-treesitter --test-threads 4 2>&1 | grep -E 'PASS|test result: ok' | grep -q 'parser'",
+    "cargo nextest run -p ucil-daemon --test-threads 4 2>&1 | grep -E 'PASS|test result: ok' | grep -q 'session_manager'",
+    "cargo clippy -p ucil-treesitter -- -D warnings 2>&1 | grep -qv '^error'",
+    "cargo clippy -p ucil-daemon -- -D warnings 2>&1 | grep -qv '^error'",
+    "cargo build --workspace 2>&1 | grep -qv '^error'",
+    "grep -c 'Language::' crates/ucil-treesitter/src/parser.rs | awk '{if($1>=10)exit 0; else exit 1}'"
+  ],
+  "implementation_notes": [
+    "tree-sitter crate API: create Parser via tree_sitter::Parser::new(), set language via parser.set_language(&LANG).map_err(|e| ParseError::LanguageLoad(e.to_string()))?, call parser.parse(source, None) → Option<Tree>; None means parse failed (e.g. timeout, not a grammar error).",
+    "Language enum variants mirror the grammar crate constants: Rust → tree_sitter_rust::LANGUAGE, Python → tree_sitter_python::LANGUAGE, etc. Use impl Language { pub fn ts_language(&self) -> tree_sitter::Language }.",
+    "ParseError enum: #[derive(Debug, thiserror::Error)] — variants: LanguageLoad(String), ParseFailed { lang: Language, reason: String }.",
+    "For session_manager detect_branch: run tokio::process::Command::new('git').args(['rev-parse','--abbrev-ref','HEAD']).current_dir(workdir).output() with a 5s timeout. Trim whitespace. If output is 'HEAD' (detached), parse HEAD file for short SHA instead.",
+    "For discover_worktrees: run `git worktree list --porcelain`, parse blocks separated by blank lines. Each block has 'worktree <path>', 'HEAD <sha>', 'branch refs/heads/<name>' or 'detached' lines.",
+    "UUID: use uuid::Uuid::new_v4().to_string() — wrap in a newtype SessionId(String) that derives Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize.",
+    "detect_branch and discover_worktrees should work correctly inside the UCIL repo itself — write unit tests that call them from the current process working directory (std::env::current_dir()).",
+    "Grammar crate version note: tree-sitter-rust 0.21 aligns with tree-sitter 0.22. Check crates.io for compatible versions before locking. If a grammar crate is not yet updated for tree-sitter 0.22, use tree-sitter 0.21 instead and document this in a brief inline comment.",
+    "If tree-sitter-kotlin is not available on crates.io at a compatible version, substitute tree-sitter-bash or tree-sitter-json (≥10 languages is the hard requirement, not the specific language list)."
+  ],
+  "forbidden_paths": [
+    "ucil-build/feature-list.json",
+    "ucil-build/feature-list.schema.json",
+    "ucil-master-plan-v2.1-final.md",
+    "tests/fixtures/**",
+    "scripts/gate/**",
+    "scripts/flip-feature.sh"
+  ],
+  "context_refs": [
+    "master-plan:§18 Phase 1 Week 2 lines 1733-1736 — tree-sitter integration + session manager",
+    "master-plan:§10.3 lines 1031 — Tier 1 Instant: tree-sitter AST re-parse <5ms",
+    "master-plan:§11.1 lines 1045-1060 — session layer isolation model",
+    "master-plan:§11.2 lines 1075-1121 — storage layout: shared/, branches/, sessions/",
+    "phase-log:ucil-build/phase-log/01-phase-1/CLAUDE.md §Invariants — no mocks, session UUIDs, LMDB OnceLock",
+    ".claude/rules/rust-style.md — thiserror for libs, no unwrap outside test, lib.rs re-exports only, tokio::time::timeout on IO",
+    ".claude/rules/commit-style.md — conventional commits with Phase/Feature/Work-order trailers, ~50 lines per commit"
+  ],
+  "dependencies_met": true,
+  "estimated_commits": 10,
+  "estimated_complexity": "medium",
+  "created_at": "2026-04-15T19:30:00Z",
+  "created_by": "planner"
+}
