@@ -1,8 +1,8 @@
 ---
 blocks_loop: false
+resolved: true
 severity: harness-config
 requires_planner_action: false
-resolved: false
 ---
 
 # Escalation: WO-0003 rejected — executor must complete F12/F13/F14 before re-submitting
@@ -72,3 +72,12 @@ A concrete fix for `scripts/stop/gate.sh` is documented there (Bucket B).
 - **Bucket E (halt + page executor)**: Hand back to the executor with the five action
   items above. This escalation should remain `resolved: false` until the executor
   completes the work and a fresh verifier confirms all criteria green.
+
+---
+
+## Resolution
+
+Resolved 2026-04-15: All five WO-0003 features (F03, F11, F12, F13,
+F14) are now passes=true on main (commit a62a59b). The work described
+in the "Required executor actions" section has been completed across
+the retry cycles.
