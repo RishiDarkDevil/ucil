@@ -12,3 +12,6 @@ pub use parser::{Language, ParseError, Parser, SUPPORTED_LANGUAGES};
 
 pub mod symbols;
 pub use symbols::{ExtractedSymbol, SymbolExtractor, SymbolKind};
+
+pub mod chunker;
+pub use chunker::{Chunk, ChunkError, Chunker};
