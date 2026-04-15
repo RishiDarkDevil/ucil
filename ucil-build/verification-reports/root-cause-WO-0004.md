@@ -1,161 +1,362 @@
-# Root Cause Analysis: WO-0004 (init pipeline + CI)
+# Root Cause Analysis: WO-0004 — retry 2 (init pipeline + CI)
 
-**Analyst session**: rca-WO-0004-20260415
-**Feature**: WO-0004 (features P0-W1-F04, P0-W1-F05, P0-W1-F06, P0-W1-F08)
-**Attempts before RCA**: 1 (retry 1, verifier session `vrf-41a07ee5`)
-**Branch inspected**: `feat/WO-0004-init-pipeline-and-ci` @ HEAD `42d3270`
+**Analyst session**: rca-WO-0004-retry2-20260415
+**Feature**: WO-0004 (P0-W1-F04, P0-W1-F05, P0-W1-F06, P0-W1-F08)
+**Attempts before this RCA**: 2
+**Branch**: feat/WO-0004-init-pipeline-and-ci @ HEAD `cd1b423`
+
+> **Note**: This report supersedes the prior RCA (rca-WO-0004-20260415), which
+> identified the B1 timeout issue (missing `tokio::time::timeout` on IO await).
+> That issue was fixed in commit `d2af2f9`. The current rejection (retry 2) is
+> caused by a **different set of structural issues** described below.
 
 ---
 
 ## Failure pattern
 
-Single rejection. All 6 acceptance criteria PASSED (tests green, clippy clean,
-P0-W1-F08.sh green). Rejection was a **code-quality blocker**, not a test failure:
-the verifier correctly identified that `.output().await` in `verify_plugin_health()`
-has no `tokio::time::timeout` wrapper, violating the project-wide invariant.
+**Rejection 1** (vrf-41a07ee5, retry 0): B1 — missing `tokio::time::timeout` on
+`output().await` in `verify_plugin_health()`. Fixed in `d2af2f9`. ✓
 
-The same finding was raised as **B1 (blocker)** by the critic report
-(`ucil-build/critic-reports/WO-0004.md`) before the verifier ran, but the
-executor wrote the ready-for-review marker at commit `42d3270` **without
-addressing B1**. The verifier independently rediscovered the same defect.
+**Rejection 2** (vrf-8b2d3f91, retry 2): All 6 acceptance criteria PASS. Clippy
+clean. Stub scan clean. Rejection is caused entirely by **mutation check failures**:
+
+- P0-W1-F04 — `reality-check.sh` exits 1: 0 tests run with code stashed.
+- P0-W1-F05 — `reality-check.sh` exits 1: 0 tests run with code stashed.
+- P0-W1-F06 — `reality-check.sh` exits 3: no commit tagged `Feature: P0-W1-F06`.
+- P0-W1-F08 — exits 0 trivially (no `.rs/.ts/.py` source diff → skipped).
+
+Two distinct root causes compound to produce the F04/F05 failures.
 
 ---
 
-## Root cause (confidence: 100%)
+## Verification
 
-**File**: `crates/ucil-cli/src/commands/init.rs:178–182`
-**Commit**: `a5a5470` (`feat(cli): add LlmProvider …`)
+All three issues confirmed via independent inspection of the worktree at
+`/home/rishidarkdevil/Desktop/ucil-wt/WO-0004` (HEAD `cd1b423`).
 
-```rust
-// lines 178-182  — in verify_plugin_health()
-let kind = match tokio::process::Command::new(bin)
-    .arg("--version")
-    .output()        // ← awaited on line 181 with NO tokio::time::timeout
-    .await
-{
-    Ok(out) if out.status.success() => PluginStatusKind::Ok,
-    _ => PluginStatusKind::Degraded,
-};
+### Issue A — Broken selectors (confirmed)
+
+`cargo nextest list -p ucil-cli` output:
+```
+ucil-cli::bin/ucil commands::init::tests::test_init_report_json
+ucil-cli::bin/ucil commands::init::tests::test_llm_provider_selection
+ucil-cli::bin/ucil commands::init::tests::test_plugin_health_verification
 ```
 
-The `.output().await` probe runs for each of 6 P0 binaries
-(`serena`, `rust-analyzer`, `pyright`, `ruff`, `eslint`, `shellcheck`) with no
-bound on how long it may block. The project invariant in `CLAUDE.md` is
-unambiguous:
+Frozen selectors in `ucil-build/feature-list.json`:
+```json
+{ "kind": "cargo_test", "selector": "-p ucil-cli commands::init::test_llm_provider_selection" }
+{ "kind": "cargo_test", "selector": "-p ucil-cli commands::init::test_plugin_health_verification" }
+{ "kind": "cargo_test", "selector": "-p ucil-cli commands::init::test_init_report_json" }
+```
 
-> All async code uses `tokio::time::timeout` on any await that touches IO.
+The selectors omit `::tests::`. Running with the broken selector:
+```
+$ cargo nextest run -p ucil-cli "commands::init::test_llm_provider_selection"
+Starting 0 tests across 2 binaries (8 tests skipped)
+error: no tests to run
+```
 
-`tokio` is declared in the workspace `Cargo.toml` with `features = ["full"]`
-(root `Cargo.toml:26`), so `tokio::time::timeout` is already available — **no
-Cargo.toml changes are required**.
+Root cause: tests are declared inside a named `mod tests { }` block at
+`init.rs:329`, which inserts `::tests::` into the nextest path.
+The frozen `acceptance_tests` field cannot be edited (anti-laziness contract).
+
+### Issue B — Co-located tests (confirmed)
+
+All F04/F05/F06 test bodies live in `mod tests { }` inside
+`crates/ucil-cli/src/commands/init.rs` (lines 329–510). When
+`reality-check.sh` rolls `init.rs` back to its introducing-commit parent
+(`a5a5470^`), both the implementation AND the test functions are removed.
+Even if Issue A were fixed (selectors corrected), 0 tests would match after
+the rollback because the tests no longer exist in the rolled-back file.
+
+The only fix that satisfies both constraints (correct selector path AND tests
+survive rollback) is to move the F04/F05/F06 test bodies to a **separate file**
+(`crates/ucil-cli/tests/init.rs`) structured so that nextest paths match the
+frozen selectors.
+
+### Issue C — Missing `Feature: P0-W1-F06` tag (confirmed)
+
+```
+$ git log --grep="Feature: P0-W1-F06" --format='%H %s'
+(empty)
+```
+
+- `a5a5470` carries `Feature: P0-W1-F04` ✓
+- `d2af2f9` carries `Feature: P0-W1-F05` ✓
+- No commit carries `Feature: P0-W1-F06`
+
+`reality-check.sh` exits 3 ("No commit found for feature P0-W1-F06") and
+`reality-check.sh P0-W1-F06` fails the mutation gate.
 
 ---
 
-## Remediation (primary)
+## Root cause hypotheses (ranked)
 
-**Who**: executor
-**What**: In `crates/ucil-cli/src/commands/init.rs`, add a named timeout
-constant before `verify_plugin_health()` and wrap the `.output().await` in
-`tokio::time::timeout`:
+| # | Hypothesis | Confidence | Location |
+|---|-----------|-----------|---------|
+| H1 | Tests inside `mod tests {}` make nextest paths `::tests::test_*`; frozen selectors lack the `::tests::` component; co-located tests also vanish on rollback | 100% | `init.rs:329`; feature-list.json selectors |
+| H2 | No `Feature: P0-W1-F06` commit trailer → `reality-check.sh` exits 3 for F06 | 100% | `git log` on branch |
+| H3 | `lib.rs` does not expose `pub mod commands;` → integration test file cannot import from the crate | 100% | `lib.rs:1-9` (empty body) |
+
+H1 and H3 are coupled: H3 must be fixed at the same time as H1 for the
+integration-test approach to compile.
+
+---
+
+## Remediation
+
+### Fix 1: Expose library API (prerequisite)
+
+**Who**: executor  
+**File**: `crates/ucil-cli/src/lib.rs`  
+**Change**: Add `pub mod commands;` to the library root so that integration
+tests in `tests/` can access the implementation.
+
+`commands/mod.rs` already has `pub mod init;` — no change needed there.
+
+**Diff** (≤10 lines):
+```rust
+// src/lib.rs — add after the existing deny/warn attributes:
+pub mod commands;
+```
+
+### Fix 2: Create integration test file with correct module structure
+
+**Who**: executor  
+**File**: `crates/ucil-cli/tests/init.rs` (new file)
+
+The file must declare `mod commands { mod init { ... } }` so that nextest
+assigns paths `commands::init::test_*`, exactly matching the frozen selectors.
 
 ```rust
-/// Maximum time to wait for a single plugin binary to respond to `--version`.
-const PLUGIN_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+//! Integration tests for `ucil init` — P0-W1-F04, P0-W1-F05, P0-W1-F06.
+//!
+//! Module structure mirrors the frozen selectors in feature-list.json:
+//!   commands::init::test_llm_provider_selection
+//!   commands::init::test_plugin_health_verification
+//!   commands::init::test_init_report_json
 
-pub async fn verify_plugin_health() -> Vec<PluginStatus> {
-    let mut statuses = Vec::with_capacity(P0_PLUGINS.len());
-    for &bin in P0_PLUGINS {
-        let output_result = tokio::time::timeout(
-            PLUGIN_PROBE_TIMEOUT,
-            tokio::process::Command::new(bin).arg("--version").output(),
-        )
-        .await;
-        let kind = match output_result {
-            Ok(Ok(out)) if out.status.success() => PluginStatusKind::Ok,
-            _ => PluginStatusKind::Degraded,   // timeout, not-found, or non-zero exit
+mod commands {
+    mod init {
+        use tempfile::TempDir;
+        use ucil_cli::commands::init::{
+            verify_plugin_health, InitArgs, LlmProvider, P0_PLUGINS, PluginStatusKind,
         };
-        statuses.push(PluginStatus {
-            name: bin.to_owned(),
-            status: kind,
-        });
+
+        fn tmp() -> TempDir {
+            TempDir::new().expect("temp dir")
+        }
+
+        // ── F04 — LLM provider selection ─────────────────────────────────────
+
+        #[tokio::test]
+        async fn test_llm_provider_selection() {
+            let dir = tmp();
+            let args = InitArgs {
+                dir: dir.path().to_path_buf(),
+                llm_provider: Some(LlmProvider::Ollama),
+                no_install_plugins: true,
+            };
+            ucil_cli::commands::init::run(args).await.expect("init should succeed");
+
+            let toml_str =
+                std::fs::read_to_string(dir.path().join(".ucil/ucil.toml")).expect("ucil.toml");
+            assert!(
+                toml_str.contains("provider = \"ollama\""),
+                "ucil.toml must contain provider = \"ollama\"; got:\n{toml_str}"
+            );
+
+            let dir2 = tmp();
+            let args2 = InitArgs {
+                dir: dir2.path().to_path_buf(),
+                llm_provider: None,
+                no_install_plugins: true,
+            };
+            ucil_cli::commands::init::run(args2).await.expect("init (no provider) should succeed");
+            let toml_str2 =
+                std::fs::read_to_string(dir2.path().join(".ucil/ucil.toml")).expect("ucil.toml");
+            assert!(
+                toml_str2.contains("provider = \"none\""),
+                "ucil.toml must default to provider = \"none\"; got:\n{toml_str2}"
+            );
+        }
+
+        // ── F05 — Plugin health verification ─────────────────────────────────
+
+        #[tokio::test]
+        async fn test_plugin_health_verification() {
+            // Test verify_plugin_health() directly (it is pub).
+            let statuses = verify_plugin_health().await;
+            assert_eq!(
+                statuses.len(),
+                P0_PLUGINS.len(),
+                "must return one entry per P0 plugin"
+            );
+            for s in &statuses {
+                let valid =
+                    matches!(s.status, PluginStatusKind::Ok | PluginStatusKind::Degraded);
+                assert!(
+                    valid,
+                    "status for '{}' must be Ok or Degraded from verify_plugin_health",
+                    s.name
+                );
+            }
+
+            // Test skipped behavior through run() (skipped_plugin_health is private).
+            let dir = tmp();
+            let args = InitArgs {
+                dir: dir.path().to_path_buf(),
+                llm_provider: None,
+                no_install_plugins: true,
+            };
+            ucil_cli::commands::init::run(args).await.expect("init should succeed");
+            let report: serde_json::Value = serde_json::from_str(
+                &std::fs::read_to_string(dir.path().join(".ucil/init_report.json"))
+                    .expect("init_report.json"),
+            )
+            .expect("valid JSON");
+            for entry in report["plugin_health"].as_array().expect("array") {
+                assert_eq!(
+                    entry["status"], "skipped",
+                    "all statuses must be 'skipped' with --no-install-plugins"
+                );
+            }
+        }
+
+        // ── F06 — init_report.json ────────────────────────────────────────────
+
+        #[tokio::test]
+        async fn test_init_report_json() {
+            let dir = tmp();
+            std::fs::write(dir.path().join("Cargo.toml"), "[package]\nname=\"test\"\n").unwrap();
+            let args = InitArgs {
+                dir: dir.path().to_path_buf(),
+                llm_provider: Some(LlmProvider::Claude),
+                no_install_plugins: true,
+            };
+            ucil_cli::commands::init::run(args).await.expect("init should succeed");
+
+            let report_path = dir.path().join(".ucil/init_report.json");
+            assert!(report_path.exists(), "init_report.json must be created");
+            let content = std::fs::read_to_string(&report_path).expect("read init_report.json");
+            let report: serde_json::Value =
+                serde_json::from_str(&content).expect("init_report.json must be valid JSON");
+
+            assert_eq!(report["llm_provider"], "claude", "llm_provider mismatch");
+            assert_eq!(report["schema_version"], "1.0.0", "schema_version mismatch");
+            assert!(report["languages"].is_array(), "languages must be an array");
+            assert!(report["plugin_health"].is_array(), "plugin_health must be an array");
+            for entry in report["plugin_health"].as_array().expect("array") {
+                assert_eq!(entry["status"], "skipped", "status must be skipped");
+            }
+            let langs = report["languages"].as_array().expect("array");
+            assert!(
+                langs.iter().any(|l| l == "rust"),
+                "rust should be detected from Cargo.toml"
+            );
+        }
     }
-    statuses
 }
 ```
 
-**Acceptance**: All 6 existing acceptance criteria remain green. No additional
-tests are required — `test_plugin_health_verification` (init.rs:423) already
-calls `verify_plugin_health()` directly and will exercise the timeout-wrapped
-path. Confirm `cargo clippy -p ucil-cli -- -D warnings` and
-`cargo nextest run -p ucil-cli` both exit 0.
+**Access note**: `skipped_plugin_health()` is private. The integration test for
+F05 tests the same behavior through `run()` with `no_install_plugins: true` and
+inspects `init_report.json` — functionally equivalent verification without
+requiring API exposure of a private helper.
 
-**Risk**: None — a 5-second timeout per binary is generous for a `--version`
-call. Timed-out probes fall through to `PluginStatusKind::Degraded`, which is
-already the graceful-degradation path. No behavioural change for healthy
-installations.
+### Fix 3: Remove F04/F05/F06 test bodies from `init.rs`
 
----
+**Who**: executor  
+**File**: `crates/ucil-cli/src/commands/init.rs`  
+**Change**: Delete lines 382–509 (the three `async fn test_*` functions inside
+`mod tests {}`). Keep lines 343–380 (the five synchronous language-detection
+tests: `detects_rust_from_cargo_toml`, `detects_python_from_pyproject`,
+`detects_typescript_from_package_json`, `detects_go_from_go_mod`,
+`empty_dir_detects_nothing`) — these are pre-existing and their nextest paths
+do not conflict with any frozen selector.
 
-## Secondary concerns (non-blocking for retry, should be addressed)
+After this change, the `mod tests {}` block in `init.rs` retains only the
+language-detection tests.
 
-### S1 — Critic blockers must be fixed before writing ready-for-review marker
+### Fix 4: Add `Feature: P0-W1-F06` commit trailer
 
-The critic report (`ucil-build/critic-reports/WO-0004.md`, verdict **BLOCKED**)
-was committed before the executor wrote the ready-for-review marker at commit
-`42d3270`. The executor wrote the marker anyway. This caused an avoidable
-verifier rejection and wasted an attempt counter.
+**Who**: executor  
+**Action**: After completing Fixes 1–3, add a chore commit:
 
-**Process fix**: The executor **must** address all critic blockers (items under
-"Blockers — must fix before verifier") before writing the ready-for-review
-marker. Warnings (W1–W5) are advisory; blockers are mandatory.
+```
+chore(cli): tag Feature: P0-W1-F06 — init_report.json implementation
 
-### S2 — Mutation check inconclusive for P0-W1-F04
+F06 (init_report.json serialisation) was implemented in the same commit
+as F04 (a5a5470). Adding the trailer so reality-check.sh can locate the
+source commit for the F06 mutation check.
 
-`scripts/reality-check.sh P0-W1-F04` reports INCONCLUSIVE because the
-acceptance tests live in `#[cfg(test)]` modules inside `init.rs` itself. When
-the script stashes `init.rs`, the test functions disappear with the
-implementation, so nextest finds 0 matching tests and exits 0 (the script
-correctly flags this as inconclusive rather than claiming a false pass).
+Phase: 0
+Feature: P0-W1-F06
+Work-order: WO-0004
+```
 
-This is a known limitation of co-located unit tests. The verifier noted it as
-a secondary concern, not the primary rejection reason. No fix required for this
-retry — the mutation check inconclusive result does not trigger an escalation
-escalation rule on its own (the primary rejection was B1).
+This is a content-only commit (no source changes); `reality-check.sh` will
+find the commit and then walk the source files for F06's introducing commit.
+Note: the script finds source files from ALL commits tagged `Feature: P0-W1-F06`
+as a union — adding this chore commit (which touches no `.rs` files) is
+harmless; the script will union with `a5a5470` (which does touch `init.rs`).
 
-If UCIL style guidelines later require integration-tier tests in `tests/` for
-mutation-check compatibility, that is a separate ADR decision.
+### Required dev-dependencies
 
-### S3 — CI uses `cargo test` instead of `cargo nextest`
+- `tempfile` — already in `[dev-dependencies]` in `Cargo.toml` ✓
+- `tokio` — already in `[dependencies]` (available to integration tests) ✓
+- `serde_json` — already in `[dependencies]` ✓
 
-`.github/workflows/ci.yml:25` runs `cargo test --workspace`. The project
-standard (`rust-style.md`) is `cargo nextest`. Recommend switching to
-`cargo nextest run --workspace` in the CI workflow to align with the project
-default runner (per-test timeouts, retry support, better output). This was
-critic warning W3.
-
-### S4 — `uv sync --all-extras` vs `--all-packages`
-
-`.github/workflows/ci.yml:74` runs `uv sync --all-extras` in the `ml/`
-working directory. The WO implementation notes specified `--all-packages`, which
-syncs every package in a uv workspace. If `ml/` becomes a multi-package uv
-workspace, `--all-extras` will silently skip additional packages. Recommend
-changing to `uv sync --all-packages` to be future-proof. This was critic
-warning W4.
+No `Cargo.toml` changes required.
 
 ---
 
-## Process note
+## Acceptance after fixes
 
-The **sole hard blocker** is S2's underlying cause — B1 was known, documented,
-and not fixed. The executor should fix `init.rs:178–182` as specified above,
-commit (one commit, ≤50 lines, conventional commit trailer `Feature: P0-W1-F05`
-since `verify_plugin_health()` is the F05 implementation), and push. No other
-source file requires changes.
+```bash
+# Selector now resolves to the integration test binary:
+cargo nextest list -p ucil-cli | grep "test_llm_provider_selection"
+# → ucil-cli::tests/init commands::init::test_llm_provider_selection
 
-Optionally the executor may also fix S3 (swap `cargo test` → `cargo nextest run`
-in ci.yml) and S4 (`--all-extras` → `--all-packages`) in the same or a
-follow-up commit, but these are not required for the verifier to pass.
+# Mutation check for F04:
+#   reality-check.sh rolls back init.rs to a5a5470^ 
+#   → LlmProvider, run(), InitArgs not in pre-F04 init.rs → compile error
+#   → cargo nextest exits non-zero → reality-check reports OK (failure with stash) ✓
+
+# F06 tag:
+bash scripts/reality-check.sh P0-W1-F06
+# → finds commit a5a5470 (F04 intro) + new chore commit → files: init.rs → proceeds ✓
+
+# Full acceptance suite:
+cargo nextest run -p ucil-cli --test-threads 1  # 8 unit + 3 integration tests
+```
 
 ---
 
-*Generated by root-cause-finder on 2026-04-15.*
+## Risk
+
+| Risk | Severity | Mitigation |
+|------|----------|-----------|
+| `pub mod commands;` in lib.rs exposes internal modules | Low | Intentional for testing; lib.rs is a published library target already |
+| Integration test for F05 calls real binaries | Low | `verify_plugin_health()` is already timeout-guarded and gracefully degrades to `Degraded` |
+| Removing tests from `init.rs` breaks language-detection test paths | None | Language-detection tests remain in `mod tests {}` — paths unchanged |
+
+---
+
+## If hypothesis is wrong
+
+If after Fix 1+2 nextest still shows a path other than
+`commands::init::test_llm_provider_selection`, run:
+```bash
+cargo nextest list -p ucil-cli | grep "test_llm_provider"
+```
+Adjust the outer module nesting in `tests/init.rs` to match the required path.
+
+If the mutation check for F04 trivially passes (0 tests) even after Fix 2,
+verify that `ucil-cli` is actually building the integration test binary by
+running `cargo nextest list -p ucil-cli --list-type all`.
+
+---
+
+*Generated by root-cause-finder on 2026-04-15. Supersedes rca-WO-0004-20260415.*
