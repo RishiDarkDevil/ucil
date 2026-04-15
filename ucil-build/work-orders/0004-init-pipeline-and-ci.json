@@ -1,0 +1,69 @@
+{
+  "id": "WO-0004",
+  "slug": "init-pipeline-and-ci",
+  "phase": 0,
+  "week": 1,
+  "features": ["P0-W1-F04", "P0-W1-F05", "P0-W1-F06", "P0-W1-F08"],
+  "feature_ids": ["P0-W1-F04", "P0-W1-F05", "P0-W1-F06", "P0-W1-F08"],
+  "branch": "feat/WO-0004-init-pipeline-and-ci",
+  "worktree_branch": "feat/WO-0004-init-pipeline-and-ci",
+  "executor_agent": "executor",
+  "goal": "Complete the ucil init pipeline (LLM provider selection, P0 plugin health verification, init_report.json) and configure the multi-language CI workflow.",
+  "plan_summary": "All four features extend crates/ucil-cli/src/commands/init.rs and the repo's CI config. F04 adds --llm-provider <PROVIDER> to InitArgs and writes a [llm] section to .ucil/ucil.toml. F05 adds verify_plugin_health() which probes each P0-priority binary with --version (graceful degradation: missing = DEGRADED, not error). F06 serialises an InitReport struct (detections + health + provider + schema_version) to .ucil/init_report.json at the end of run(). F08 creates .github/workflows/ci.yml with three jobs (rust, typescript, python) and implements scripts/verify/P0-W1-F08.sh to confirm the workflow exists and the phase-0 gate smoke test (ucil init --no-install-plugins) succeeds.",
+  "scope_in": [
+    "crates/ucil-cli/src/commands/init.rs — add LlmProvider enum, --llm-provider clap arg, --no-install-plugins flag, verify_plugin_health(), write_init_report(), and the three corresponding unit tests",
+    ".github/workflows/ci.yml — single workflow with three jobs: rust (cargo test + clippy + fmt), typescript (biome check + vitest), python (ruff format + ruff check + mypy + pytest)",
+    "scripts/verify/P0-W1-F08.sh — replace stub: check .github/workflows/ci.yml exists, run yamllint or python -c 'import yaml' sanity check, run ucil init --no-install-plugins in a temp dir and assert .ucil/init_report.json is produced"
+  ],
+  "scope_out": [
+    "No interactive stdin prompting — --llm-provider accepts the provider value as a CLI flag; if absent, defaults to 'none'",
+    "No actual connection to Ollama, Claude, or OpenAI APIs — F04 only writes config, does not verify provider reachability",
+    "No plugin process management — F05 checks binary existence only (which $bin exits 0 or std::process::Command output), does not start MCP servers",
+    "No daemon, indexing, MCP tools, or agents — Phase 0 scaffolding only",
+    "No migration runner changes — schema version was already implemented in F07"
+  ],
+  "acceptance": [
+    "cargo test -p ucil-cli commands::init::test_llm_provider_selection exits 0",
+    "cargo test -p ucil-cli commands::init::test_plugin_health_verification exits 0",
+    "cargo test -p ucil-cli commands::init::test_init_report_json exits 0",
+    "scripts/verify/P0-W1-F08.sh exits 0",
+    "cargo clippy -p ucil-cli -- -D warnings exits 0",
+    "ucil init --no-install-plugins in a fresh temp dir produces .ucil/init_report.json"
+  ],
+  "acceptance_criteria": [
+    "cargo nextest run -p ucil-cli --test-threads 1 2>&1 | grep -E 'PASSED|ok' | grep -q 'test_llm_provider_selection'",
+    "cargo nextest run -p ucil-cli --test-threads 1 2>&1 | grep -E 'PASSED|ok' | grep -q 'test_plugin_health_verification'",
+    "cargo nextest run -p ucil-cli --test-threads 1 2>&1 | grep -E 'PASSED|ok' | grep -q 'test_init_report_json'",
+    "bash scripts/verify/P0-W1-F08.sh",
+    "cargo clippy -p ucil-cli -- -D warnings",
+    "cargo build -p ucil-cli"
+  ],
+  "implementation_notes": [
+    "LlmProvider enum: Ollama, Claude, OpenAI, Passthrough, None. Derive serde::Serialize + clap::ValueEnum. serde rename_all=lowercase.",
+    "InitArgs additions: --llm-provider <PROVIDER> optional (Option<LlmProvider>, default None → writes provider='none'), --no-install-plugins bool flag that skips verify_plugin_health() and records all statuses as Skipped.",
+    "P0 binaries to probe in F05: serena, rust-analyzer, pyright, ruff, eslint, shellcheck. For each: run std::process::Command::new(bin).arg('--version').output() — if Ok(output) with status.success() then OK, if binary not found then DEGRADED. Never fail init on DEGRADED.",
+    "InitReport struct fields: schema_version: String, project_name: String, languages: Vec<String>, plugin_health: Vec<PluginStatus>, llm_provider: String. Serialise with serde_json::to_string_pretty. Write to .ucil/init_report.json.",
+    "CI workflow: use ubuntu-latest. Rust job: actions/checkout, dtolnay/rust-toolchain@stable, cargo test --workspace, cargo clippy --workspace -- -D warnings, cargo fmt --all --check. TS job: actions/checkout, pnpm/action-setup, actions/setup-node, pnpm install, pnpm -C adapters build, pnpm -C adapters exec biome check, pnpm -C adapters exec vitest run. Python job: actions/checkout, astral-sh/setup-uv, uv sync --all-packages in ml/, uv run ruff format --check ml/, uv run ruff check ml/, uv run mypy ml/, uv run pytest ml/.",
+    "scripts/verify/P0-W1-F08.sh: set -euo pipefail. Check .github/workflows/ci.yml exists. Validate YAML (python3 -c 'import sys, yaml; yaml.safe_load(open(sys.argv[1]))' .github/workflows/ci.yml). Create TMPDIR, run cargo run -p ucil-cli -- init --dir $TMPDIR --no-install-plugins, assert $TMPDIR/.ucil/init_report.json exists and is valid JSON."
+  ],
+  "forbidden_paths": [
+    "ucil-build/feature-list.json",
+    "ucil-build/feature-list.schema.json",
+    "ucil-master-plan-v2.1-final.md",
+    "tests/fixtures/**",
+    "scripts/gate/**",
+    "scripts/flip-feature.sh"
+  ],
+  "context_refs": [
+    "master-plan:§18 Phase 0 lines 1719-1720 — ucil init with LLM provider selection and plugin health",
+    "master-plan:§8.1 lines 970-993 — ucil init procedure (plugin resolution, health check, init_report.json)",
+    "phase-log:ucil-build/phase-log/00-phase-0/CLAUDE.md §Invariants 1-9 — skeleton-only, graceful degradation, --no-install-plugins gate smoke test",
+    ".claude/rules/rust-style.md — thiserror for libs, anyhow in binary, no unwrap outside test, lib.rs re-exports only",
+    ".claude/rules/commit-style.md — conventional commits with Phase/Feature/Work-order trailers"
+  ],
+  "dependencies_met": true,
+  "estimated_commits": 8,
+  "estimated_complexity": "medium",
+  "created_at": "2026-04-15T18:30:00Z",
+  "created_by": "planner"
+}
