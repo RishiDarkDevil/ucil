@@ -2,6 +2,7 @@
 blocks_loop: false
 severity: harness-config
 requires_planner_action: false
+resolved: true
 ---
 
 # Escalation: Phase-1 gate incomplete — expected after triage pass 1
@@ -51,3 +52,17 @@ Structurally identical to `20260415-0800-WO-0002-gate-expected-incomplete.md`,
 `20260415-1900-WO-0004-gate-expected-incomplete.md`,
 `20260415-2000-WO-0005-gate-expected-incomplete.md`, and
 `20260415-2035-post-WO-0005-gate-expected-incomplete.md`, all auto-resolved.
+
+## Resolution
+
+**Resolved by**: triage (pass 2)
+**Resolved at**: 2026-04-15T20:45Z
+
+Bucket A — admin, auto-resolved.
+
+Condition confirmed resolved in HEAD. Evidence:
+- Triage pass 1 completed in commit `b355be7` ("chore(escalation): triage-pass1 gate-incomplete — admin, allows session end") on `main`.
+- All 12 prior escalations confirmed `resolved: true` (verified by reading each file in triage pass 2).
+- 16 Phase-0 features are `passes=true`; 32 Phase-1 features remain `passes=false` — expected mid-phase.
+- `blocks_loop: false` — outer loop may continue to planner for WO-0006.
+- No material action is required from this escalation itself; the planner will be invoked naturally by `scripts/run-phase.sh`.
