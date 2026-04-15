@@ -56,3 +56,21 @@ Phase-1 is mid-progress" — not a bug, not a code problem. Append a
 
 Next step for orchestrator: spawn verifier for WO-0006, then planner
 for WO-0007 (P1-W2-F04 LMDB tag cache + next Phase-1 Week-2/3 batch).
+
+## Resolution
+
+**Resolved by**: triage (cap-rescue pass)
+**Resolved at**: 2026-04-16T00:00Z
+**Bucket**: A — auto-resolved (admin, blocks_loop: false)
+
+Condition confirmed: WO-0006 executor session ended after implementing P1-W2-F02,
+P1-W2-F03, P1-W2-F06 on `feat/WO-0006-symbol-extraction-chunker-storage`. The
+gate failure is expected mid-phase (31 Phase-1 features remain passes=false).
+No code change needed. The loop's separate WO-0006 verifier-attempts-exhausted
+escalation captures the actual block reason.
+
+Evidence: git log shows executor completed (`1e21f1a` ready-for-review marker on
+feature branch), verifier ran 3 times but rejected due to P1-W2-F06 test selector
+mismatch (handled in the sibling escalation 20260415-1856-wo-WO-0006-attempts-exhausted.md).
+
+resolved: true
