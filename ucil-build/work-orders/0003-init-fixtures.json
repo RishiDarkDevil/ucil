@@ -1,0 +1,47 @@
+{
+  "id": "WO-0003",
+  "feature_ids": ["P0-W1-F03", "P0-W1-F11", "P0-W1-F12", "P0-W1-F13", "P0-W1-F14"],
+  "phase": 0,
+  "week": 1,
+  "worktree_branch": "feat/0003-init-fixtures",
+  "executor_agent": "executor",
+  "plan_summary": "Implement the `ucil init` CLI command (F03) and create the four language test fixtures (F11–F14). These two groups of work are batched together because the test fixtures are pure file-creation tasks that the executor can interleave with CLI implementation commits.\n\n**F03 — ucil init basics**\nAdd `clap` (v4, derive feature) to `crates/ucil-cli/Cargo.toml` and wire a `ucil init` subcommand that:\n  1. Detects project languages by scanning the current directory for `Cargo.toml` / `*.rs` → Rust, `package.json` / `*.ts` / `*.tsx` → TypeScript, `pyproject.toml` / `*.py` → Python, `go.mod` / `*.go` → Go. Multiple detections → `mixed`.\n  2. Creates `.ucil/` directory if absent (idempotent; does not clobber existing).\n  3. Writes `ucil.toml` with a `[project]` section containing `name` (basename of CWD), `languages` (detected list), `schema_version` (same const as `ucil_core::schema_migration::SCHEMA_VERSION`).\n  4. Prints a one-line summary: `ucil init: created .ucil/ for <name> [<lang>, ...]`.\nThen implement `scripts/verify/P0-W1-F03.sh`: spin up a temp directory, run `cargo run --bin ucil -- init`, assert `.ucil/` exists, assert `ucil.toml` exists and contains `schema_version`, clean up.\n\n**F11 — rust-project fixture**\nCreate `tests/fixtures/rust-project/` as a small but real Cargo project (~5 K LOC, multi-file) with:\n  - `Cargo.toml` (single binary `rust-project`, edition 2021)\n  - `src/main.rs` + at least 3 submodule files (`src/parser.rs`, `src/transform.rs`, `src/util.rs`) totalling ≥ 5 000 lines\n  - `tests/integration_test.rs` with at least one passing `#[test]`\nThen add `crates/ucil-core/tests/fixture.rs` with:\n```rust\n#[test]\n#[ignore]  // slow: touches filesystem\nfn rust_project_loads() {\n    let fixture = std::path::Path::new(env!(\"CARGO_MANIFEST_DIR\"))\n        .parent().unwrap().parent().unwrap()  // workspace root\n        .join(\"tests/fixtures/rust-project\");\n    assert!(fixture.join(\"Cargo.toml\").exists(), \"fixture Cargo.toml missing\");\n    assert!(fixture.join(\"src/main.rs\").exists(), \"fixture src/main.rs missing\");\n    // Verify the fixture compiles.\n    let status = std::process::Command::new(\"cargo\")\n        .args([\"check\", \"--manifest-path\"])\n        .arg(fixture.join(\"Cargo.toml\"))\n        .status()\n        .expect(\"cargo check failed to spawn\");\n    assert!(status.success(), \"rust-project fixture does not compile\");\n}\n```\n\n**F12 — python-project fixture**\nCreate `tests/fixtures/python-project/` as a real uv-managed Python project (~5 K LOC) with:\n  - `pyproject.toml` (project name `python-project`, python ≥ 3.11, `pytest` as dev dep)\n  - `src/python_project/` package with at least 4 modules totalling ≥ 5 000 lines (including type hints, docstrings, real logic — no `pass`-only bodies)\n  - `tests/test_*.py` with at least 3 passing pytest tests\nCreate `tests/fixtures/python_project/test_fixture_valid.py` (note: underscore path for pytest discoverability) that:\n  - Verifies the fixture directory exists\n  - Verifies `pyproject.toml` is valid TOML\n  - Verifies at least one `src/python_project/*.py` has type annotations\n\n**F13 — typescript-project fixture**\nCreate `tests/fixtures/typescript-project/` as a real TypeScript project (~5 K LOC) with:\n  - `package.json` (name `typescript-project`, scripts: build + test)\n  - `tsconfig.json` (strict: true)\n  - `src/` with at least 4 `.ts` files totalling ≥ 5 000 lines (real logic, typed)\n  - `tests/` with at least 3 vitest test cases\nCreate `adapters/tests/` directory and `adapters/tests/fixtures/typescript-project.test.ts` that:\n  - Verifies the fixture directory exists\n  - Reads and validates `tsconfig.json`\n  - Verifies at least one `src/*.ts` file exists with type annotations\nUpdate `adapters/package.json` to add vitest as a dev dependency if not present and add a `vitest.config.ts` for test discovery in `adapters/tests/`.\n\n**F14 — mixed-project fixture**\nCreate `tests/fixtures/mixed-project/` (~3 K LOC total) with intentional defects for use as a diagnostic test target:\n  - `Cargo.toml` + `src/main.rs` with: an unused `#[allow(dead_code)]` override, a `.unwrap()` on a None-able value (lint issue), and a SQL-injection-style string concatenation comment.\n  - `package.json` + `src/index.ts` with: an implicit `any` type, a `@ts-ignore`, and a `console.log` in library code.\n  - `pyproject.toml` + `src/main.py` with: a `bare except`, a `print()` in library code, and a `B006` mutable default argument.\n  - `tests/` with: at least one intentionally failing test in each language (the test must be marked `#[ignore]` / `.skip()` / `pytest.mark.skip` to prevent it running in CI — the fixture is NOT supposed to have passing tests; the failing test is the point).\nImplement `scripts/verify/P0-W1-F14.sh`:\n  - Assert each expected source file exists.\n  - Run `cargo clippy --manifest-path tests/fixtures/mixed-project/Cargo.toml 2>&1` and verify it outputs at least one warning line.\n  - Exit 0 (the point is existence + at least one lint warning, not that it is clean).",
+
+  "acceptance_criteria": [
+    "bash scripts/verify/P0-W1-F03.sh exits 0",
+    "cargo test -p ucil-core -- --ignored fixture::rust_project_loads exits 0",
+    "cd tests/fixtures/python-project && uv run pytest ../python_project/test_fixture_valid.py exits 0  (OR: python -m pytest tests/fixtures/python_project/test_fixture_valid.py from workspace root)",
+    "pnpm --filter adapters vitest run adapters/tests/fixtures/typescript-project.test.ts exits 0",
+    "bash scripts/verify/P0-W1-F14.sh exits 0",
+    "cargo clippy -p ucil-cli -- -D warnings exits 0",
+    "cargo clippy -p ucil-core -- -D warnings exits 0",
+    "cargo test --workspace exits 0 (non-ignored suite must stay green)"
+  ],
+
+  "forbidden_paths": [
+    "ucil-build/feature-list.json",
+    "ucil-master-plan-v2.1-final.md",
+    "scripts/flip-feature.sh",
+    "scripts/gate/**",
+    "tests/fixtures/**/.gitkeep"
+  ],
+
+  "context_refs": [
+    "master-plan:§18 Phase 0 Week 1 — ucil init, CI setup, fixtures",
+    "master-plan:§3 Workspace Layout",
+    "master-plan:§2220 Language detection in ucil init",
+    "decision:DEC-0001-WO-0002-large-commits (large but cohesive commits acceptable with rationale)",
+    "decision:DEC-0002-effectiveness-gates (effectiveness gates required from Phase 1; Phase 0 exempt)"
+  ],
+
+  "notes": [
+    "F03 unblocks F04 (--llm-provider) and F05 (plugin health check) — shipping F03 first is the critical path.",
+    "For the ucil init language detection, the executor should add clap v4 with the 'derive' feature to crates/ucil-cli/Cargo.toml.",
+    "F12 acceptance selector uses 'python_project' (underscore). The fixture itself lives at 'tests/fixtures/python-project/' (hyphen). The pytest test at 'tests/fixtures/python_project/test_fixture_valid.py' (underscore) validates it. Both paths must exist.",
+    "F13 requires adapters/tests/ to be created. The vitest test file must be discoverable by 'pnpm --filter adapters vitest run'.",
+    "F14's Rust code intentionally has lint issues — cargo clippy MUST warn on it. The verify script asserts at least one warning exists (exit 0 even with warnings).",
+    "Fixtures need real, non-trivial code (≥ 5K LOC each for F11–F13). Do not use lorem-ipsum or auto-generated boilerplate — write code that resembles a real small project (a simple expression parser, a data pipeline, a todo API, etc.) so Phase 1 symbol-extraction tests have meaningful input."
+  ],
+
+  "estimated_complexity": "medium"
+}
