@@ -1,0 +1,44 @@
+id: nav-rust-symbol
+phases: [1, 2, 3, 4, 5, 6, 7, 8]
+fixture: rust-project
+requires_tools:
+  - find_definition
+  - find_references
+task: |
+  Use only the UCIL tools (for the UCIL run) or grep + Read (for the baseline) to
+  answer this question about the fixture at the current working directory:
+
+  Find every function in this Rust project that performs an HTTP retry with
+  exponential backoff. For each one, list:
+    - its fully-qualified path (crate::module::function)
+    - the file:line of its definition
+    - every place it is CALLED FROM (file:line each)
+
+  Write your answer to /tmp/ucil-eval-out/nav-rust-symbol.md as a markdown
+  document with one H2 per function found, followed by a bulleted caller list.
+  Do NOT include functions that merely retry without exponential backoff.
+
+acceptance_checks:
+  - name: output file exists
+    cmd: 'test -f /tmp/ucil-eval-out/nav-rust-symbol.md'
+  - name: non-empty
+    cmd: 'test $(wc -l < /tmp/ucil-eval-out/nav-rust-symbol.md) -ge 5'
+  - name: cites at least one file:line
+    cmd: 'grep -qE "\\.rs:[0-9]+" /tmp/ucil-eval-out/nav-rust-symbol.md'
+
+rubric:
+  - id: correctness
+    weight: 3.0
+    description: Every function listed actually performs exponential-backoff retry, and no qualifying function is missed.
+  - id: caller_completeness
+    weight: 2.0
+    description: For each function, every real caller is listed; no fabricated callers; callers are from the fixture tree (not stdlib).
+  - id: precision
+    weight: 1.0
+    description: No false positives (functions that retry but not exponentially; stdlib helpers).
+  - id: formatting
+    weight: 0.5
+    description: Output follows the specified H2-per-function + bulleted-caller structure.
+
+max_turns: 30
+timeout_seconds: 600

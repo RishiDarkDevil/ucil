@@ -1,0 +1,39 @@
+id: refactor-rename-python
+phases: [2, 3, 4, 5, 6, 7, 8]
+fixture: python-project
+requires_tools:
+  - find_references
+  - refactor
+task: |
+  In the Python fixture at the current working directory, there is a function
+  named `compute_score`. Rename it everywhere — the definition, every call
+  site, and every reference (including string names in configs/tests if any)
+  — to `compute_relevance_score`. Keep the signature identical.
+
+  After renaming, run:
+    - `ruff check .` (must exit 0)
+    - `pytest -q` (must exit 0)
+
+acceptance_checks:
+  - name: old name gone from .py
+    cmd: '! grep -rn --include="*.py" "\\bcompute_score\\b" .'
+  - name: new name present
+    cmd: 'grep -rn --include="*.py" "\\bcompute_relevance_score\\b" .'
+  - name: ruff clean
+    cmd: 'ruff check . 2>&1'
+  - name: pytest green
+    cmd: 'pytest -q 2>&1'
+
+rubric:
+  - id: correctness
+    weight: 3.0
+    description: Every reference to the old name has been renamed exactly once; no reference is missed; no accidental rename of unrelated symbols (like `compute_score_v2` stays untouched only if it was a separate symbol).
+  - id: test_preservation
+    weight: 1.5
+    description: Existing tests still pass without modification, or any required test renames are themselves justified.
+  - id: safety
+    weight: 1.0
+    description: The refactor did NOT introduce unrelated changes (no drive-by edits).
+
+max_turns: 40
+timeout_seconds: 900

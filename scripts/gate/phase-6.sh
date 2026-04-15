@@ -18,4 +18,7 @@ done
 [[ -x scripts/verify/bench-p95-500ms.sh ]]      && check "P95 query <500ms"             scripts/verify/bench-p95-500ms.sh
 [[ -x scripts/verify/cache-hit-rates.sh ]]      && check "cache hit rates (L0>60%)"     scripts/verify/cache-hit-rates.sh
 [[ -x scripts/verify/otel-exports.sh ]]         && check "OTel spans exported"          scripts/verify/otel-exports.sh
+check "effectiveness (phase 6 scenarios)"  scripts/verify/effectiveness-gate.sh 6
+check "bonus-context usage rate >= 0.30"   scripts/verify/bonus-usage-rate.sh 6
+check "stability (30-min mixed load)"      scripts/verify/stability.sh 6
 exit $FAIL

@@ -10,4 +10,7 @@ check "cargo test --workspace"             cargo nextest run --workspace --no-fa
 [[ -x scripts/verify/bench-embed.sh ]]        && check "CodeRankEmbed >50 chunks/sec" scripts/verify/bench-embed.sh
 [[ -x scripts/verify/golden-fusion.sh ]]      && check "G1/G2 golden fusion"          scripts/verify/golden-fusion.sh
 [[ -x scripts/verify/recall-at-10.sh ]]       && check "recall@10 >= 0.85"            scripts/verify/recall-at-10.sh
+check "effectiveness (phase 2 scenarios)"  scripts/verify/effectiveness-gate.sh 2
+check "multi-lang probes"                  scripts/verify/multi-lang-coverage.sh 2
+check "real-repo smoke"                    scripts/verify/real-repo-smoke.sh 2
 exit $FAIL

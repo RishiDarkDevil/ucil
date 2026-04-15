@@ -10,4 +10,6 @@ check "cargo test --workspace"                cargo nextest run --workspace --no
 [[ -x scripts/verify/security-scan-known.sh ]]  && check "security_scan flags known-bad" scripts/verify/security-scan-known.sh
 [[ -x scripts/verify/compaction.sh ]]           && check "compaction rules"             scripts/verify/compaction.sh
 [[ -x scripts/verify/review-changes.sh ]]       && check "review_changes tool"          scripts/verify/review-changes.sh
+check "effectiveness (phase 5 scenarios)"  scripts/verify/effectiveness-gate.sh 5
+check "privacy / data-locality scan"       scripts/verify/privacy-scan.sh 5
 exit $FAIL

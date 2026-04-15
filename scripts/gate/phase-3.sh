@@ -10,4 +10,8 @@ check "cargo test --workspace"                cargo nextest run --workspace --no
 [[ -x scripts/verify/rrf-determinism.sh ]]       && check "RRF fusion deterministic"     scripts/verify/rrf-determinism.sh
 [[ -x scripts/verify/bench-e2e.sh ]]             && check "P95 end-to-end query <1s"     scripts/verify/bench-e2e.sh
 [[ -x scripts/verify/conflict-resolution.sh ]]   && check "conflict resolution works"    scripts/verify/conflict-resolution.sh
+check "effectiveness (phase 3 scenarios)"  scripts/verify/effectiveness-gate.sh 3
+check "multi-lang probes"                  scripts/verify/multi-lang-coverage.sh 3
+check "concurrency (3-agent)"              scripts/verify/concurrency.sh 3
+check "dogfood on ucil repo"               scripts/verify/dogfood-on-self.sh 3
 exit $FAIL

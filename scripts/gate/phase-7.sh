@@ -11,4 +11,5 @@ check "cargo test --workspace"                cargo nextest run --workspace --no
 [[ -x scripts/verify/sentry.sh ]]               && check "Sentry error payload parse"   scripts/verify/sentry.sh
 [[ -x scripts/verify/query-database-tool.sh ]]  && check "query_database tool"          scripts/verify/query-database-tool.sh
 [[ -x scripts/verify/check-runtime-tool.sh ]]   && check "check_runtime tool"           scripts/verify/check-runtime-tool.sh
+check "effectiveness (phase 7 scenarios)"       scripts/verify/effectiveness-gate.sh 7
 exit $FAIL

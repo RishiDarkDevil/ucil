@@ -12,4 +12,6 @@ check "cargo test --workspace"                cargo nextest run --workspace --no
 [[ -x scripts/verify/cline-adapter.sh ]]         && check "Cline adapter"                scripts/verify/cline-adapter.sh
 [[ -x scripts/verify/aider-adapter.sh ]]         && check "Aider adapter"                scripts/verify/aider-adapter.sh
 [[ -x scripts/verify/post-tool-hook-timing.sh ]] && check "PostToolUse hook <200ms"      scripts/verify/post-tool-hook-timing.sh
+check "effectiveness (phase 4 scenarios)"  scripts/verify/effectiveness-gate.sh 4
+check "host-adapter conformance (all)"     scripts/verify/host-adapter-conformance.sh 4
 exit $FAIL

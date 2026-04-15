@@ -33,4 +33,9 @@ if [[ -x scripts/verify/diagnostics-bridge.sh ]]; then
   check "diagnostics bridge live"          scripts/verify/diagnostics-bridge.sh
 fi
 
+# Effectiveness: must beat baseline on at least the nav scenarios.
+check "effectiveness (phase 1 scenarios)" scripts/verify/effectiveness-gate.sh 1
+# Multi-language coverage required from Phase 1 onwards.
+check "multi-lang probes"                 scripts/verify/multi-lang-coverage.sh 1
+
 exit $FAIL

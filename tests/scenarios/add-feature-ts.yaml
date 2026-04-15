@@ -1,0 +1,60 @@
+id: add-feature-ts
+phases: [3, 4, 5, 6, 7, 8]
+fixture: typescript-project
+requires_tools:
+  - get_context_for_edit
+  - get_conventions
+  - trace_dependencies
+task: |
+  In the TypeScript fixture at the current working directory, add a feature:
+  a `withTimeout(promise, ms)` utility function that races a Promise against
+  a timeout and rejects with a `TimeoutError` class (which you must also
+  define). The utility must:
+
+  1. Live in the existing `src/utils/` directory, in a new file named
+     `withTimeout.ts`, re-exported from `src/utils/index.ts`.
+  2. Follow the project's existing convention for error classes
+     (discover this; don't invent).
+  3. Have Vitest unit tests covering: happy path, timeout firing, and
+     error propagation from the underlying promise.
+  4. Be used from at least ONE existing call site where there's a raw
+     Promise that could benefit from a timeout — find a sensible one and
+     wire it up (only one site, to prove integration).
+
+  `pnpm test` must pass. `pnpm lint` must be clean.
+
+acceptance_checks:
+  - name: withTimeout.ts exists
+    cmd: 'test -f src/utils/withTimeout.ts'
+  - name: re-exported
+    cmd: 'grep -q "withTimeout" src/utils/index.ts'
+  - name: TimeoutError class defined
+    cmd: 'grep -qE "class TimeoutError" src/utils/withTimeout.ts'
+  - name: unit tests exist
+    cmd: 'test -f src/utils/withTimeout.test.ts || test -f tests/withTimeout.test.ts'
+  - name: at least one caller wired
+    cmd: 'test $(grep -rc "withTimeout" src/ | awk -F: "{s+=\$2} END {print s}") -ge 3'
+  - name: tests pass
+    cmd: 'pnpm test 2>&1'
+  - name: lint clean
+    cmd: 'pnpm lint 2>&1'
+
+rubric:
+  - id: correctness
+    weight: 3.0
+    description: withTimeout behaves correctly on happy path, timeout, underlying rejection, and edge cases (0ms, very long).
+  - id: convention_adherence
+    weight: 2.0
+    description: TimeoutError matches the project's existing error-class style (constructor signature, extends, field layout). File naming, export style match.
+  - id: integration_quality
+    weight: 1.0
+    description: The chosen call site is a sensible place to wire withTimeout; the change is minimal and obvious.
+  - id: test_quality
+    weight: 1.5
+    description: Tests actually exercise timing behavior (use fake timers or bounded real waits), cover all three required cases.
+  - id: no_drive_by
+    weight: 0.5
+    description: No unrelated changes to other files.
+
+max_turns: 50
+timeout_seconds: 1200

@@ -1,0 +1,48 @@
+id: arch-query
+phases: [3, 4, 5, 6, 7, 8]
+fixture: mixed-project
+requires_tools:
+  - get_architecture
+  - trace_dependencies
+  - explain_history
+task: |
+  Answer this architectural question about the fixture at the current working
+  directory, using only the tools available to you (UCIL for the UCIL run,
+  grep+Read for the baseline).
+
+  Where in this codebase would I add a new payment-gateway integration?
+  Your answer must:
+
+  1. Identify the directory and module layer where payment code lives today.
+  2. List every file that would need to change (and classify each: create / modify).
+  3. Cite the existing payment-gateway implementation file:line as a reference template.
+  4. Flag any coupling concerns (global singletons, hard-coded configs, lack
+     of abstraction) that would complicate adding a new gateway.
+  5. End with a 3–5 step implementation plan.
+
+  Write your answer to /tmp/ucil-eval-out/arch-query.md.
+
+acceptance_checks:
+  - name: output file exists
+    cmd: 'test -f /tmp/ucil-eval-out/arch-query.md'
+  - name: mentions at least 3 files
+    cmd: 'test $(grep -cE "\\.[a-z]+:[0-9]+|\\.[a-z]+\\b" /tmp/ucil-eval-out/arch-query.md) -ge 3'
+  - name: has a plan section
+    cmd: 'grep -qiE "plan|step" /tmp/ucil-eval-out/arch-query.md'
+
+rubric:
+  - id: correctness
+    weight: 3.0
+    description: The identified layer and template file are the actually-correct places.
+  - id: completeness
+    weight: 2.0
+    description: All files that would need changes are listed; no important files missed.
+  - id: insight
+    weight: 1.5
+    description: The coupling concerns flagged are real and non-obvious (not trivial observations).
+  - id: plan_quality
+    weight: 1.0
+    description: The implementation plan is concrete, ordered, and actionable.
+
+max_turns: 30
+timeout_seconds: 600
