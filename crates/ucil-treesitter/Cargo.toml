@@ -12,3 +12,17 @@ thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 ucil-core = { path = "../ucil-core" }
+
+# tree-sitter core + grammar crates (≥10 languages required)
+tree-sitter.workspace = true
+tree-sitter-rust.workspace = true
+tree-sitter-python.workspace = true
+tree-sitter-typescript.workspace = true
+tree-sitter-javascript.workspace = true
+tree-sitter-go.workspace = true
+tree-sitter-java.workspace = true
+tree-sitter-c.workspace = true
+tree-sitter-cpp.workspace = true
+tree-sitter-ruby.workspace = true
+tree-sitter-bash.workspace = true
+tree-sitter-json.workspace = true
