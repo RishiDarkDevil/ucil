@@ -331,22 +331,20 @@ pub async fn run(args: InitArgs) -> Result<()> {
     Ok(())
 }
 
-// ── Unit tests ────────────────────────────────────────────────────────────────
+// ── Unit tests (language detection only) ─────────────────────────────────────
+//
+// F04/F05/F06 tests live in `crates/ucil-cli/tests/init.rs` so they survive
+// a per-file rollback of this file during the mutation check.
 
 #[cfg(test)]
 mod tests {
     use tempfile::TempDir;
 
-    use super::{
-        detect_languages, run, skipped_plugin_health, verify_plugin_health, InitArgs, Language,
-        LlmProvider, PluginStatusKind, P0_PLUGINS,
-    };
+    use super::{detect_languages, Language};
 
     fn tmp() -> TempDir {
         TempDir::new().expect("temp dir")
     }
-
-    // ── Language detection ────────────────────────────────────────────────────
 
     #[test]
     fn detects_rust_from_cargo_toml() {
@@ -385,134 +383,5 @@ mod tests {
         let dir = tmp();
         let langs = detect_languages(dir.path());
         assert!(langs.is_empty());
-    }
-
-    // ── F04 — LLM provider selection ─────────────────────────────────────────
-
-    /// `--llm-provider ollama` writes `provider = "ollama"` to ucil.toml.
-    /// Absent provider defaults to `"none"`.
-    #[tokio::test]
-    async fn test_llm_provider_selection() {
-        let dir = tmp();
-
-        // With explicit provider.
-        let args = InitArgs {
-            dir: dir.path().to_path_buf(),
-            llm_provider: Some(LlmProvider::Ollama),
-            no_install_plugins: true,
-        };
-        run(args).await.expect("init should succeed");
-
-        let toml_str =
-            std::fs::read_to_string(dir.path().join(".ucil/ucil.toml")).expect("ucil.toml");
-        assert!(
-            toml_str.contains("provider = \"ollama\""),
-            "ucil.toml must contain 'provider = \"ollama\"'; got:\n{toml_str}"
-        );
-
-        // Re-init with no provider — should default to "none".
-        let dir2 = tmp();
-        let args2 = InitArgs {
-            dir: dir2.path().to_path_buf(),
-            llm_provider: None,
-            no_install_plugins: true,
-        };
-        run(args2).await.expect("init (no provider) should succeed");
-
-        let toml_str2 =
-            std::fs::read_to_string(dir2.path().join(".ucil/ucil.toml")).expect("ucil.toml");
-        assert!(
-            toml_str2.contains("provider = \"none\""),
-            "ucil.toml must default to provider = \"none\"; got:\n{toml_str2}"
-        );
-    }
-
-    // ── F05 — Plugin health verification ─────────────────────────────────────
-
-    /// `verify_plugin_health` returns one entry per P0 plugin and never panics
-    /// even when all binaries are absent.  `skipped_plugin_health` records all
-    /// as `Skipped`.
-    #[tokio::test]
-    async fn test_plugin_health_verification() {
-        let statuses = verify_plugin_health().await;
-
-        assert_eq!(
-            statuses.len(),
-            P0_PLUGINS.len(),
-            "must return one entry per P0 plugin"
-        );
-
-        for s in &statuses {
-            let valid = matches!(s.status, PluginStatusKind::Ok | PluginStatusKind::Degraded);
-            assert!(
-                valid,
-                "status for '{}' must be Ok or Degraded, never Skipped from verify_plugin_health",
-                s.name
-            );
-        }
-
-        let skipped = skipped_plugin_health();
-        assert_eq!(skipped.len(), P0_PLUGINS.len());
-        for s in &skipped {
-            assert!(
-                matches!(s.status, PluginStatusKind::Skipped),
-                "'{}' should be Skipped when using skipped_plugin_health()",
-                s.name
-            );
-        }
-    }
-
-    // ── F06 — init_report.json ────────────────────────────────────────────────
-
-    /// `run` with `--no-install-plugins` produces a valid `.ucil/init_report.json`
-    /// whose fields match the init arguments.
-    #[tokio::test]
-    async fn test_init_report_json() {
-        let dir = tmp();
-        // Place a Cargo.toml so language detection has something to find.
-        std::fs::write(dir.path().join("Cargo.toml"), "[package]\nname=\"test\"\n").unwrap();
-
-        let args = InitArgs {
-            dir: dir.path().to_path_buf(),
-            llm_provider: Some(LlmProvider::Claude),
-            no_install_plugins: true,
-        };
-        run(args).await.expect("init should succeed");
-
-        let report_path = dir.path().join(".ucil/init_report.json");
-        assert!(report_path.exists(), "init_report.json must be created");
-
-        let content = std::fs::read_to_string(&report_path).expect("read init_report.json");
-        let report: serde_json::Value =
-            serde_json::from_str(&content).expect("init_report.json must be valid JSON");
-
-        assert_eq!(
-            report["llm_provider"], "claude",
-            "llm_provider field mismatch"
-        );
-        assert_eq!(
-            report["schema_version"], "1.0.0",
-            "schema_version field mismatch"
-        );
-        assert!(report["languages"].is_array(), "languages must be an array");
-        assert!(
-            report["plugin_health"].is_array(),
-            "plugin_health must be an array"
-        );
-
-        // All statuses must be "skipped" because --no-install-plugins was set.
-        for entry in report["plugin_health"].as_array().expect("array") {
-            assert_eq!(
-                entry["status"], "skipped",
-                "all plugin statuses should be 'skipped' with --no-install-plugins"
-            );
-        }
-
-        // Rust detected because Cargo.toml is present.
-        let langs = report["languages"].as_array().expect("array");
-        assert!(
-            langs.iter().any(|l| l == "rust"),
-            "rust should be detected from Cargo.toml"
-        );
     }
 }
