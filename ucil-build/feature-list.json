@@ -63,10 +63,10 @@
         "P0-W1-F02"
       ],
       "passes": false,
-      "last_verified_ts": null,
-      "last_verified_by": null,
-      "last_verified_commit": null,
-      "attempts": 0,
+      "last_verified_ts": "2026-04-15T01:15:27Z",
+      "last_verified_by": "verifier-4be5569c-f647-441d-ae7c-881c990ae00c",
+      "last_verified_commit": "d41556dcd399673fed96bbd8ec8de73a5d412f13",
+      "attempts": 1,
       "blocked_reason": null
     },
     {
@@ -241,10 +241,10 @@
         "P0-W1-F01"
       ],
       "passes": false,
-      "last_verified_ts": null,
-      "last_verified_by": null,
-      "last_verified_commit": null,
-      "attempts": 0,
+      "last_verified_ts": "2026-04-15T01:15:27Z",
+      "last_verified_by": "verifier-4be5569c-f647-441d-ae7c-881c990ae00c",
+      "last_verified_commit": "d41556dcd399673fed96bbd8ec8de73a5d412f13",
+      "attempts": 1,
       "blocked_reason": null
     },
     {
@@ -263,10 +263,10 @@
         "P0-W1-F01"
       ],
       "passes": false,
-      "last_verified_ts": null,
-      "last_verified_by": null,
-      "last_verified_commit": null,
-      "attempts": 0,
+      "last_verified_ts": "2026-04-15T01:15:27Z",
+      "last_verified_by": "verifier-4be5569c-f647-441d-ae7c-881c990ae00c",
+      "last_verified_commit": "d41556dcd399673fed96bbd8ec8de73a5d412f13",
+      "attempts": 1,
       "blocked_reason": null
     },
     {
@@ -285,10 +285,10 @@
         "P0-W1-F01"
       ],
       "passes": false,
-      "last_verified_ts": null,
-      "last_verified_by": null,
-      "last_verified_commit": null,
-      "attempts": 0,
+      "last_verified_ts": "2026-04-15T01:15:27Z",
+      "last_verified_by": "verifier-4be5569c-f647-441d-ae7c-881c990ae00c",
+      "last_verified_commit": "d41556dcd399673fed96bbd8ec8de73a5d412f13",
+      "attempts": 1,
       "blocked_reason": null
     },
     {
@@ -308,10 +308,10 @@
         "P0-W1-F01"
       ],
       "passes": false,
-      "last_verified_ts": null,
-      "last_verified_by": null,
-      "last_verified_commit": null,
-      "attempts": 0,
+      "last_verified_ts": "2026-04-15T01:15:27Z",
+      "last_verified_by": "verifier-4be5569c-f647-441d-ae7c-881c990ae00c",
+      "last_verified_commit": "d41556dcd399673fed96bbd8ec8de73a5d412f13",
+      "attempts": 1,
       "blocked_reason": null
     },
     {
