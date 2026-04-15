@@ -33,8 +33,8 @@ Your word is final. If the executor's self-report disagrees with your verificati
    c. Run `ast-grep` against the changed files for `todo!()`, `unimplemented!()`, `NotImplementedError`, single-`pass` bodies. Any hit → reject.
 7. **Verdict**:
    - All criteria green AND mutation check passed AND no stubs detected → run `scripts/flip-feature.sh <feature-id> pass $(git rev-parse HEAD)` for each feature.
-   - Any failure → write `ucil-build/rejections/<WO-ID>.md` with exact failure output and the specific acceptance criterion that failed. Do NOT flip anything.
-8. Commit the flip-feature updates and the verification report; push.
+   - Any failure → **OVERWRITE** `ucil-build/rejections/<WO-ID>.md` with the current attempt's exact failure output. Do NOT append to or preserve a prior retry's rejection content — replace the file entirely. Include a `Retry: N` field in the frontmatter (match the value from the WO's `attempts` counter) so readers can tell which attempt this rejection describes. Do NOT flip anything.
+8. Commit the flip-feature updates and the verification report (or overwrite-rejection); push.
 9. End the session.
 
 ## Hard rules
@@ -82,8 +82,16 @@ No `todo!()`, `unimplemented!()`, or single-`pass` bodies in changed files.
 
 ## Format of `rejections/<WO-ID>.md`
 
+OVERWRITE this file every retry — never append or preserve prior content.
+
 ```markdown
-# Rejection: WO-0042
+---
+retry: <N, matching feature attempts counter>
+rejected_at: <iso-8601>
+verifier_session: vrf-<uuid>
+branch: feat/<branch>
+---
+# Rejection: WO-0042 (retry <N>)
 
 **Verifier session**: vrf-<uuid>
 **Branch**: feat/0042-tag-cache
