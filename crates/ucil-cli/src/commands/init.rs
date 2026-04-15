@@ -28,11 +28,11 @@ pub enum LlmProvider {
 impl std::fmt::Display for LlmProvider {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            LlmProvider::Ollama => write!(f, "ollama"),
-            LlmProvider::Claude => write!(f, "claude"),
-            LlmProvider::Openai => write!(f, "openai"),
-            LlmProvider::Passthrough => write!(f, "passthrough"),
-            LlmProvider::None => write!(f, "none"),
+            Self::Ollama => write!(f, "ollama"),
+            Self::Claude => write!(f, "claude"),
+            Self::Openai => write!(f, "openai"),
+            Self::Passthrough => write!(f, "passthrough"),
+            Self::None => write!(f, "none"),
         }
     }
 }
@@ -76,10 +76,10 @@ pub enum Language {
 impl std::fmt::Display for Language {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Language::Rust => write!(f, "rust"),
-            Language::TypeScript => write!(f, "typescript"),
-            Language::Python => write!(f, "python"),
-            Language::Go => write!(f, "go"),
+            Self::Rust => write!(f, "rust"),
+            Self::TypeScript => write!(f, "typescript"),
+            Self::Python => write!(f, "python"),
+            Self::Go => write!(f, "go"),
         }
     }
 }
@@ -91,6 +91,7 @@ impl std::fmt::Display for Language {
 /// - TypeScript: `package.json` present OR any `*.ts` / `*.tsx` file
 /// - Python: `pyproject.toml` present OR any `*.py` file
 /// - Go: `go.mod` present OR any `*.go` file
+#[must_use]
 pub fn detect_languages(dir: &Path) -> Vec<Language> {
     let mut langs = std::collections::BTreeSet::new();
     walk_for_langs(dir, 2, &mut langs);
@@ -119,17 +120,23 @@ fn walk_for_langs(dir: &Path, depth: u32, langs: &mut std::collections::BTreeSet
     }
 }
 
+fn ext_eq(name: &str, ext: &str) -> bool {
+    std::path::Path::new(name)
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case(ext))
+}
+
 fn classify_file(name: &str, langs: &mut std::collections::BTreeSet<Language>) {
-    if name == "Cargo.toml" || name.ends_with(".rs") {
+    if name == "Cargo.toml" || ext_eq(name, "rs") {
         langs.insert(Language::Rust);
     }
-    if name == "package.json" || name.ends_with(".ts") || name.ends_with(".tsx") {
+    if name == "package.json" || ext_eq(name, "ts") || ext_eq(name, "tsx") {
         langs.insert(Language::TypeScript);
     }
-    if name == "pyproject.toml" || name.ends_with(".py") {
+    if name == "pyproject.toml" || ext_eq(name, "py") {
         langs.insert(Language::Python);
     }
-    if name == "go.mod" || name.ends_with(".go") {
+    if name == "go.mod" || ext_eq(name, "go") {
         langs.insert(Language::Go);
     }
 }
@@ -255,19 +262,18 @@ struct LlmSection {
 pub async fn run(args: InitArgs) -> Result<()> {
     let dir = args.dir.canonicalize().unwrap_or(args.dir);
 
-    let name = dir
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "project".to_owned());
+    let name = dir.file_name().map_or_else(
+        || "project".to_owned(),
+        |n| n.to_string_lossy().into_owned(),
+    );
 
     let languages = detect_languages(&dir);
-    let lang_strings: Vec<String> = languages.iter().map(|l| l.to_string()).collect();
+    let lang_strings: Vec<String> = languages.iter().map(ToString::to_string).collect();
 
     let provider = args
         .llm_provider
         .as_ref()
-        .map(LlmProvider::to_string)
-        .unwrap_or_else(|| "none".to_owned());
+        .map_or_else(|| "none".to_owned(), LlmProvider::to_string);
 
     // Create .ucil/ (idempotent).
     let ucil_dir = dir.join(".ucil");

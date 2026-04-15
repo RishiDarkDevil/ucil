@@ -6,3 +6,5 @@
 #![deny(warnings)]
 #![warn(clippy::all, clippy::pedantic, clippy::nursery)]
 #![deny(rustdoc::broken_intra_doc_links)]
+
+pub mod commands;
