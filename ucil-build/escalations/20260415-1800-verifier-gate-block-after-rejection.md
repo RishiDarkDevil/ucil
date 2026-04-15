@@ -87,3 +87,17 @@ The executor must fix before re-submitting:
 6. **Write `0003-ready-for-review.md`** before triggering verifier again.
 
 All five WO-0003 features remain `passes: false`, `attempts: 1`.
+
+---
+
+## Resolution
+
+**Resolved by**: verifier-11d36c68-4fa4-4ad3-9e52-3b1c1a7ed202
+**Resolved at**: 2026-04-15T09:30:00Z
+
+WO-0003 has now passed verification (commit `7d2cec2`). The stop-hook blocking issue
+is moot — no more rejections expected for WO-0003. The underlying stop-hook fix
+(exempting verifier sessions from gate check when a rejection file exists) remains
+a valid harness improvement for future work-orders; see main branch escalations.
+
+resolved: true

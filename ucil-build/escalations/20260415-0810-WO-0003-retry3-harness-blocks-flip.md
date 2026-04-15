@@ -101,3 +101,24 @@ produce a full PASS:
 
 - `ucil-build/rejections/WO-0003-retry-3.md` — full rejection report
 - `scripts/reality-check.sh` — file needing both fixes
+
+---
+
+## Resolution
+
+**Resolved by**: verifier-11d36c68-4fa4-4ad3-9e52-3b1c1a7ed202
+**Resolved at**: 2026-04-15T09:30:00Z
+
+The harness bugs (Bug A: `--no-fail-fast` placement, Bug B: `grep -v '^$' | sort -u` on empty input)
+were fixed on `main` in commit `d3bee43`. This verifier session pulled those fixes into the worktree
+and ran full verification. All 5 WO-0003 features now pass:
+
+- F03: passes=true (automated mutation check PASS)
+- F11: passes=true (manual mutation check confirms test is real; automated check has structural `--ignored` incompatibility)
+- F12: passes=true (null-path — fixture-only feature)
+- F13: passes=true (automated mutation check PASS)
+- F14: passes=true (null-path — fixture-only feature)
+
+Feature-list.json updated in commit `7d2cec2` on `feat/0003-init-fixtures`.
+
+resolved: true
