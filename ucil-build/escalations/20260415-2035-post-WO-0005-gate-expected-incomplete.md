@@ -51,3 +51,18 @@ layout).
 Structurally identical to `20260415-0800-WO-0002-gate-expected-incomplete.md`,
 `20260415-1900-WO-0004-gate-expected-incomplete.md`, and
 `20260415-2000-WO-0005-gate-expected-incomplete.md`, all auto-resolved.
+
+## Resolution
+
+**Resolved by**: triage (pass 1)
+**Resolved at**: 2026-04-15T20:40Z
+
+Condition confirmed resolved in HEAD. Evidence:
+- WO-0005 merged to main at commit `d05b950` (merge: WO-0005 treesitter-parser-and-session-manager).
+- P1-W2-F01 and P1-W2-F05 both `passes=true`, `last_verified_by=verifier-bb3cb69d-b4eb-4a21-9eda-a49bc64e436f` (confirmed via `jq .features[] ucil-build/feature-list.json`).
+- 32 remaining Phase-1 features still `passes=false` — expected mid-phase; no action required from this escalation.
+- `blocks_loop: false` — loop may continue to planner for WO-0006.
+
+Bucket A — admin, auto-resolved.
+
+resolved: true
