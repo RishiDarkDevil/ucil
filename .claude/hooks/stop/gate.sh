@@ -48,9 +48,14 @@ if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   fi
 fi
 
-# --- Check 3: phase gate (skip for non-code roles) ---
+# --- Check 3: phase gate (skip for non-code-producing roles) ---
+# These roles only produce artifacts (reports, ADRs, escalations) — they
+# never flip features or write UCIL source, so gating them on phase
+# completion creates a feedback loop where they file an escalation just
+# to escape the gate check. Exempt them from the gate (dirty-tree and
+# unpushed-commits checks above still apply).
 case "$role" in
-  planner|critic|docs-writer)
+  planner|critic|docs-writer|triage|root-cause-finder|effectiveness-evaluator|integration-tester|flake-hunter|security-reviewer|dep-resolver)
     exit 0
     ;;
 esac
