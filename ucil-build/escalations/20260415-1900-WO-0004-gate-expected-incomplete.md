@@ -57,3 +57,13 @@ This escalation is purely administrative.
 
 This is identical in structure to `20260415-0800-WO-0002-gate-expected-incomplete.md`,
 which was auto-resolved when the verifier ran.
+
+## Resolution
+
+**Resolved by verifier-e632b721-e2e3-4547-ad3e-ca2216470451 at 2026-04-15T19:30:00Z**
+
+All four features flipped to `passes=true` in verification session vrf-e632b721. 
+Verification report: `ucil-build/verification-reports/WO-0004.md`.
+Merge commit: `3b9ff72` (feat/WO-0004-init-pipeline-and-ci → main).
+
+resolved: true
