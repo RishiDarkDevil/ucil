@@ -440,10 +440,10 @@
         "P1-W2-F05"
       ],
       "passes": false,
-      "last_verified_ts": null,
-      "last_verified_by": null,
-      "last_verified_commit": null,
-      "attempts": 0,
+      "last_verified_ts": "2026-04-15T18:41:44Z",
+      "last_verified_by": "verifier-f1fe06ff-f60e-4432-8bc7-6b6b71c45297",
+      "last_verified_commit": "1e21f1a6df9126b57ac78ae34393ec450d942a61",
+      "attempts": 1,
       "blocked_reason": null
     },
     {
