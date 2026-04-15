@@ -24,11 +24,8 @@ if ! command -v claude >/dev/null 2>&1; then
   exit 3
 fi
 
-if [[ -z "${ANTHROPIC_API_KEY:-}" && -f .env ]]; then
-  set -a
-  source .env
-  set +a
-fi
+# shellcheck source=scripts/_load-auth.sh
+source "$(dirname "$0")/_load-auth.sh"
 
 # Generate a fresh session id — Claude CLI requires a valid UUID.
 if command -v uuidgen >/dev/null 2>&1; then

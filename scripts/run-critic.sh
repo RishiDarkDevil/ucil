@@ -33,16 +33,8 @@ if ! git rev-parse --verify "$BRANCH" >/dev/null 2>&1 && ! git rev-parse --verif
   exit 3
 fi
 
-if [[ -f .env ]]; then
-  set -a
-  # shellcheck disable=SC1091
-  source .env
-  set +a
-fi
-if [[ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" && -z "${ANTHROPIC_API_KEY:-}" ]]; then
-  echo "ERROR: no CLAUDE_CODE_OAUTH_TOKEN / ANTHROPIC_API_KEY in .env" >&2
-  exit 3
-fi
+# shellcheck source=scripts/_load-auth.sh
+source "$(dirname "$0")/_load-auth.sh"
 
 LOG="/tmp/ucil-critic-${WO_ID}.log"
 REF="$(git rev-parse --verify "$BRANCH" 2>/dev/null || git rev-parse "origin/$BRANCH")"

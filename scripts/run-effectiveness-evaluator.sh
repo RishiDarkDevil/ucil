@@ -17,12 +17,8 @@ if ! command -v claude >/dev/null 2>&1; then
   echo "ERROR: claude CLI not in PATH" >&2
   exit 3
 fi
-if [[ -f .env ]]; then
-  set -a
-  # shellcheck disable=SC1091
-  source .env
-  set +a
-fi
+# shellcheck source=scripts/_load-auth.sh
+source "$(dirname "$0")/_load-auth.sh"
 
 LOG="/tmp/ucil-effectiveness-phase-${PHASE}.log"
 REPORT="ucil-build/verification-reports/effectiveness-phase-${PHASE}.md"

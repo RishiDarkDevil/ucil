@@ -45,16 +45,8 @@ if ! command -v claude >/dev/null 2>&1; then
   echo "ERROR: claude CLI not in PATH" >&2
   exit 2
 fi
-if [[ -f .env ]]; then
-  set -a
-  # shellcheck disable=SC1091
-  source .env
-  set +a
-fi
-if [[ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" && -z "${ANTHROPIC_API_KEY:-}" ]]; then
-  echo "ERROR: no CLAUDE_CODE_OAUTH_TOKEN / ANTHROPIC_API_KEY" >&2
-  exit 2
-fi
+# shellcheck source=scripts/_load-auth.sh
+source "$(dirname "$0")/_load-auth.sh"
 
 LOG="/tmp/ucil-triage-phase-${PHASE}-pass-${TRIAGE_PASS}.log"
 
