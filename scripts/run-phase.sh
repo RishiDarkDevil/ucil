@@ -8,6 +8,9 @@ set -uo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
 
+# shellcheck source=scripts/_retry.sh
+source "$(dirname "$0")/_retry.sh"
+
 PHASE="${1:-}"
 if [[ -z "$PHASE" ]]; then
   PHASE=$(jq -r '.phase // empty' ucil-build/progress.json)
@@ -65,7 +68,9 @@ Open for human review." > "ucil-build/escalations/$(date -u +%Y%m%dT%H%M%SZ)-max
     TRIAGE_PASS=$((TRIAGE_PASS+1))
     echo "$TRIAGE_PASS" > "$TRIAGE_PASS_FILE"
     echo "[run-phase] ${unresolved_count} unresolved escalation(s); spawning triage (pass ${TRIAGE_PASS})..."
-    UCIL_PHASE="$PHASE" UCIL_TRIAGE_PASS="$TRIAGE_PASS" scripts/run-triage.sh "$PHASE"
+    # Retry triage on transient failure (its own claude -p may flake).
+    UCIL_PHASE="$PHASE" UCIL_TRIAGE_PASS="$TRIAGE_PASS" \
+      retry_with_backoff 2 30 -- scripts/run-triage.sh "$PHASE"
     triage_rc=$?
     if [[ "$triage_rc" -ne 0 ]]; then
       echo "[run-phase] triage could not resolve all escalations — halting for human review."
@@ -90,13 +95,15 @@ Invoke /replan or root-cause-finder." > "ucil-build/escalations/$(date -u +%Y%m%
   echo "[run-phase] Iteration $iter on phase $PHASE"
   echo "==========================================="
 
-  # 1. Planner — delegate to standalone launcher (strict schema + claims-list)
+  # 1. Planner — delegate to standalone launcher (strict schema + claims-list).
+  # Retry on transient failure (API outage, MCP startup flake). 2 attempts
+  # with 30s → 120s backoff tolerates a ~2.5-min extended outage.
   echo "[run-phase] Step 1/4: planner"
-  if ! scripts/run-planner.sh "$PHASE"; then
-    echo "[run-phase] planner failed — see /tmp/ucil-planner-phase-${PHASE}.log"
+  if ! retry_with_backoff 2 30 -- scripts/run-planner.sh "$PHASE"; then
+    echo "[run-phase] planner failed after retries — see /tmp/ucil-planner-phase-${PHASE}.log"
     exit 1
   fi
-  git pull --quiet 2>/dev/null || true  # pick up planner's WO commit
+  safe_git_pull  # pick up planner's WO commit
 
   # Discover the latest work-order
   LATEST_WO=$(ls -t ucil-build/work-orders/*.json 2>/dev/null | head -1 || true)
@@ -113,12 +120,12 @@ Invoke /replan or root-cause-finder." > "ucil-build/escalations/$(date -u +%Y%m%
     echo "[run-phase] executor exited non-zero — see /tmp/ucil-executor-${WO_ID}.log"
     # Don't exit — the verifier retry loop below will catch real failures
   fi
-  git pull --quiet 2>/dev/null || true
+  safe_git_pull
 
   # 3. Critic — delegate to standalone launcher
   echo "[run-phase] Step 3/4: critic"
   scripts/run-critic.sh "$WO_ID" || true  # critic failure is non-fatal; verifier is authoritative
-  git pull --quiet 2>/dev/null || true
+  safe_git_pull
 
   # 4. Verifier (FRESH SESSION) — with rejection retry loop.
   # The verifier may reject on first run. If it does and no feature's
@@ -129,9 +136,9 @@ Invoke /replan or root-cause-finder." > "ucil-build/escalations/$(date -u +%Y%m%
   _triage_rescue_used=0   # per-WO flag: triage gets ONE shot before hard halt
   while true; do
     echo "[run-phase] Step 4/4: verifier (fresh session, attempt ${vattempt})"
-    git pull --quiet 2>/dev/null || true  # stay current with any recent agent pushes
+    safe_git_pull  # stay current with any recent agent pushes
     scripts/spawn-verifier.sh "$WO_ID" >/tmp/ucil-verifier.log 2>&1 || true
-    git pull --quiet 2>/dev/null || true  # pick up verifier's commits on main if any
+    safe_git_pull  # pick up verifier's commits on main if any
 
     # Determine outcome: did all feature_ids in the WO flip to passes=true?
     WO_FEATURES=$(jq -r '.feature_ids // .features // [] | join(" ")' "$LATEST_WO")
@@ -152,7 +159,7 @@ Invoke /replan or root-cause-finder." > "ucil-build/escalations/$(date -u +%Y%m%
         echo "[run-phase] merge-wo failed (escalation filed). Halting loop."
         exit 1
       fi
-      git pull --quiet 2>/dev/null || true
+      safe_git_pull
       break  # proceed to drift counter / next iteration
     fi
 
@@ -186,16 +193,17 @@ escalation via Bucket B before the loop halts.
 EOF
       git add "$ESC" 2>/dev/null || true
       git commit -m "chore(escalation): ${WO_ID} verifier attempts exhausted" 2>/dev/null || true
-      git push --quiet 2>/dev/null || true
+      safe_git_push --quiet
 
       # Fix A: give triage ONE shot at auto-resolving before hard halt.
       # Many cap-outs are caused by harness-script bugs triage can fix (Bucket B).
       if [[ "$_triage_rescue_used" -eq 0 ]]; then
         _triage_rescue_used=1
         echo "[run-phase] Triage rescue pass: spawning triage to see if Bucket A/B/D applies..."
-        if UCIL_PHASE="$PHASE" UCIL_TRIAGE_PASS=cap-rescue scripts/run-triage.sh "$PHASE"; then
+        if UCIL_PHASE="$PHASE" UCIL_TRIAGE_PASS=cap-rescue \
+             retry_with_backoff 2 30 -- scripts/run-triage.sh "$PHASE"; then
           echo "[run-phase] Triage resolved all escalations. Retrying verifier once (attempt $((vattempt+1)))..."
-          git pull --quiet 2>/dev/null || true
+          safe_git_pull
           vattempt=$((vattempt + 1))
           continue   # back to top of verifier retry loop → re-spawn verifier
         fi
@@ -208,7 +216,7 @@ EOF
 
     echo "[run-phase] verifier rejected ${WO_ID} (v=${vattempt}, feature_max=${max_attempts}). Spawning root-cause-finder."
     scripts/run-root-cause-finder.sh "$WO_ID" >/tmp/ucil-rcf.log 2>&1 || true
-    git pull --quiet 2>/dev/null || true
+    safe_git_pull
 
     echo "[run-phase] Re-running executor with RCF context (attempt $((vattempt+1)))"
     RETRY_PROMPT="You are the UCIL executor. Implement work-order at $LATEST_WO.
@@ -225,7 +233,7 @@ at ../ucil-wt/${WO_ID} (scripts/run-executor.sh cleans stale state already)."
       >/tmp/ucil-executor-retry.log 2>&1 || {
         echo "[run-phase] executor retry failed — see /tmp/ucil-executor-retry.log"
       }
-    git pull --quiet 2>/dev/null || true
+    safe_git_pull
 
     echo "[run-phase] Re-running critic on retried WO"
     RETRY_CRIT_PROMPT="You are the UCIL critic. Re-review the executor's diff for work-order $LATEST_WO
@@ -235,7 +243,7 @@ Overwrite ucil-build/critic-reports/${WO_ID}.md with the fresh review, commit, p
       --dangerously-skip-permissions \
       --append-system-prompt "$(cat .claude/agents/critic.md)" \
       >/tmp/ucil-critic-retry.log 2>&1 || true
-    git pull --quiet 2>/dev/null || true
+    safe_git_pull
 
     vattempt=$((vattempt+1))
     # loop continues → re-spawns verifier

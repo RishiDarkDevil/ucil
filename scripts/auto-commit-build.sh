@@ -8,6 +8,9 @@ set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
 
+# shellcheck source=scripts/_retry.sh
+source "$(dirname "$0")/_retry.sh"
+
 # Only commit ucil-build/ artifacts, not source.
 # Skip if the tree is clean for ucil-build/.
 if git diff --quiet -- ucil-build/ && git diff --cached --quiet -- ucil-build/; then
@@ -20,4 +23,4 @@ git add ucil-build/ || true
 # Use UCIL_SEEDING=1 so feature-list.json edits (if any) pass — but the whitelist
 # check still applies.
 git commit -m "snapshot(build): autosave $NOW" --quiet || exit 0
-git push --quiet || true
+safe_git_push --quiet || true

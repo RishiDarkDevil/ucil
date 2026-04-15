@@ -17,6 +17,9 @@ set -uo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
 
+# shellcheck source=scripts/_retry.sh
+source "$(dirname "$0")/_retry.sh"
+
 WO_ARG="${1:-}"
 if [[ -z "$WO_ARG" ]]; then
   echo "Usage: $0 <work-order-id>" >&2
@@ -69,7 +72,7 @@ EOF
 echo "[merge-wo] ${WO_ID}: branch=${BRANCH}"
 
 # 1. Fetch
-git fetch origin "$BRANCH" 2>&1 | tail -2 || {
+retry_git 3 2 fetch origin "$BRANCH" 2>&1 | tail -2 || {
   escalate "git fetch origin ${BRANCH} failed. Branch may not be on origin."
   exit 1
 }
@@ -81,7 +84,7 @@ fi
 
 # 2. Main baseline
 git checkout main 2>&1 | tail -1
-git pull 2>&1 | tail -2
+safe_git_pull 2>&1 | tail -2
 
 # Fast-path: already contains the feat HEAD?
 MAIN_SHA=$(git rev-parse main)
@@ -106,7 +109,7 @@ if [[ "$BASE" != "$MAIN_SHA" ]]; then
     exit 1
   fi
   # Push the integrated feat branch (no force, just a fast-forward-able push).
-  git push origin "$BRANCH" 2>&1 | tail -2 || {
+  safe_git_push origin "$BRANCH" 2>&1 | tail -2 || {
     escalate "git push origin $BRANCH failed after integrating main. Upstream moved concurrently?"
     exit 1
   }
@@ -136,7 +139,7 @@ if ! git merge --no-ff "$BRANCH" -m "$MERGE_MSG"; then
 fi
 
 # 5. Push
-if ! git push origin main 2>&1 | tail -2; then
+if ! safe_git_push origin main 2>&1 | tail -2; then
   escalate "git push origin main failed after successful local merge. Upstream moved concurrently?"
   exit 1
 fi

@@ -13,6 +13,9 @@ set -uo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
 
+# shellcheck source=scripts/_retry.sh
+source "$(dirname "$0")/_retry.sh"
+
 AUTO_START=0
 CHECK_ONLY=0
 for arg in "$@"; do
@@ -106,17 +109,17 @@ for ref in $(git for-each-ref --format='%(refname:short)' refs/heads/ 2>/dev/nul
     ahead=$(git rev-list "${ref}@{u}..${ref}" 2>/dev/null | wc -l)
     if [[ "$ahead" -gt 0 ]]; then
       log "Pushing $ref ($ahead commits ahead of upstream)"
-      git push origin "$ref" 2>&1 | tail -2 || true
+      safe_git_push origin "$ref" 2>&1 | tail -2 || true
     fi
   fi
 done
 
 # --- 8. Pull main so we have everything other agents may have pushed ---
 if [[ "$(git rev-parse --abbrev-ref HEAD)" == "main" ]]; then
-  git pull --ff-only 2>&1 | tail -2 || true
+  retry_git 3 2 pull --ff-only 2>&1 | tail -2 || true
 else
   git checkout main 2>&1 | tail -1 || true
-  git pull --ff-only 2>&1 | tail -2 || true
+  retry_git 3 2 pull --ff-only 2>&1 | tail -2 || true
 fi
 
 # --- 9. Summary ---
