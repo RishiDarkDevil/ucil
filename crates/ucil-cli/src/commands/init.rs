@@ -167,21 +167,26 @@ pub const P0_PLUGINS: &[&str] = &[
     "shellcheck",
 ];
 
+/// Maximum time to wait for a single plugin binary to respond to `--version`.
+const PLUGIN_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Probes each P0 plugin binary by running `<bin> --version`.
 ///
 /// Returns `PluginStatusKind::Ok` when the binary exits 0, and
-/// `PluginStatusKind::Degraded` when the binary is not found or fails.
-/// Never returns an error — missing tools are graceful degradation.
+/// `PluginStatusKind::Degraded` when the binary is not found, fails, or times
+/// out after [`PLUGIN_PROBE_TIMEOUT`].  Never returns an error — missing or
+/// unresponsive tools are graceful degradation.
 pub async fn verify_plugin_health() -> Vec<PluginStatus> {
     let mut statuses = Vec::with_capacity(P0_PLUGINS.len());
     for &bin in P0_PLUGINS {
-        let kind = match tokio::process::Command::new(bin)
-            .arg("--version")
-            .output()
-            .await
-        {
-            Ok(out) if out.status.success() => PluginStatusKind::Ok,
-            _ => PluginStatusKind::Degraded,
+        let output_result = tokio::time::timeout(
+            PLUGIN_PROBE_TIMEOUT,
+            tokio::process::Command::new(bin).arg("--version").output(),
+        )
+        .await;
+        let kind = match output_result {
+            Ok(Ok(out)) if out.status.success() => PluginStatusKind::Ok,
+            _ => PluginStatusKind::Degraded, // timeout, binary not found, or non-zero exit
         };
         statuses.push(PluginStatus {
             name: bin.to_owned(),
