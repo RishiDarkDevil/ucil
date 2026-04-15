@@ -9,3 +9,6 @@
 
 pub mod session_manager;
 pub use session_manager::{SessionId, SessionInfo, SessionManager, WorktreeInfo};
+
+pub mod storage;
+pub use storage::{StorageError, StorageLayout};
