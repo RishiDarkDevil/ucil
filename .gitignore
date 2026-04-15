@@ -10,6 +10,7 @@ node_modules/
 dist/
 .turbo/
 *.tsbuildinfo
+.vite/
 
 # --- Python ---
 __pycache__/

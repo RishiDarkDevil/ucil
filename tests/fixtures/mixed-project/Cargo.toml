@@ -1,0 +1,11 @@
+[package]
+name = "mixed-project"
+version = "0.1.0"
+edition = "2021"
+description = "Multi-language fixture project with intentional lint defects for UCIL diagnostic testing"
+
+[[bin]]
+name = "mixed-project"
+path = "src/main.rs"
+
+[workspace]

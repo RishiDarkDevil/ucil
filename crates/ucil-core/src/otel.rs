@@ -6,9 +6,10 @@
 //!
 //! # Usage
 //!
+
 //! ```no_run
 //! use ucil_core::otel::{init_tracer, shutdown_tracer};
-//! use opentelemetry::trace::Tracer as _;
+//! use opentelemetry::trace::{Span as _, Tracer as _};
 //!
 //! let tracer = init_tracer();
 //! let mut span = tracer.start("my-operation");

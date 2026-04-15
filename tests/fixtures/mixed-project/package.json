@@ -1,0 +1,15 @@
+{
+  "name": "mixed-project",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Multi-language fixture with intentional lint defects",
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

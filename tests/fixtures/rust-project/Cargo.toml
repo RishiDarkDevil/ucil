@@ -1,0 +1,15 @@
+[package]
+name = "rust-project"
+version = "0.1.0"
+edition = "2021"
+description = "UCIL test fixture: a simple expression parser / evaluator"
+
+[workspace]
+
+[lib]
+name = "rust_project"
+path = "src/lib.rs"
+
+[[bin]]
+name = "rust-project"
+path = "src/main.rs"

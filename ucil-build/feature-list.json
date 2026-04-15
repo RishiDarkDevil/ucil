@@ -62,11 +62,11 @@
       "dependencies": [
         "P0-W1-F02"
       ],
-      "passes": false,
-      "last_verified_ts": null,
-      "last_verified_by": null,
-      "last_verified_commit": null,
-      "attempts": 0,
+      "passes": true,
+      "last_verified_ts": "2026-04-15T03:56:01Z",
+      "last_verified_by": "verifier-11d36c68-4fa4-4ad3-9e52-3b1c1a7ed202",
+      "last_verified_commit": "c9de11e2d4fcf9b56c634fffecf34bbabadb2814",
+      "attempts": 1,
       "blocked_reason": null
     },
     {
@@ -240,11 +240,11 @@
       "dependencies": [
         "P0-W1-F01"
       ],
-      "passes": false,
-      "last_verified_ts": null,
-      "last_verified_by": null,
-      "last_verified_commit": null,
-      "attempts": 0,
+      "passes": true,
+      "last_verified_ts": "2026-04-15T03:56:01Z",
+      "last_verified_by": "verifier-11d36c68-4fa4-4ad3-9e52-3b1c1a7ed202",
+      "last_verified_commit": "c9de11e2d4fcf9b56c634fffecf34bbabadb2814",
+      "attempts": 2,
       "blocked_reason": null
     },
     {
@@ -262,11 +262,11 @@
       "dependencies": [
         "P0-W1-F01"
       ],
-      "passes": false,
-      "last_verified_ts": null,
-      "last_verified_by": null,
-      "last_verified_commit": null,
-      "attempts": 0,
+      "passes": true,
+      "last_verified_ts": "2026-04-15T03:56:01Z",
+      "last_verified_by": "verifier-11d36c68-4fa4-4ad3-9e52-3b1c1a7ed202",
+      "last_verified_commit": "c9de11e2d4fcf9b56c634fffecf34bbabadb2814",
+      "attempts": 3,
       "blocked_reason": null
     },
     {
@@ -284,11 +284,11 @@
       "dependencies": [
         "P0-W1-F01"
       ],
-      "passes": false,
-      "last_verified_ts": null,
-      "last_verified_by": null,
-      "last_verified_commit": null,
-      "attempts": 0,
+      "passes": true,
+      "last_verified_ts": "2026-04-15T03:56:01Z",
+      "last_verified_by": "verifier-11d36c68-4fa4-4ad3-9e52-3b1c1a7ed202",
+      "last_verified_commit": "c9de11e2d4fcf9b56c634fffecf34bbabadb2814",
+      "attempts": 2,
       "blocked_reason": null
     },
     {
@@ -307,11 +307,11 @@
       "dependencies": [
         "P0-W1-F01"
       ],
-      "passes": false,
-      "last_verified_ts": null,
-      "last_verified_by": null,
-      "last_verified_commit": null,
-      "attempts": 0,
+      "passes": true,
+      "last_verified_ts": "2026-04-15T03:56:01Z",
+      "last_verified_by": "verifier-11d36c68-4fa4-4ad3-9e52-3b1c1a7ed202",
+      "last_verified_commit": "c9de11e2d4fcf9b56c634fffecf34bbabadb2814",
+      "attempts": 3,
       "blocked_reason": null
     },
     {

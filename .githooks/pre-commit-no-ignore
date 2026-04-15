@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 # Rejects any staged diff that adds #[ignore], it.skip, xit, xfail, @pytest.skip,
 # or commented-out assertion lines.
+#
+# EXCEPTION (DEC-0003): A single `#[ignore]` is allowed when the immediately
+# preceding added line in the same diff hunk contains the marker comment
+# `// SLOW-TEST:`. This pattern is reserved for tests that are correct but
+# too slow for the fast CI loop (e.g., spawning `cargo check` on a fixture).
+# All other uses of skip/ignore remain banned.
 set -euo pipefail
 
 # Only check lines being ADDED (prefix "+"). Diff against HEAD if it exists, else nothing to check.
@@ -10,7 +16,8 @@ fi
 
 # Allowed file patterns (exempt — docs/markdown/config explaining these patterns).
 # Pattern is applied against the "file:+line" prefix we emit below.
-ALLOW_PREFIX='^(docs/|[^:]*\.md:|[^:]*CLAUDE\.md:|\.githooks/|\.claude/|scripts/|ucil-build/)'
+# DEC-0004: tests/fixtures/mixed-project/ is a defect fixture and is exempt.
+ALLOW_PREFIX='^(docs/|[^:]*\.md:|[^:]*CLAUDE\.md:|\.githooks/|\.claude/|scripts/|ucil-build/|tests/fixtures/mixed-project/)'
 
 # Get added lines, filter out exempt files
 ADDED=$(git diff --cached --unified=0 --diff-filter=AM | \
@@ -20,9 +27,44 @@ ADDED=$(git diff --cached --unified=0 --diff-filter=AM | \
     /^\+/ && file != "" { print file ":" $0 }
   ' | grep -Ev "$ALLOW_PREFIX" || true)
 
-# Patterns that are BANNED
+# For the SLOW-TEST exemption: collect lines from added context that have
+# SLOW-TEST markers so we can cross-check ignore lines against them.
+# Strategy: extract the full unified diff for non-exempt files, then use awk
+# to flag #[ignore] lines that are NOT preceded by a // SLOW-TEST: line in
+# the same hunk.
+IGNORE_VIOLATIONS=$(git diff --cached --unified=5 --diff-filter=AM | \
+  awk '
+    /^diff --git/ { file=$4; sub(/^b\//,"",file); in_exempt=0 }
+    /^\+\+\+/ { next }
+    file != "" {
+      # Check exemption pattern
+      if (file ~ /^(docs\/|[^\/]*\.md$|[^\/]*CLAUDE\.md$|\.githooks\/|\.claude\/|scripts\/|ucil-build\/)/) {
+        in_exempt=1
+      } else {
+        in_exempt=0
+      }
+    }
+    !in_exempt && /^\+/ {
+      line=$0
+      sub(/^\+/, "", line)
+      # Buffer the last added line to detect SLOW-TEST preceding #[ignore]
+      if (line ~ /\/\/ SLOW-TEST:/) {
+        prev_is_slow=1
+      } else if (line ~ /#\[ignore\b/) {
+        if (!prev_is_slow) {
+          print file ":+" line " :: pattern=#[ignore] without SLOW-TEST marker"
+        }
+        prev_is_slow=0
+      } else if (line !~ /^[[:space:]]*$/) {
+        # Non-blank, non-SLOW-TEST line resets the precedence
+        prev_is_slow=0
+      }
+    }
+    /^@@/ { prev_is_slow=0 }
+  ' || true)
+
+# Patterns that are BANNED (excluding #[ignore] which is handled above)
 PATTERNS=(
-  '#\[ignore\b'
   '#\[test_log::test\(ignore'
   '\bit\.skip\s*\('
   '\bxit\s*\('
@@ -38,6 +80,14 @@ PATTERNS=(
 )
 
 VIOLATIONS=()
+
+# Add ignore violations from SLOW-TEST check
+if [[ -n "$IGNORE_VIOLATIONS" ]]; then
+  while IFS= read -r line; do
+    [[ -n "$line" ]] && VIOLATIONS+=("$line")
+  done <<< "$IGNORE_VIOLATIONS"
+fi
+
 for pat in "${PATTERNS[@]}"; do
   while IFS= read -r line; do
     [[ -n "$line" ]] && VIOLATIONS+=("$line :: pattern=$pat")
@@ -48,6 +98,8 @@ if (( ${#VIOLATIONS[@]} > 0 )); then
   echo "[pre-commit-no-ignore] staged diff introduces skipped/ignored/xfailed tests:" >&2
   printf '  %s\n' "${VIOLATIONS[@]}" >&2
   echo "" >&2
+  echo "If a test is legitimately slow (not failing), add a '// SLOW-TEST: <reason>'" >&2
+  echo "comment on the line immediately before #[ignore] (see DEC-0003)." >&2
   echo "If a test is legitimately flaky, invoke the flake-hunter subagent," >&2
   echo "write an ADR under ucil-build/decisions/flake-<id>.md with evidence," >&2
   echo "and only then add the skip (the critic will still review)." >&2
