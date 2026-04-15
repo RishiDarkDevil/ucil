@@ -20,3 +20,6 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 serde.workspace = true
 ucil-core = { path = "../ucil-core" }
+
+[dev-dependencies]
+tempfile.workspace = true
