@@ -175,7 +175,9 @@ pub const P0_PLUGINS: &[&str] = &[
 ];
 
 /// Maximum time to wait for a single plugin binary to respond to `--version`.
-const PLUGIN_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+///
+/// Exposed as `pub` so integration tests can verify the probe is bounded.
+pub const PLUGIN_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Probes each P0 plugin binary by running `<bin> --version`.
 ///
