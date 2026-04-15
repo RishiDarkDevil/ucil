@@ -1,0 +1,91 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - "feat/**"
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  # ── Rust ────────────────────────────────────────────────────────────────────
+  rust:
+    name: Rust
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: cargo test
+        run: cargo test --workspace
+
+      - name: cargo clippy
+        run: cargo clippy --workspace -- -D warnings
+
+      - name: cargo fmt check
+        run: cargo fmt --all --check
+
+  # ── TypeScript ──────────────────────────────────────────────────────────────
+  typescript:
+    name: TypeScript
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "pnpm"
+          cache-dependency-path: adapters/pnpm-lock.yaml
+
+      - name: pnpm install
+        run: pnpm -C adapters install --frozen-lockfile
+
+      - name: build
+        run: pnpm -C adapters build
+
+      - name: biome check
+        run: pnpm -C adapters exec biome check .
+
+      - name: vitest
+        run: pnpm -C adapters exec vitest run
+
+  # ── Python ──────────────────────────────────────────────────────────────────
+  python:
+    name: Python
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: "latest"
+
+      - name: uv sync
+        run: uv sync --all-extras
+        working-directory: ml
+
+      - name: ruff format check
+        run: uv run ruff format --check .
+        working-directory: ml
+
+      - name: ruff lint
+        run: uv run ruff check .
+        working-directory: ml
+
+      - name: mypy
+        run: uv run mypy src
+        working-directory: ml
+
+      - name: pytest
+        run: uv run pytest
+        working-directory: ml
