@@ -13,7 +13,13 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
+thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+serde.workspace = true
+uuid.workspace = true
 ucil-core = { path = "../ucil-core" }
+
+[dev-dependencies]
+tempfile.workspace = true
