@@ -4,17 +4,22 @@
 mod fixture {
     /// Verify that the rust-project fixture is present on disk and compiles.
     ///
-    /// File-existence checks always run.
-    /// The slow `cargo check` sub-process runs only when the environment
-    /// variable `UCIL_SLOW_TESTS=1` is set, to keep `cargo test --workspace`
-    /// fast in the normal CI loop.
+    /// File-existence checks run as part of the compilation check.
+    /// The test is marked `#[ignore]` (SLOW-TEST) because it spawns
+    /// `cargo check` on the fixture which takes ~10–30 s.
     ///
-    /// Run the full check:
+    /// Run explicitly:
     /// ```text
-    /// UCIL_SLOW_TESTS=1 cargo test -p ucil-core --test fixture
+    /// cargo test -p ucil-core -- --ignored fixture::rust_project_loads
     /// ```
+    ///
+    /// See `ucil-build/decisions/DEC-0003-slow-test-ignore-allowlist.md`.
+    // SLOW-TEST: spawns `cargo check` on a 5.8 K-LOC fixture (~10-30 s).
+    // Acceptance test P0-W1-F11 requires `--ignored` per feature-list.json.
+    // See DEC-0003 for the SLOW-TEST exemption policy.
+    #[ignore]
     #[test]
-    pub fn rust_project_loads() {
+    fn rust_project_loads() {
         let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .unwrap()
@@ -31,11 +36,6 @@ mod fixture {
             fixture.join("src/main.rs").exists(),
             "fixture src/main.rs missing"
         );
-
-        // Compilation check is slow — opt-in via env var.
-        if std::env::var("UCIL_SLOW_TESTS").as_deref() != Ok("1") {
-            return;
-        }
 
         let status = std::process::Command::new("cargo")
             .args(["check", "--manifest-path"])

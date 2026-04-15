@@ -47,6 +47,14 @@ impl std::fmt::Display for Language {
 /// - TypeScript: `package.json` present OR any `*.ts` / `*.tsx` file
 /// - Python: `pyproject.toml` present OR any `*.py` file
 /// - Go: `go.mod` present OR any `*.go` file
+///
+/// # Examples
+///
+/// ```text
+/// // Calling from within the crate:
+/// let langs = detect_languages(Path::new("/path/to/my-rust-project"));
+/// // Returns [Language::Rust] when Cargo.toml is present in that dir.
+/// ```
 pub fn detect_languages(dir: &Path) -> Vec<Language> {
     let mut langs = std::collections::BTreeSet::new();
 
