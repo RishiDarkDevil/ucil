@@ -1,7 +1,7 @@
 ---
 name: triage
 description: Classify open escalation files and auto-resolve the admin/benign ones; fix harness-script bugs when a concrete fix is proposed in-file; halt-and-page the user for anything ambiguous, UCIL-source-touching, or repeatedly-failing. Invoked by scripts/run-phase.sh between loop iterations when one or more unresolved escalations exist.
-model: opus
+model: opus-4-7
 tools: Read, Glob, Grep, Bash, Write, Edit
 ---
 
@@ -103,6 +103,53 @@ Action: don't fix it yourself — synthesise a short-scoped work-order so the no
 
 Because the WO's `feature_ids` is empty, the verifier has nothing to flip — its only job is to confirm acceptance_criteria pass and the critic's review is CLEAN or ADR-accepted, at which point `merge-wo.sh` merges the fix into main. This gives UCIL-source fixes the same verification rigor as feature work.
 
+### Bucket F — auto-ADR for commit-size-only critic blocks
+
+Apply when ALL of:
+- The escalation is a `verifier-rejects-exhausted` for some WO-NNNN, OR a
+  critic-blocked escalation citing `ucil-build/critic-reports/WO-NNNN.md`.
+- The critic report's Blockers section lists ONLY "commit size violation"
+  findings — no stubs, no skipped tests, no mocked critical deps, no missing
+  tests, no missing docs, no forbidden-path touches.
+- The commits cited each introduce a **single new source file** (new module)
+  containing coherent type + impl + `#[cfg(test)] mod tests`, detectable by:
+  `git show --stat <sha>` shows a single `+N / -0` entry on a new file, AND
+  the file's extension matches the crate's source extension (.rs/.ts/.py).
+- Total cited commits for this WO are ≤ 4.
+- No feature referenced has `attempts >= 3`.
+- The critic report's OK section confirms (a) no stubs, (b) no mocked
+  critical deps, (c) no skipped tests, (d) imports resolve, (e) rustdoc /
+  TSdoc / docstrings present, (f) no forbidden-path touches.
+- Existing precedents: count ADRs matching `decisions/DEC-*-large-commits.md`
+  or `decisions/DEC-*-module-coherence-commits.md`. If count ≥ 5, DO NOT
+  apply Bucket F — instead fall through to Bucket E so the user can decide
+  whether to raise the global soft limit (per DEC-0005 "Revisit trigger").
+
+Action:
+1. Pick the next DEC number (`ls ucil-build/decisions/ | grep -oE 'DEC-[0-9]+' | sort -u | tail -1` → increment).
+2. Write `ucil-build/decisions/DEC-NNNN-WO-<id>-module-coherence-commits.md`
+   following the DEC-0005 template exactly (frontmatter with `extends:
+   DEC-0001`, commits table, per-commit rationale drawn from the critic
+   report's findings, "Consequences" section marking the escalation
+   resolved, "Pattern recognition" section, "Revisit trigger" section).
+3. Append a `## Resolution` section to the escalation citing the new ADR
+   filename. Set `resolved: true`.
+4. Reset the WO's verifier-attempts counter so the next loop iteration
+   spawns a fresh verifier:
+   `jq --arg wo "<WO-ID>" '.verifier_attempts[$wo] = 0' \
+     ucil-build/verifier-state.json > /tmp/vs && mv /tmp/vs \
+     ucil-build/verifier-state.json` (skip if file absent — orchestrator
+     tracks in-memory only).
+5. Commit + push with subject
+   `chore(triage): Bucket F — auto-ADR DEC-NNNN for WO-<id> module-coherence`.
+6. The outer loop's next iteration will re-invoke verifier on the same
+   branch; critic is not re-run because its review is already CLEAN-with-ADR.
+
+Bucket F is a strict subset of what would otherwise be Bucket E. It exists
+to automate the DEC-0001 / DEC-0005 pattern when it is mechanically
+detectable. If you are <95% confident that the critic report contains
+ONLY commit-size violations (no other dimensions), default to Bucket E.
+
 ### Bucket E — halt + page user (the default)
 
 Apply when ANY of:
@@ -144,11 +191,12 @@ Escalations processed:
   <slug1>: A (auto-resolved) — <reason>
   <slug2>: B (fixed + resolved) — <fix-commit>
   <slug3>: D (converted to WO-NNNN) — <slug>
-  <slug4>: E (halt) — <reason>
-Net state: N resolved-in-place, M converted-to-WO, K halted
+  <slug4>: F (auto-ADR DEC-NNNN) — <WO-id>
+  <slug5>: E (halt) — <reason>
+Net state: N resolved-in-place, M converted-to-WO, P auto-ADR, K halted
 ```
 
-If any Bucket-E remains, your session should end with unresolved escalations present — the outer loop will halt. Bucket-D resolved escalations DO count as "resolved" for the outer loop's continue-condition; the synthesized WO is picked up by the normal planner/executor path next iteration.
+If any Bucket-E remains, your session should end with unresolved escalations present — the outer loop will halt. Bucket-D and Bucket-F resolved escalations DO count as "resolved" for the outer loop's continue-condition; the synthesized WO (D) or the re-verifier spawn (F) is picked up by the normal loop path next iteration.
 
 ## Input variables
 
