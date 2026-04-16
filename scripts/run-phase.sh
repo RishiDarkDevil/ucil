@@ -163,16 +163,29 @@ Invoke /replan or root-cause-finder." > "ucil-build/escalations/$(date -u +%Y%m%
     echo "[run-phase] Step 4/4: verifier (fresh session, attempt ${vattempt})"
     safe_git_pull  # stay current with any recent agent pushes
     scripts/spawn-verifier.sh "$WO_ID" >/tmp/ucil-verifier.log 2>&1 || true
-    safe_git_pull  # pick up verifier's commits on main if any
+    # Verifier runs in ../ucil-wt/<WO>/ worktree, so its flip commit lands on
+    # feat/<WO>-<slug>, NOT main. Fetch that branch explicitly so we can check
+    # the feat-branch's feature-list.json below (not main's).
+    safe_git_fetch origin 2>/dev/null || true
     emit_cost_snapshot "phase-${PHASE}-post-verifier-iter${iter}-v${vattempt}-${WO_ID}"
 
-    # Determine outcome: did all feature_ids in the WO flip to passes=true?
+    # Determine outcome: did all feature_ids in the WO flip to passes=true
+    # ON THE FEAT BRANCH? (The verifier's flip is on feat, not main, until
+    # merge-wo.sh runs below.) Fall back to main's feature-list.json if the
+    # feat branch doesn't exist.
+    _WO_SLUG=$(jq -r .slug "$LATEST_WO" 2>/dev/null)
+    _FEAT_REF="origin/feat/${WO_ID}-${_WO_SLUG}"
+    if git rev-parse --verify "$_FEAT_REF" >/dev/null 2>&1; then
+      _FEAT_FLIST=$(git show "${_FEAT_REF}:ucil-build/feature-list.json" 2>/dev/null || echo '{}')
+    else
+      _FEAT_FLIST=$(cat ucil-build/feature-list.json)
+    fi
     WO_FEATURES=$(jq -r '.feature_ids // .features // [] | join(" ")' "$LATEST_WO")
     all_pass=1
     max_attempts=0
     for fid in $WO_FEATURES; do
-      p=$(jq -r --arg id "$fid" '.features[] | select(.id==$id) | .passes' ucil-build/feature-list.json 2>/dev/null)
-      a=$(jq -r --arg id "$fid" '.features[] | select(.id==$id) | .attempts // 0' ucil-build/feature-list.json 2>/dev/null)
+      p=$(printf '%s' "$_FEAT_FLIST" | jq -r --arg id "$fid" '.features[] | select(.id==$id) | .passes' 2>/dev/null)
+      a=$(printf '%s' "$_FEAT_FLIST" | jq -r --arg id "$fid" '.features[] | select(.id==$id) | .attempts // 0' 2>/dev/null)
       [[ "$p" != "true" ]] && all_pass=0
       [[ "$a" -gt "$max_attempts" ]] && max_attempts="$a"
     done
