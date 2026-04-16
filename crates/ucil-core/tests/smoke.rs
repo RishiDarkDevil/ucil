@@ -6,7 +6,7 @@ fn version_is_semver() {
     // Must be non-empty and start with a digit (semver)
     assert!(!v.is_empty(), "VERSION must not be empty");
     assert!(
-        v.chars().next().map_or(false, |c| c.is_ascii_digit()),
+        v.chars().next().is_some_and(|c| c.is_ascii_digit()),
         "VERSION must start with a digit, got: {v}"
     );
 }

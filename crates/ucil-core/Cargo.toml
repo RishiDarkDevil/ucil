@@ -17,6 +17,10 @@ rusqlite.workspace = true
 opentelemetry.workspace = true
 opentelemetry_sdk.workspace = true
 opentelemetry-stdout.workspace = true
+# Incremental computation framework — dependency DAG, invalidation,
+# automatic early cutoff. Skeleton lands in this WO-0009; subsequent
+# Phase-1 work will wire the file-watcher layer through it.
+salsa = "0.22"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros"] }

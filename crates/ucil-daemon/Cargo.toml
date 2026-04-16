@@ -11,6 +11,13 @@ description = "UCIL daemon binary: file watcher, plugin manager, query router, s
 name = "ucil-daemon"
 path = "src/main.rs"
 
+# Mock MCP plugin used by the plugin-manager integration tests. Lives
+# under tests/support/ so it is co-located with its only consumer.
+# Integration tests reach it via `env!("CARGO_BIN_EXE_mock-mcp-plugin")`.
+[[bin]]
+name = "mock-mcp-plugin"
+path = "tests/support/mock_mcp_plugin.rs"
+
 [dependencies]
 anyhow.workspace = true
 thiserror.workspace = true
@@ -18,6 +25,8 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
 uuid.workspace = true
 ucil-core = { path = "../ucil-core" }
 
