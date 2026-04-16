@@ -44,6 +44,14 @@ if [[ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" && -z "${ANTHROPIC_API_KEY:-}" ]]; then
   return 3 2>/dev/null || exit 3
 fi
 
+# 3b. Pin model for all spawned Claude Code sessions. Every launcher in
+# scripts/run-*.sh and scripts/spawn-*.sh uses "$CLAUDE_CODE_MODEL" for the
+# --model flag, so setting it here makes the whole harness consistent.
+# Override from env or .env if you truly want a different model (e.g. haiku
+# for cheap smoke tests).
+: "${CLAUDE_CODE_MODEL:=opus-4-7}"
+export CLAUDE_CODE_MODEL
+
 unset -f _ucil_auth_log
 
 # 4. W3C trace-context propagation + OTel env wiring for child claude -p

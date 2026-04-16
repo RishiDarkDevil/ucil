@@ -76,6 +76,7 @@ UCIL_TRIAGE_PASS="$TRIAGE_PASS" \
 CLAUDE_CODE_ENABLE_TELEMETRY=1 \
 CLAUDE_SUBAGENT_NAME=triage \
 claude -p "$PROMPT" \
+  --model "${CLAUDE_CODE_MODEL:-opus-4-7}" \
   --dangerously-skip-permissions \
   --append-system-prompt "$(cat .claude/agents/triage.md)" \
   2>&1 | tee "$LOG" || true

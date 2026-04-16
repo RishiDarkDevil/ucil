@@ -13,6 +13,18 @@ source "$(dirname "$0")/_retry.sh"
 # shellcheck source=scripts/_cost-budget.sh
 source "$(dirname "$0")/_cost-budget.sh"
 
+# Idempotent shared build cache setup. Runs once per run-phase.sh invocation;
+# the script's own internal checks short-circuit if already configured.
+if [[ -z "${UCIL_BUILD_CACHE_CONFIGURED:-}" ]]; then
+  if [[ -x scripts/setup-build-cache.sh ]]; then
+    # shellcheck source=scripts/setup-build-cache.sh
+    source scripts/setup-build-cache.sh >/dev/null 2>&1 || {
+      echo "[run-phase] WARN: setup-build-cache.sh failed — builds will not use sccache." >&2
+    }
+    export UCIL_BUILD_CACHE_CONFIGURED=1
+  fi
+fi
+
 PHASE="${1:-}"
 if [[ -z "$PHASE" ]]; then
   PHASE=$(jq -r '.phase // empty' ucil-build/progress.json)
@@ -174,6 +186,24 @@ Invoke /replan or root-cause-finder." > "ucil-build/escalations/$(date -u +%Y%m%
         exit 1
       fi
       safe_git_pull
+
+      # Step 5b/5: docs-writer appends ## Lessons Learned (WO-NNNN) to the
+      # phase-log CLAUDE.md so the next planner WO-emission consumes it.
+      # Non-fatal — docs-writer failure should not block the loop.
+      echo "[run-phase] Step 5b/5: docs-writer appends lessons-learned for ${WO_ID}"
+      LESSONS_PROMPT="You are the UCIL docs-writer invoked in fast-path mode. Work-order ${WO_ID} just merged to main.
+Append a '## Lessons Learned (${WO_ID})' section to ucil-build/phase-log/$(printf '%02d' ${PHASE})-phase-${PHASE}/CLAUDE.md per the template in .claude/agents/docs-writer.md section 'After each work-order merges'.
+Read ucil-build/rejections/${WO_ID}.md (if present), ucil-build/critic-reports/${WO_ID}.md, and any ucil-build/decisions/DEC-*-${WO_ID}-*.md. Capture durable lessons ONLY — planner hints, verifier checklist additions, executor anti-patterns. Commit + push as 'docs(phase-log): lessons learned from ${WO_ID}'. Exit cleanly."
+      UCIL_WO_ID="${WO_ID}" CLAUDE_SUBAGENT_NAME=docs-writer \
+        claude -p "$LESSONS_PROMPT" \
+          --model "${CLAUDE_CODE_MODEL:-opus-4-7}" \
+          --dangerously-skip-permissions \
+          --append-system-prompt "$(cat .claude/agents/docs-writer.md)" \
+          >/tmp/ucil-lessons-learned.log 2>&1 || {
+        echo "[run-phase] docs-writer lessons-learned failed (non-fatal) — see /tmp/ucil-lessons-learned.log"
+      }
+      safe_git_pull
+
       break  # proceed to drift counter / next iteration
     fi
 
@@ -242,6 +272,7 @@ ucil-build/work-orders/$(basename "$LATEST_WO" .json)-ready-for-review.md when a
 acceptance criteria pass locally, and end cleanly. Reuse the existing worktree
 at ../ucil-wt/${WO_ID} (scripts/run-executor.sh cleans stale state already)."
     CLAUDE_SUBAGENT_NAME=executor claude -p "$RETRY_PROMPT" \
+      --model "${CLAUDE_CODE_MODEL:-opus-4-7}" \
       --dangerously-skip-permissions \
       --append-system-prompt "$(cat .claude/agents/executor.md)" \
       >/tmp/ucil-executor-retry.log 2>&1 || {
@@ -254,6 +285,7 @@ at ../ucil-wt/${WO_ID} (scripts/run-executor.sh cleans stale state already)."
 after retry attempt ${vattempt}. Apply every check in .claude/agents/critic.md.
 Overwrite ucil-build/critic-reports/${WO_ID}.md with the fresh review, commit, push."
     CLAUDE_SUBAGENT_NAME=critic claude -p "$RETRY_CRIT_PROMPT" \
+      --model "${CLAUDE_CODE_MODEL:-opus-4-7}" \
       --dangerously-skip-permissions \
       --append-system-prompt "$(cat .claude/agents/critic.md)" \
       >/tmp/ucil-critic-retry.log 2>&1 || true
