@@ -8,10 +8,16 @@
 #![deny(rustdoc::broken_intra_doc_links)]
 
 pub mod plugin_manager;
+pub mod server;
 pub mod session_manager;
 
 pub use plugin_manager::{
-    HealthStatus, PluginError, PluginHealth, PluginManager, PluginManifest, PluginSection,
-    TransportSection, HEALTH_CHECK_TIMEOUT_MS,
+    HealthStatus, LifecycleSection, PluginError, PluginHealth, PluginManager, PluginManifest,
+    PluginRuntime, PluginSection, PluginState, TransportSection, DEFAULT_IDLE_TIMEOUT_MINUTES,
+    HEALTH_CHECK_TIMEOUT_MS,
+};
+pub use server::{
+    ceqp_input_schema, ucil_tools, McpError, McpServer, ToolDescriptor, JSONRPC_VERSION,
+    MCP_PROTOCOL_VERSION, READ_TIMEOUT_MS, TOOL_COUNT, WRITE_TIMEOUT_MS,
 };
 pub use session_manager::{SessionId, SessionInfo, SessionManager, WorktreeInfo};
