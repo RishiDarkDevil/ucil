@@ -13,6 +13,27 @@ set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
 TARGET="${1:-}"
+case "$TARGET" in
+  -h|--help)
+    cat <<'USAGE'
+Usage: scripts/spawn-verifier.sh <work-order-id|feature-id> [claude-cli args...]
+
+  Spawns a FRESH Claude Code session as the UCIL verifier subagent.
+
+Arguments:
+  <target>   Work-order id (e.g., WO-0007) or feature id (e.g., P1-W2-F03).
+             Must match an entry in ucil-build/work-orders/ or
+             ucil-build/feature-list.json.
+  ...        Additional positional args are forwarded to `claude -p`.
+
+The verifier launches with a new session id distinct from the caller and
+the verifier subagent prompt appended via --append-system-prompt. It runs
+acceptance tests from a clean slate and may flip passes=true on features
+it verifies green via scripts/flip-feature.sh.
+USAGE
+    exit 0
+    ;;
+esac
 if [[ -z "$TARGET" ]]; then
   echo "Usage: $0 <work-order-id|feature-id>" >&2
   exit 2
