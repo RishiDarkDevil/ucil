@@ -44,7 +44,8 @@
 
 use std::{
     path::{Path, PathBuf},
-    time::Duration,
+    sync::Arc,
+    time::{Duration, Instant},
 };
 
 use serde::Deserialize;
@@ -52,6 +53,7 @@ use thiserror::Error;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     process::{Child, Command},
+    sync::RwLock,
     time::timeout,
 };
 
@@ -68,23 +70,32 @@ pub const HEALTH_CHECK_TIMEOUT_MS: u64 = 5_000;
 
 const HEALTH_CHECK_TIMEOUT: Duration = Duration::from_millis(HEALTH_CHECK_TIMEOUT_MS);
 
+/// Default idle-timeout, in minutes, for a HOT/COLD plugin when the
+/// manifest does not set `[lifecycle] idle_timeout_minutes` (master-plan
+/// §14.1 shipped example default).
+pub const DEFAULT_IDLE_TIMEOUT_MINUTES: u64 = 10;
+
 // ── Manifest types ───────────────────────────────────────────────────────────
 
 /// Parsed `plugin.toml` manifest — subset required by this WO.
 ///
-/// Only the two top-level tables mandated by master-plan §14.1 are
-/// modelled.  The full schema (resources, prompts, capabilities …) will
-/// be layered on in Phase 2 once real plugins ship.
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+/// Three of the master-plan §14.1 top-level tables are modelled here:
+/// `[plugin]`, `[transport]`, and the optional `[lifecycle]`.  The
+/// remaining tables (resources, prompts, capabilities …) will be layered
+/// on in Phase 2 once real plugins ship.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq, Default)]
 pub struct PluginManifest {
     /// Identity table.
     pub plugin: PluginSection,
     /// How to launch the plugin and what wire protocol to use.
     pub transport: TransportSection,
+    /// Optional `[lifecycle]` table: HOT/COLD mode + idle-timeout knobs.
+    #[serde(default)]
+    pub lifecycle: Option<LifecycleSection>,
 }
 
 /// `[plugin]` section of a plugin manifest.
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq, Default)]
 pub struct PluginSection {
     /// Short identifier.  Must be unique across all loaded plugins.
     pub name: String,
@@ -101,7 +112,7 @@ pub struct PluginSection {
 /// Only the `stdio` transport is implemented here; the structural shape
 /// is preserved so future transports (e.g. `sse`, `socket`) can be added
 /// without breaking manifest parsing.
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq, Default)]
 pub struct TransportSection {
     /// The transport kind.  Only `"stdio"` is supported today; any other
     /// value is accepted by the parser but rejected by
@@ -115,6 +126,39 @@ pub struct TransportSection {
     /// Optional arguments forwarded to the plugin process.
     #[serde(default)]
     pub args: Vec<String>,
+}
+
+/// `[lifecycle]` section of a plugin manifest (master-plan §14.1).
+///
+/// Controls whether the plugin participates in the HOT/COLD lifecycle
+/// and, if so, after how many minutes of idleness it is demoted to the
+/// `IDLE` state.  When the section is absent from the manifest the
+/// plugin is treated as HOT (never auto-demoted) — this matches the
+/// master-plan default behavior.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq, Default)]
+pub struct LifecycleSection {
+    /// Enable HOT/COLD lifecycle management for this plugin.  When
+    /// `false` (the default) the plugin is considered always-HOT and is
+    /// never auto-demoted.
+    #[serde(default)]
+    pub hot_cold: bool,
+    /// Minutes of idleness after which a HOT plugin is demoted to
+    /// `IDLE`.  Falls back to [`DEFAULT_IDLE_TIMEOUT_MINUTES`] when the
+    /// field is absent.
+    #[serde(default)]
+    pub idle_timeout_minutes: Option<u64>,
+}
+
+impl LifecycleSection {
+    /// Resolve the idle-timeout for this lifecycle entry, applying the
+    /// crate default when the manifest did not specify one.
+    #[must_use]
+    pub fn idle_timeout(&self) -> Duration {
+        let minutes = self
+            .idle_timeout_minutes
+            .unwrap_or(DEFAULT_IDLE_TIMEOUT_MINUTES);
+        Duration::from_secs(minutes.saturating_mul(60))
+    }
 }
 
 impl PluginManifest {
@@ -133,6 +177,143 @@ impl PluginManifest {
             source: e,
         })?;
         Ok(manifest)
+    }
+}
+
+// ── HOT/COLD lifecycle types ─────────────────────────────────────────────────
+
+/// Lifecycle state of a plugin runtime.
+///
+/// Mirrors master-plan §14.2:
+///
+/// ```text
+/// DISCOVERED → REGISTERED → LOADING → ACTIVE → IDLE → STOPPED → ERROR
+/// ```
+///
+/// A HOT plugin (manifest `[lifecycle] hot_cold = true`) that sits idle
+/// for longer than its configured `idle_timeout_minutes` auto-transitions
+/// `Active → Idle`.  A subsequent call routes back `Idle → Loading` via
+/// [`PluginRuntime::mark_call`], and the manager then drives
+/// `Loading → Active` via a real health check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum PluginState {
+    /// A manifest has been found on disk but not yet registered.
+    Discovered,
+    /// The manifest has been parsed and accepted into the registry.
+    Registered,
+    /// The child process is starting up / the initial health check is
+    /// in flight.
+    Loading,
+    /// The plugin responded to a health check and is serving requests.
+    Active,
+    /// The plugin has been hibernated after exceeding its idle timeout.
+    Idle,
+    /// The plugin has been explicitly stopped; the registry retains the
+    /// manifest so the plugin can be re-started on demand.
+    Stopped,
+    /// The plugin transitioned to a terminal failure state.  The
+    /// associated message is stored separately; this enum variant is
+    /// intentionally fieldless so the state is `Copy`-able.
+    Error,
+}
+
+impl std::fmt::Display for PluginState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let token = match self {
+            Self::Discovered => "DISCOVERED",
+            Self::Registered => "REGISTERED",
+            Self::Loading => "LOADING",
+            Self::Active => "ACTIVE",
+            Self::Idle => "IDLE",
+            Self::Stopped => "STOPPED",
+            Self::Error => "ERROR",
+        };
+        f.write_str(token)
+    }
+}
+
+/// Per-plugin runtime state — manifest plus lifecycle bookkeeping.
+///
+/// `PluginRuntime` is deliberately a value type so callers can hold it
+/// by ownership and mutate it without contending on a shared lock.  The
+/// [`PluginManager`] also keeps a parallel cloned view behind an
+/// `Arc<RwLock<_>>` so the background idle-monitor task (see
+/// [`PluginManager::run_idle_monitor`]) can drive state transitions
+/// without the caller needing to hand it out a mutable reference.
+#[derive(Debug, Clone)]
+pub struct PluginRuntime {
+    /// The manifest that produced this runtime.  Kept by value so the
+    /// runtime survives a discover → rescan cycle.
+    pub manifest: PluginManifest,
+    /// Current lifecycle state.  Transitions flow through the
+    /// state-machine methods on this type; direct mutation by callers
+    /// is discouraged outside tests.
+    pub state: PluginState,
+    /// Wall-clock instant of the most recent [`Self::mark_call`] (or
+    /// construction, if no call has happened yet).
+    pub last_call: Instant,
+    /// Idle budget resolved from the manifest `[lifecycle]` section or
+    /// the crate default.  A tick whose `now - last_call` exceeds this
+    /// duration demotes the runtime to [`PluginState::Idle`].
+    pub idle_timeout: Duration,
+}
+
+impl PluginRuntime {
+    /// Build a new runtime in [`PluginState::Registered`].
+    ///
+    /// `idle_timeout` is resolved from the manifest's `[lifecycle]`
+    /// section: `idle_timeout_minutes` → [`Duration`] of that many
+    /// minutes; missing → [`DEFAULT_IDLE_TIMEOUT_MINUTES`].
+    #[must_use]
+    pub fn new(manifest: PluginManifest) -> Self {
+        let idle_timeout = manifest.lifecycle.as_ref().map_or_else(
+            || Duration::from_secs(DEFAULT_IDLE_TIMEOUT_MINUTES * 60),
+            LifecycleSection::idle_timeout,
+        );
+        Self {
+            manifest,
+            state: PluginState::Registered,
+            last_call: Instant::now(),
+            idle_timeout,
+        }
+    }
+
+    /// Builder helper to override the idle timeout (tests use this for
+    /// fast-tick scenarios without hand-patching the manifest).
+    #[must_use]
+    pub const fn with_idle_timeout(mut self, idle_timeout: Duration) -> Self {
+        self.idle_timeout = idle_timeout;
+        self
+    }
+
+    /// Record that a tool call arrived at this plugin.
+    ///
+    /// * If the runtime is [`PluginState::Idle`] it flips to
+    ///   [`PluginState::Loading`] — the signal that the manager owes
+    ///   this plugin a re-spawn and fresh health check.
+    /// * `last_call` is advanced unconditionally so subsequent ticks
+    ///   restart the idle countdown from "now".
+    pub fn mark_call(&mut self) {
+        if matches!(self.state, PluginState::Idle) {
+            self.state = PluginState::Loading;
+        }
+        self.last_call = Instant::now();
+    }
+
+    /// Advance the idle countdown.
+    ///
+    /// Returns `Some(new_state)` whenever the tick produced a state
+    /// transition (today: only `Active → Idle`).  Returns `None` when
+    /// the state was left untouched.
+    pub fn tick(&mut self, now: Instant) -> Option<PluginState> {
+        if matches!(self.state, PluginState::Active)
+            && now.saturating_duration_since(self.last_call) > self.idle_timeout
+        {
+            self.state = PluginState::Idle;
+            return Some(PluginState::Idle);
+        }
+        None
     }
 }
 
@@ -210,21 +391,25 @@ pub enum PluginError {
 
 // ── Plugin manager ───────────────────────────────────────────────────────────
 
-/// Stateless façade that implements the four plugin-manager operations
-/// mandated by P1-W3-F05.
+/// Plugin-manager façade.
 ///
-/// The type carries no state in this skeleton — all methods are
-/// associated functions.  HOT/COLD lifecycle storage lands in
-/// P1-W3-F06 (a separate WO).
-#[derive(Debug, Default, Clone, Copy)]
-pub struct PluginManager;
+/// The manager owns a list of [`PluginRuntime`]s behind an
+/// [`Arc`]/[`RwLock`] pair so the background idle-monitor task (see
+/// [`Self::run_idle_monitor`]) and caller threads can observe and
+/// mutate runtime state without fighting over ownership.  All of the
+/// original skeleton operations ([`Self::discover`], [`Self::spawn`],
+/// [`Self::health_check`]) remain associated functions — none of them
+/// depend on manager state.
+#[derive(Debug, Clone, Default)]
+pub struct PluginManager {
+    runtimes: Arc<RwLock<Vec<PluginRuntime>>>,
+}
 
 impl PluginManager {
-    /// Construct a new `PluginManager`.  No-op today; present so the
-    /// Phase-2 lifecycle layer can add state behind the same signature.
+    /// Construct a new, empty `PluginManager`.
     #[must_use]
-    pub const fn new() -> Self {
-        Self
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// Walk `plugins_dir` (non-recursively) for `*.toml` files and parse
@@ -380,6 +565,93 @@ impl PluginManager {
             .map_err(PluginError::StdioTransport)?;
         parse_tools_list_response(&line)
     }
+
+    // ── HOT/COLD lifecycle façade ────────────────────────────────────────────
+
+    /// Register and activate a plugin: `Registered → Loading → Active`
+    /// via a real [`Self::health_check`].
+    ///
+    /// The returned [`PluginRuntime`] is an owned snapshot for the
+    /// caller to drive directly (e.g. calling
+    /// [`PluginRuntime::mark_call`]); the manager retains a parallel
+    /// clone so the background idle monitor can tick it.
+    ///
+    /// # Errors
+    ///
+    /// Propagates any error from [`Self::health_check`] (spawn failure,
+    /// stdio transport error, timeout, protocol error, …).
+    pub async fn activate(
+        &mut self,
+        manifest: &PluginManifest,
+    ) -> Result<PluginRuntime, PluginError> {
+        let mut runtime = PluginRuntime::new(manifest.clone());
+        runtime.state = PluginState::Loading;
+        // Real health check — no mocks (rust-style.md and master-plan §14.2).
+        Self::health_check(manifest).await?;
+        runtime.state = PluginState::Active;
+        runtime.last_call = Instant::now();
+
+        self.runtimes.write().await.push(runtime.clone());
+        Ok(runtime)
+    }
+
+    /// Wake an `Idle` or `Loading` runtime: `→ Active` via a real
+    /// health check.
+    ///
+    /// Called after [`PluginRuntime::mark_call`] has flipped an idle
+    /// runtime to `Loading`.  Safe to call from any state — an
+    /// `Active` runtime is left untouched and no health check is
+    /// issued.
+    ///
+    /// # Errors
+    ///
+    /// Propagates any error from [`Self::health_check`].
+    pub async fn wake(runtime: &mut PluginRuntime) -> Result<(), PluginError> {
+        if matches!(runtime.state, PluginState::Active) {
+            return Ok(());
+        }
+        runtime.state = PluginState::Loading;
+        Self::health_check(&runtime.manifest).await?;
+        runtime.state = PluginState::Active;
+        runtime.last_call = Instant::now();
+        Ok(())
+    }
+
+    /// Spawn a background task that periodically calls
+    /// [`PluginRuntime::tick`] on every registered runtime.
+    ///
+    /// The returned [`tokio::task::JoinHandle`] is detached from the
+    /// manager: callers who need to stop the monitor should
+    /// [`tokio::task::JoinHandle::abort`] it explicitly.  A clone of the
+    /// internal `runtimes` handle is captured by the task, so adding or
+    /// removing runtimes after the monitor has started is observed by
+    /// the next tick.
+    pub fn run_idle_monitor(&mut self, interval: Duration) -> tokio::task::JoinHandle<()> {
+        let runtimes = self.runtimes.clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(interval);
+            loop {
+                // `tick` is cancellation-safe; no `.await` of external
+                // I/O here, so a bare `.await` is sufficient (rust-style.md
+                // timeout rule applies to IO awaits only).
+                ticker.tick().await;
+                let now = Instant::now();
+                let mut guard = runtimes.write().await;
+                for rt in guard.iter_mut() {
+                    let _ = rt.tick(now);
+                }
+            }
+        })
+    }
+
+    /// Snapshot of the runtimes currently registered with this manager.
+    ///
+    /// Intended for diagnostics and the test that proves `activate`
+    /// registers a runtime.  The returned `Vec` is a clone — mutating
+    /// it does NOT propagate back to the manager.
+    pub async fn registered_runtimes(&self) -> Vec<PluginRuntime> {
+        self.runtimes.read().await.clone()
+    }
 }
 
 /// Parse a single JSON-RPC 2.0 `tools/list` response frame and return
@@ -534,6 +806,7 @@ args = ["--hello"]
                 command: "unused".into(),
                 args: vec![],
             },
+            lifecycle: None,
         };
         let err = PluginManager::spawn(&manifest).expect_err("non-stdio must be rejected");
         assert!(
@@ -592,6 +865,7 @@ args = ["--hello"]
                 command: "sleep".into(),
                 args: vec!["30".into()],
             },
+            lifecycle: None,
         };
 
         // Use a tighter budget in-process so the test doesn't wait 5 s.

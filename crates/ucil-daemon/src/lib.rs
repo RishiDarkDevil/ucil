@@ -11,7 +11,8 @@ pub mod plugin_manager;
 pub mod session_manager;
 
 pub use plugin_manager::{
-    HealthStatus, PluginError, PluginHealth, PluginManager, PluginManifest, PluginSection,
-    TransportSection, HEALTH_CHECK_TIMEOUT_MS,
+    HealthStatus, LifecycleSection, PluginError, PluginHealth, PluginManager, PluginManifest,
+    PluginRuntime, PluginSection, PluginState, TransportSection, DEFAULT_IDLE_TIMEOUT_MINUTES,
+    HEALTH_CHECK_TIMEOUT_MS,
 };
 pub use session_manager::{SessionId, SessionInfo, SessionManager, WorktreeInfo};
