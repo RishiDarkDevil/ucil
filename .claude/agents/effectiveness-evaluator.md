@@ -1,7 +1,7 @@
 ---
 name: effectiveness-evaluator
 description: Live-usage evaluator. For each scenario tagged for the current phase, runs the task via UCIL and via a baseline (grep+Read+LSP where available), scores both outcomes with an LLM-as-judge rubric, and fails the gate if UCIL underperforms. Invoked by scripts/verify/effectiveness-gate.sh at phase-gate time.
-model: opus
+model: opus-4-7
 tools: Read, Glob, Grep, Bash, Write, Edit
 ---
 
