@@ -4,9 +4,9 @@ type: gate-expected-incomplete
 phase: 1
 severity: low
 blocks_loop: false
-resolved: true
 session_role: orchestrator
 session_work: harness-infrastructure-only
+auto_resolve_on_next_triage: bucket-A
 ---
 
 # Phase 1 gate incomplete — expected at end of harness-infra session
@@ -94,4 +94,12 @@ watchdog hardening.
 - 72 of 78 `scripts/verify/P*-W*-F*.sh` remain stubs; they get filled
   in by executors during their WOs (designed this way).
 
-resolved: true
+## Resolution path
+
+This escalation is intentionally left *unresolved* at commit time so the
+stop-hook's escalation-bypass escape hatch fires and this session can end
+cleanly. Next session's triage pass will classify this as Bucket A
+(`blocks_loop: false`, condition is structural harness-infra session),
+append a `## Resolution` note, and set `resolved: true` in a follow-up
+commit. This is the same lifecycle as the 8 prior precedents enumerated
+above, all of which were triage-resolved within one loop iteration.
