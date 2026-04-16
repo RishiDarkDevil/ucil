@@ -10,4 +10,6 @@
 pub mod lifecycle;
 pub mod session_manager;
 pub use lifecycle::{Lifecycle, PidFile, PidFileError, ShutdownReason};
-pub use session_manager::{SessionId, SessionInfo, SessionManager, WorktreeInfo};
+pub use session_manager::{
+    CallRecord, SessionId, SessionInfo, SessionManager, WorktreeInfo, DEFAULT_TTL_SECS,
+};
