@@ -10,6 +10,8 @@ cd "$(git rev-parse --show-toplevel)"
 
 # shellcheck source=scripts/_retry.sh
 source "$(dirname "$0")/_retry.sh"
+# shellcheck source=scripts/_cost-budget.sh
+source "$(dirname "$0")/_cost-budget.sh"
 
 PHASE="${1:-}"
 if [[ -z "$PHASE" ]]; then
@@ -95,6 +97,15 @@ Invoke /replan or root-cause-finder." > "ucil-build/escalations/$(date -u +%Y%m%
   echo "[run-phase] Iteration $iter on phase $PHASE"
   echo "==========================================="
 
+  # Daily USD cost-cap check — halts the loop (via fresh escalation) if today's
+  # spend has crossed DAILY_USD_CAP. Runs before any claude -p spawn so we
+  # never light up a new session once we're over budget.
+  if ! safe_check_daily_budget; then
+    echo "[run-phase] Daily cost cap exceeded — halting loop for human review."
+    ls -1 ucil-build/escalations/*daily-cost-cap* 2>/dev/null || true
+    exit 1
+  fi
+
   # 1. Planner — delegate to standalone launcher (strict schema + claims-list).
   # Retry on transient failure (API outage, MCP startup flake). 2 attempts
   # with 30s → 120s backoff tolerates a ~2.5-min extended outage.
@@ -104,6 +115,7 @@ Invoke /replan or root-cause-finder." > "ucil-build/escalations/$(date -u +%Y%m%
     exit 1
   fi
   safe_git_pull  # pick up planner's WO commit
+  emit_cost_snapshot "phase-${PHASE}-post-planner-iter${iter}"
 
   # Discover the latest work-order
   LATEST_WO=$(ls -t ucil-build/work-orders/*.json 2>/dev/null | head -1 || true)
@@ -121,6 +133,7 @@ Invoke /replan or root-cause-finder." > "ucil-build/escalations/$(date -u +%Y%m%
     # Don't exit — the verifier retry loop below will catch real failures
   fi
   safe_git_pull
+  emit_cost_snapshot "phase-${PHASE}-post-executor-iter${iter}-${WO_ID}"
 
   # 3. Critic — delegate to standalone launcher
   echo "[run-phase] Step 3/4: critic"
@@ -139,6 +152,7 @@ Invoke /replan or root-cause-finder." > "ucil-build/escalations/$(date -u +%Y%m%
     safe_git_pull  # stay current with any recent agent pushes
     scripts/spawn-verifier.sh "$WO_ID" >/tmp/ucil-verifier.log 2>&1 || true
     safe_git_pull  # pick up verifier's commits on main if any
+    emit_cost_snapshot "phase-${PHASE}-post-verifier-iter${iter}-v${vattempt}-${WO_ID}"
 
     # Determine outcome: did all feature_ids in the WO flip to passes=true?
     WO_FEATURES=$(jq -r '.feature_ids // .features // [] | join(" ")' "$LATEST_WO")
