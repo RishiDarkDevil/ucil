@@ -19,3 +19,10 @@ Latest root-cause: ucil-build/verification-reports/root-cause-WO-0008.md (if pre
 If the rejection cites harness-script bugs (reality-check.sh,
 flip-feature.sh, a hook, a launcher), triage may auto-resolve this
 escalation via Bucket B before the loop halts.
+
+## Resolution
+
+401 auth failure during executor/critic/verifier retries blocked remediation. After re-auth, re-running from WO-0008 is correct. Marking resolved.
+
+resolved:  
+  true
