@@ -5,6 +5,11 @@ raised_by: verifier
 raised_at: 2026-04-16T20:53:47Z
 target_argument: "--help"
 blocks_loop: false
+resolved: true
+resolved_by: triage
+resolved_at: 2026-04-17T03:00:00Z
+resolved_in_commit: 6ddeb49
+bucket: B
 ---
 # Verifier invoked with invalid target `--help`
 
@@ -79,3 +84,24 @@ LLM turn, and exit non-zero with a clear message if neither resolves.
   bug for UCIL proper; a usability bug in the spawn script.
 - Planner/executor: optionally open a trivial WO to add the `--help`
   guard shown above. No feature in `feature-list.json` is affected.
+
+## Resolution
+
+Bucket B (fix + resolve) by triage at 2026-04-17T03:00Z.
+
+Applied the suggested guard at the top of `scripts/spawn-verifier.sh`:
+a `case "$TARGET" in -h|--help)` block prints a usage block (verbatim
+expanded from the suggestion to also document the `<target>` argument
+and what the verifier does on launch) and exits 0 before any session-id
+generation, marker-file write, or claude-CLI invocation. The empty-arg
+branch (exit 2 with the existing usage error) is preserved. No other
+script logic changed.
+
+Smoke checks (all PASS):
+- `bash -n scripts/spawn-verifier.sh` — syntax OK
+- `bash scripts/spawn-verifier.sh --help` — prints usage, exits 0
+- `bash scripts/spawn-verifier.sh -h` — prints usage, exits 0
+- `bash scripts/spawn-verifier.sh` (no arg) — usage error to stderr, exits 2
+
+Fix commit: `6ddeb49 fix(scripts): add --help/-h guard to spawn-verifier.sh`
+Pushed to origin/main.
