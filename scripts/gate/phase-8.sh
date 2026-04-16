@@ -33,6 +33,7 @@ fi
 # Release-critical gates — the v0.1.0 acceptance bar.
 check "user-journey (full new-user flow)"    scripts/verify/user-journey.sh 8
 check "docs walkthrough (simulated new user)" scripts/verify/docs-walkthrough.sh 8
+check "host-agnostic UCIL verification (all 6 adapters)" scripts/verify/host-agnostic.sh 8
 
 # Anti-laziness quality gates on all live Rust crates — final regression
 # before v0.1.0 release. These MUST remain green or the release halts.

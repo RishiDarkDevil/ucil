@@ -14,6 +14,7 @@ check "cargo test --workspace"                cargo nextest run --workspace --no
 [[ -x scripts/verify/post-tool-hook-timing.sh ]] && check "PostToolUse hook <200ms"      scripts/verify/post-tool-hook-timing.sh
 check "effectiveness (phase 4 scenarios)"  scripts/verify/effectiveness-gate.sh 4
 check "host-adapter conformance (all)"     scripts/verify/host-adapter-conformance.sh 4
+check "host-agnostic UCIL verification"    scripts/verify/host-agnostic.sh 4
 
 # Anti-laziness quality gates — still enforce on all live Rust crates even
 # though Phase 4 is adapter-heavy (TypeScript). Regression guard.
