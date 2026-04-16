@@ -1,0 +1,55 @@
+{
+  "id": "WO-0007",
+  "slug": "fix-storage-test-selector",
+  "phase": 1,
+  "week": 2,
+  "features": [],
+  "feature_ids": [],
+  "branch": "feat/WO-0007-fix-storage-test-selector",
+  "worktree_branch": "feat/WO-0007-fix-storage-test-selector",
+  "executor_agent": "executor",
+  "goal": "Flatten the test in crates/ucil-daemon/src/storage.rs so its nextest path matches the frozen acceptance selector for P1-W2-F06.",
+  "plan_summary": "The feature-list oracle entry for P1-W2-F06 fixes the acceptance selector at 'storage::test_two_tier_layout'. The current implementation on branch feat/WO-0006-symbol-extraction-chunker-storage wraps test_two_tier_layout inside '#[cfg(test)] mod tests { ... }' which makes the actual nextest path 'storage::tests::test_two_tier_layout' — no match. Since the selector is immutable (oracle level 2), the fix lives in source: remove the 'mod tests { ... }' wrapper and promote each '#[test]' function to module level with a '#[cfg(test)]' decorator.",
+  "scope_in": [
+    "crates/ucil-daemon/src/storage.rs — remove '#[cfg(test)] mod tests {' wrapper and its matching '}'. Promote 'fn test_two_tier_layout' to module level and decorate it with '#[cfg(test)]' + '#[test]'. Preserve the test body verbatim — only the wrapping changes. If the file has additional test helper fns inside 'mod tests', promote each the same way or move them to a sibling helper module as needed. Ensure 'cargo nextest run -p ucil-daemon storage::test_two_tier_layout' lists and runs exactly 1 test."
+  ],
+  "scope_out": [
+    "No other files — storage.rs only.",
+    "No behavior changes — the test body is identical.",
+    "No feature-list.json edits — feature oracle is frozen.",
+    "No changes to symbols.rs or chunker.rs — their selectors are NOT affected (they use a different pattern that happened to work)."
+  ],
+  "acceptance": [
+    "cargo nextest run -p ucil-daemon storage::test_two_tier_layout — 1 passing test",
+    "cargo build --workspace — exits 0",
+    "cargo clippy --workspace -- -D warnings — no warnings",
+    "git diff HEAD~1 crates/ucil-daemon/src/storage.rs | grep -c '^-' should show removal of 'mod tests' wrapper lines"
+  ],
+  "acceptance_criteria": [
+    "cargo nextest run -p ucil-daemon storage::test_two_tier_layout — 1 passing test",
+    "cargo build --workspace exits 0",
+    "cargo clippy --workspace -- -D warnings clean"
+  ],
+  "forbidden_paths": [
+    "ucil-build/feature-list.json",
+    "ucil-master-plan-v2.1-final.md",
+    "tests/fixtures/**",
+    "scripts/gate/**",
+    "scripts/flip-feature.sh",
+    "crates/ucil-treesitter/**",
+    "crates/ucil-core/**"
+  ],
+  "context_refs": [
+    "escalation:ucil-build/escalations/20260415-1856-wo-WO-0006-attempts-exhausted.md",
+    "rejection-commits: 0c604df, ab943e5, a8ab537 (all 3 cite storage::test_two_tier_layout mismatch)",
+    "feature-list:P1-W2-F06.acceptance_tests[0].selector — frozen at 'storage::test_two_tier_layout'",
+    "decision:DEC-0005-WO-0006-module-coherence-commits (commit-size component already resolved)"
+  ],
+  "dependencies_met": true,
+  "estimated_commits": 1,
+  "estimated_complexity": "low",
+  "estimated_diff_lines": 10,
+  "created_at": "2026-04-17T00:00:00Z",
+  "created_by": "orchestrator",
+  "flow_note": "After WO-0007 merges to main, orchestrator re-runs verifier on WO-0006's branch (feat/WO-0006-symbol-extraction-chunker-storage) rebased on main. P1-W2-F06 selector now matches, verifier flips passes=true, merge-wo.sh merges WO-0006 into main. Both WOs close in the same phase iteration."
+}
