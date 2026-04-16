@@ -277,6 +277,77 @@ impl SessionManager {
     pub async fn get_session(&self, id: &SessionId) -> Option<SessionInfo> {
         self.sessions.read().await.get(id).cloned()
     }
+
+    /// Append a new [`CallRecord`] to `id`'s call history, stamped with
+    /// the current wall-clock time.
+    ///
+    /// Returns `Some(())` if the session existed (the record was
+    /// appended), and `None` if no session with that ID is known.
+    pub async fn record_call(&self, id: &SessionId, tool: &str) -> Option<()> {
+        let record = CallRecord {
+            tool: tool.to_owned(),
+            at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        };
+        self.sessions
+            .write()
+            .await
+            .get_mut(id)?
+            .call_history
+            .push(record);
+        Some(())
+    }
+
+    /// Add `file` to the session's `files_in_context` set.
+    ///
+    /// Returns `Some(())` on success, `None` if the session does not
+    /// exist. The set de-duplicates — re-inserting an already-present
+    /// path is a no-op.
+    pub async fn add_file_to_context(&self, id: &SessionId, file: PathBuf) -> Option<()> {
+        self.sessions
+            .write()
+            .await
+            .get_mut(id)?
+            .files_in_context
+            .insert(file);
+        Some(())
+    }
+
+    /// Set the CEQP-inferred domain label for a session.
+    ///
+    /// Returns `Some(())` on success, `None` if the session does not
+    /// exist.
+    pub async fn set_inferred_domain(&self, id: &SessionId, domain: String) -> Option<()> {
+        self.sessions.write().await.get_mut(id)?.inferred_domain = Some(domain);
+        Some(())
+    }
+
+    /// Recompute `expires_at = created_at + ttl_secs` for a session.
+    ///
+    /// Returns `Some(())` on success, `None` if the session does not
+    /// exist.
+    pub async fn set_ttl(&self, id: &SessionId, ttl_secs: u64) -> Option<()> {
+        let mut guard = self.sessions.write().await;
+        let info = guard.get_mut(id)?;
+        info.expires_at = info.created_at.saturating_add(ttl_secs);
+        drop(guard);
+        Some(())
+    }
+
+    /// Remove every session whose `expires_at <= now_secs` in one
+    /// write-lock pass.
+    ///
+    /// Returns the number of sessions removed.
+    pub async fn purge_expired(&self, now_secs: u64) -> usize {
+        let mut guard = self.sessions.write().await;
+        let before = guard.len();
+        guard.retain(|_, info| info.expires_at > now_secs);
+        let removed = before - guard.len();
+        drop(guard);
+        removed
+    }
 }
 
 impl Default for SessionManager {
