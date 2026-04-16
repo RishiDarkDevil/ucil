@@ -13,7 +13,7 @@
 #![allow(clippy::module_name_repetitions)]
 
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -53,6 +53,23 @@ pub struct WorktreeInfo {
     pub head_sha: String,
 }
 
+/// A single tool invocation recorded against a session's call history.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CallRecord {
+    /// Tool name (for example `"search_symbol"`).
+    pub tool: String,
+    /// Unix timestamp (seconds) at which the tool was invoked.
+    pub at: u64,
+}
+
+/// Default session time-to-live in seconds (1 hour).
+///
+/// Sessions created via [`SessionManager::create_session`] have their
+/// [`SessionInfo::expires_at`] initialised to `created_at + DEFAULT_TTL_SECS`.
+/// Callers may lengthen or shorten the TTL via
+/// [`SessionManager::set_ttl`].
+pub const DEFAULT_TTL_SECS: u64 = 3600;
+
 /// Metadata stored for each live UCIL session.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionInfo {
@@ -64,6 +81,28 @@ pub struct SessionInfo {
     pub worktree_root: PathBuf,
     /// Unix timestamp (seconds) when the session was created.
     pub created_at: u64,
+    /// Ordered history of tool calls recorded against this session.
+    ///
+    /// `#[serde(default)]` ensures older on-disk `SessionInfo` blobs
+    /// (pre-WO-0008) deserialise to an empty history rather than a
+    /// deserialisation error.
+    #[serde(default)]
+    pub call_history: Vec<CallRecord>,
+    /// CEQP-derived inferred domain for this session (e.g. `"rust"`,
+    /// `"frontend"`). `None` until a caller sets it via
+    /// [`SessionManager::set_inferred_domain`].
+    #[serde(default)]
+    pub inferred_domain: Option<String>,
+    /// Ordered, de-duplicated set of files the session has in context.
+    ///
+    /// A `BTreeSet` is used (not `HashSet`) so iteration order in tests
+    /// and user-facing logs is stable.
+    #[serde(default)]
+    pub files_in_context: BTreeSet<PathBuf>,
+    /// Unix timestamp (seconds) at which the session becomes eligible
+    /// for purging by [`SessionManager::purge_expired`].
+    #[serde(default)]
+    pub expires_at: u64,
 }
 
 /// Errors that can arise from session-manager operations.
@@ -144,6 +183,10 @@ impl SessionManager {
             branch,
             worktree_root: workdir.to_path_buf(),
             created_at,
+            call_history: Vec::new(),
+            inferred_domain: None,
+            files_in_context: BTreeSet::new(),
+            expires_at: created_at + DEFAULT_TTL_SECS,
         };
         self.sessions.write().await.insert(id.clone(), info);
         Ok(id)
