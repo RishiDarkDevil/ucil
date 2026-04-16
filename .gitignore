@@ -48,3 +48,6 @@ ucil-build/drift-counters.json
 .vscode/
 .idea/
 *.swp
+
+# Claude Code runtime lock
+.claude/scheduled_tasks.lock

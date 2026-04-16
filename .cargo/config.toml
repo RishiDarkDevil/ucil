@@ -1,0 +1,24 @@
+# managed by scripts/setup-build-cache.sh — rerun to refresh.
+#
+# Shared build cache for parallel worktrees.
+# Every worktree spawned by scripts/run-phase.sh inherits CARGO_TARGET_DIR
+# from this file (via .cargo/config.toml discovery — Cargo walks up to repo
+# root), so `cargo build` in ../ucil-wt/WO-0042/ writes to <repo>/target/.
+
+[build]
+# Shared across worktrees. Set to absolute path so worktrees outside the
+# main checkout still hit the same cache.
+target-dir = "target"
+# Wrap rustc with sccache for inter-invocation caching.
+rustc-wrapper = "sccache"
+
+# Speed up link step on Linux (gold/lld are available via standard apt).
+# [target.x86_64-unknown-linux-gnu]
+# linker = "clang"
+# rustflags = ["-C", "link-arg=-fuse-ld=lld"]
+# (opt-in only — enable if a bench shows a win and lld is installed.)
+
+[net]
+# sparse index — one of the few settings that helps across Rust versions.
+git-fetch-with-cli = false
+
