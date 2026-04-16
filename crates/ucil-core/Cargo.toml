@@ -21,3 +21,7 @@ opentelemetry-stdout.workspace = true
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros"] }
 tempfile.workspace = true
+# Property-based testing — forces every public serde type to round-trip
+# through serialize/deserialize under arbitrary inputs, not just the
+# hand-picked happy paths covered by the unit tests.
+proptest = "1"

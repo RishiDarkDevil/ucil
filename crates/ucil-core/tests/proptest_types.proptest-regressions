@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 38cc69c32fb2b561d42fbbae8147062aa73fcff1f3b5127725f34363fd00d7fc # shrinks to env = ResponseEnvelope { request_id: "", tool_name: "", result: Null, meta: {}, degraded_plugins: [], indexing_status: 0.10186784019389973, otel_trace_id: None }
+cc f598cd5cf97caab2dc07cd1e21e300cd80ae6b0a003be7cdebebcfc6164d733e # shrinks to ke = KnowledgeEntry { id: "", symbol: Symbol { name: "", kind: "", file_path: "", line: 0, col: 0, language: "", doc_comment: None }, content: "", embedding_vec: [-inf], created_at: "", updated_at: "", meta: {} }
