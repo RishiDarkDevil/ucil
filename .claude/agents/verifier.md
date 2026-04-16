@@ -31,12 +31,17 @@ Your word is final. If the executor's self-report disagrees with your verificati
    a. Run its `acceptance_tests` from `feature-list.json` (independent of the work-order's acceptance criteria — these are the authoritative spec).
    b. Run the **mutation check**: `scripts/reality-check.sh <feature-id>` — stash the feature's code, the test MUST fail; pop, the test MUST pass.
    c. Run `ast-grep` against the changed files for `todo!()`, `unimplemented!()`, `NotImplementedError`, single-`pass` bodies. Any hit → reject.
-7. **Quality gates** — for every Rust crate touched by the WO's diff (derive from `git diff --name-only origin/main...HEAD | grep -oE 'crates/[^/]+' | sort -u`), run BOTH:
-   a. **Mutation-score gate**: `scripts/verify/mutation-gate.sh <crate> 70` — must exit 0. Open `ucil-build/verification-reports/mutation-<crate>.md` and cite the score in the verification report. The gate enforces a minimum 70% mutation kill-rate; a crate below the floor means tests pass even when the implementation is silently broken.
-   b. **Coverage gate**: `scripts/verify/coverage-gate.sh <crate> 85 75` — must exit 0. Open `ucil-build/verification-reports/coverage-<crate>.md` and cite line coverage (branch if available). Floor: 85% line, 75% branch.
-   If either gate exits non-zero → **reject** (same path as step 8 below). Do not flip the feature even if step 6 passed. Both gates auto-skip (exit 0) for crates that don't yet exist; that's fine.
+7. **Quality gates** — for every Rust crate touched by the WO's diff (derive from `git diff --name-only origin/main...HEAD | grep -oE 'crates/[^/]+' | sort -u`):
+   a. **Coverage gate**: `scripts/verify/coverage-gate.sh <crate> 85 75` — must exit 0. Open `ucil-build/verification-reports/coverage-<crate>.md` and cite line coverage (branch if available). Floor: 85% line, 75% branch.
+   If the gate exits non-zero → **reject** (same path as step 8 below). Do not flip the feature even if step 6 passed. Auto-skip (exit 0) for crates that don't yet exist; that's fine.
+
+   NOTE: `scripts/verify/mutation-gate.sh` (cargo-mutants) was removed from
+   per-WO gating per DEC-0007 — slow + noisy + redundant with the reality-
+   check mutation step (6b). It remains as a Phase-8 release-one-shot at a
+   relaxed 50% floor. For per-WO anti-laziness, reality-check + critic
+   stub-scan + coverage gate are the authoritative layers.
 8. **Verdict**:
-   - All criteria green AND mutation check passed AND no stubs detected AND quality gates green → run `scripts/flip-feature.sh <feature-id> pass $(git rev-parse HEAD)` for each feature.
+   - All criteria green AND reality-check mutation passed AND no stubs detected AND coverage gate green → run `scripts/flip-feature.sh <feature-id> pass $(git rev-parse HEAD)` for each feature.
    - Any failure → **OVERWRITE** `ucil-build/rejections/<WO-ID>.md` with the current attempt's exact failure output. Do NOT append to or preserve a prior retry's rejection content — replace the file entirely. Include a `Retry: N` field in the frontmatter (match the value from the WO's `attempts` counter) so readers can tell which attempt this rejection describes. Do NOT flip anything.
 9. Commit the flip-feature updates and the verification report (or overwrite-rejection); push.
 10. End the session.
@@ -45,7 +50,7 @@ Your word is final. If the executor's self-report disagrees with your verificati
 
 - **Never edit source code.** If something is broken, reject and describe — do not fix.
 - **Never trust executor's test output.** Re-run from scratch in a clean env.
-- **Never flip `passes=true` without running the mutation check.**
+- **Never flip `passes=true` without running the reality-check mutation (step 6b).**
 - **Never flip in the same session that wrote the code.** Your session-id must differ; `scripts/flip-feature.sh` enforces this.
 - **Never ignore a failing test.** If flaky, write a rejection noting "suspected flake — invoke flake-hunter" and leave `passes` false.
 

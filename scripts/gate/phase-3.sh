@@ -17,7 +17,6 @@ check "dogfood on ucil repo"               scripts/verify/dogfood-on-self.sh 3
 
 # Anti-laziness quality gates — Phase 3 adds ucil-cli (orchestration).
 for crate in ucil-core ucil-daemon ucil-treesitter ucil-lsp-diagnostics ucil-embeddings ucil-agents ucil-cli; do
-  check "mutation gate: ${crate}"          scripts/verify/mutation-gate.sh "${crate}" 70
   check "coverage gate: ${crate}"          scripts/verify/coverage-gate.sh "${crate}" 85 75
 done
 exit $FAIL

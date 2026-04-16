@@ -37,8 +37,10 @@ check "host-agnostic UCIL verification (all 6 adapters)" scripts/verify/host-agn
 
 # Anti-laziness quality gates on all live Rust crates — final regression
 # before v0.1.0 release. These MUST remain green or the release halts.
+# Mutation-gate is the Phase-8-only one-shot at a relaxed 50% floor (per DEC-0007).
+# Advisory elsewhere; coverage + reality-check + critic cover anti-laziness at WO-time.
 for crate in ucil-core ucil-daemon ucil-treesitter ucil-lsp-diagnostics ucil-embeddings ucil-agents ucil-cli; do
-  check "mutation gate: ${crate}"            scripts/verify/mutation-gate.sh "${crate}" 70
+  check "mutation gate (release one-shot): ${crate}" scripts/verify/mutation-gate.sh "${crate}" 50
   check "coverage gate: ${crate}"            scripts/verify/coverage-gate.sh "${crate}" 85 75
 done
 

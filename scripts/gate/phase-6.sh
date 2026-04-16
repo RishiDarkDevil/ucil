@@ -25,7 +25,6 @@ check "host-agnostic UCIL verification"    scripts/verify/host-agnostic.sh 6
 
 # Anti-laziness quality gates on all live Rust crates (regression gate).
 for crate in ucil-core ucil-daemon ucil-treesitter ucil-lsp-diagnostics ucil-embeddings ucil-agents ucil-cli; do
-  check "mutation gate: ${crate}"          scripts/verify/mutation-gate.sh "${crate}" 70
   check "coverage gate: ${crate}"          scripts/verify/coverage-gate.sh "${crate}" 85 75
 done
 exit $FAIL

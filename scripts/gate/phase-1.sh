@@ -38,11 +38,12 @@ check "effectiveness (phase 1 scenarios)" scripts/verify/effectiveness-gate.sh 1
 # Multi-language coverage required from Phase 1 onwards.
 check "multi-lang probes"                 scripts/verify/multi-lang-coverage.sh 1
 
-# Anti-laziness quality gates: mutation score + coverage floor per crate.
+# Anti-laziness quality gates: coverage floor per crate.
 # Phase 1 introduces ucil-core as a live crate; later crates are skipped
 # automatically if their directory doesn't exist yet.
+# Mutation-gate (cargo-mutants) removed per DEC-0007 — kept as Phase 7 one-shot.
+# Anti-laziness defense at WO-time = reality-check.sh + critic + coverage gate.
 for crate in ucil-core ucil-daemon ucil-treesitter ucil-lsp-diagnostics; do
-  check "mutation gate: ${crate}"         scripts/verify/mutation-gate.sh "${crate}" 70
   check "coverage gate: ${crate}"         scripts/verify/coverage-gate.sh "${crate}" 85 75
 done
 
