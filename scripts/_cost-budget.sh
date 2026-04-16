@@ -8,7 +8,10 @@
 #
 # Exported entry points:
 #   safe_check_daily_budget         — returns 1 and writes an escalation if
-#                                     today's spend >= DAILY_USD_CAP (default $50)
+#                                     today's spend >= DAILY_USD_CAP. Cap is
+#                                     DISABLED by default (unset / empty / 0);
+#                                     set DAILY_USD_CAP=<positive-number> in .env
+#                                     to re-enable.
 #   emit_cost_snapshot [phase_tag]  — appends one JSONL row with today's totals
 #
 # Output:
@@ -247,7 +250,18 @@ emit_cost_snapshot() {
 # DAILY_USD_CAP is read from the current environment (populated by .env when
 # _load-auth.sh runs, or by the caller).
 safe_check_daily_budget() {
-  local cap="${DAILY_USD_CAP:-50}"
+  # DAILY_USD_CAP semantics:
+  #   unset / empty / "0" / any non-positive value  → cap DISABLED (always return 0)
+  #   positive number                                → cap enforced; return 1 if today >= cap
+  #
+  # Default is disabled (no cap). Set DAILY_USD_CAP=100 in .env to re-enable.
+  local cap="${DAILY_USD_CAP:-0}"
+  if awk -v c="$cap" 'BEGIN { exit !(c+0 <= 0) }'; then
+    # cap <= 0 means disabled — do NOT emit snapshot here, emit_cost_snapshot
+    # is the separate entry point for that. Just return "OK, proceed".
+    return 0
+  fi
+
   local repo_root
   repo_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 
