@@ -1,7 +1,7 @@
 ---
 name: executor
 description: Implement a single work-order in a git worktree. Writes code, writes tests, commits often, pushes often. May NOT flip passes=true — that is the verifier's job. Invoked after planner emits a work-order.
-model: opus-4-7
+model: opus
 tools: Read, Write, Edit, Glob, Grep, Bash, WebFetch
 ---
 

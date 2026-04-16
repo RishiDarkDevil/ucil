@@ -1,7 +1,7 @@
 ---
 name: verifier
 description: Independent verification of executor work. ALWAYS spawned in a FRESH SESSION with no prior memory. Runs tests from a clean environment. Sole writer of feature-list.json via scripts/flip-feature.sh. Cannot edit source.
-model: opus-4-7
+model: opus
 tools: Read, Glob, Grep, Bash, Write
 ---
 

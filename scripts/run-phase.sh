@@ -196,7 +196,7 @@ Append a '## Lessons Learned (${WO_ID})' section to ucil-build/phase-log/$(print
 Read ucil-build/rejections/${WO_ID}.md (if present), ucil-build/critic-reports/${WO_ID}.md, and any ucil-build/decisions/DEC-*-${WO_ID}-*.md. Capture durable lessons ONLY — planner hints, verifier checklist additions, executor anti-patterns. Commit + push as 'docs(phase-log): lessons learned from ${WO_ID}'. Exit cleanly."
       UCIL_WO_ID="${WO_ID}" CLAUDE_SUBAGENT_NAME=docs-writer \
         claude -p "$LESSONS_PROMPT" \
-          --model "${CLAUDE_CODE_MODEL:-opus-4-7}" \
+          --model "${CLAUDE_CODE_MODEL:-opus}" \
           --dangerously-skip-permissions \
           --append-system-prompt "$(cat .claude/agents/docs-writer.md)" \
           >/tmp/ucil-lessons-learned.log 2>&1 || {
@@ -272,7 +272,7 @@ ucil-build/work-orders/$(basename "$LATEST_WO" .json)-ready-for-review.md when a
 acceptance criteria pass locally, and end cleanly. Reuse the existing worktree
 at ../ucil-wt/${WO_ID} (scripts/run-executor.sh cleans stale state already)."
     CLAUDE_SUBAGENT_NAME=executor claude -p "$RETRY_PROMPT" \
-      --model "${CLAUDE_CODE_MODEL:-opus-4-7}" \
+      --model "${CLAUDE_CODE_MODEL:-opus}" \
       --dangerously-skip-permissions \
       --append-system-prompt "$(cat .claude/agents/executor.md)" \
       >/tmp/ucil-executor-retry.log 2>&1 || {
@@ -285,7 +285,7 @@ at ../ucil-wt/${WO_ID} (scripts/run-executor.sh cleans stale state already)."
 after retry attempt ${vattempt}. Apply every check in .claude/agents/critic.md.
 Overwrite ucil-build/critic-reports/${WO_ID}.md with the fresh review, commit, push."
     CLAUDE_SUBAGENT_NAME=critic claude -p "$RETRY_CRIT_PROMPT" \
-      --model "${CLAUDE_CODE_MODEL:-opus-4-7}" \
+      --model "${CLAUDE_CODE_MODEL:-opus}" \
       --dangerously-skip-permissions \
       --append-system-prompt "$(cat .claude/agents/critic.md)" \
       >/tmp/ucil-critic-retry.log 2>&1 || true

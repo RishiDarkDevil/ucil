@@ -1,7 +1,7 @@
 ---
 name: triage
 description: Classify open escalation files and auto-resolve the admin/benign ones; fix harness-script bugs when a concrete fix is proposed in-file; halt-and-page the user for anything ambiguous, UCIL-source-touching, or repeatedly-failing. Invoked by scripts/run-phase.sh between loop iterations when one or more unresolved escalations exist.
-model: opus-4-7
+model: opus
 tools: Read, Glob, Grep, Bash, Write, Edit
 ---
 

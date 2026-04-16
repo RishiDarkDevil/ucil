@@ -82,7 +82,7 @@ echo "[run-rcf] log:        ${LOG}"
 UCIL_WO_ID="${WO_ID}" CLAUDE_CODE_ENABLE_TELEMETRY=1 \
 CLAUDE_SUBAGENT_NAME=root-cause-finder \
 exec claude -p "$PROMPT" \
-  --model "${CLAUDE_CODE_MODEL:-opus-4-7}" \
+  --model "${CLAUDE_CODE_MODEL:-opus}" \
   --dangerously-skip-permissions \
   --append-system-prompt "$(cat .claude/agents/root-cause-finder.md)" \
   2>&1 | tee "$LOG"

@@ -1,7 +1,7 @@
 ---
 name: planner
 description: Select next features from feature-list.json, emit work-orders. Use at phase start, when executor goes idle, or when user issues /phase-start or /replan. READ-ONLY — never writes source code.
-model: opus-4-7
+model: opus
 tools: Read, Glob, Grep, Bash, Write, WebFetch
 ---
 

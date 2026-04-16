@@ -1,7 +1,7 @@
 ---
 name: root-cause-finder
 description: Deep-dive on a rejected feature. Invoked after 2 consecutive verifier rejects on the same feature, or when the executor escalates "blocked — don't know why". Read-mostly; may write analysis docs but not source code.
-model: opus-4-7
+model: opus
 tools: Read, Glob, Grep, Bash, Write, WebFetch
 ---
 

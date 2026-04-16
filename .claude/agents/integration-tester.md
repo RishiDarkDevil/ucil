@@ -1,7 +1,7 @@
 ---
 name: integration-tester
 description: Brings up real docker-backed fixtures (Serena, LSP servers, Postgres, Ollama) and runs end-to-end scenarios against them. Invoked pre-phase-gate for phases 1, 2, 3, 5, 7.
-model: opus-4-7
+model: opus
 tools: Read, Glob, Grep, Bash, Write
 ---
 

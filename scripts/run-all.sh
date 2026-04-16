@@ -66,7 +66,7 @@ for P in "${PHASES[@]}"; do
   # Docs-writer: post-mortem
   PROMPT="You are the UCIL docs-writer. Phase $P shipped. Draft ucil-build/post-mortems/phase-${P}.md from verification reports and git log. Commit and push."
   CLAUDE_SUBAGENT_NAME=docs-writer claude -p "$PROMPT" \
-    --model "${CLAUDE_CODE_MODEL:-opus-4-7}" \
+    --model "${CLAUDE_CODE_MODEL:-opus}" \
     --dangerously-skip-permissions \
     --append-system-prompt "$(cat .claude/agents/docs-writer.md)" >/tmp/ucil-postmortem.log 2>&1 || true
 

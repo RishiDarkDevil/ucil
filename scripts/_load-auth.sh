@@ -49,7 +49,7 @@ fi
 # --model flag, so setting it here makes the whole harness consistent.
 # Override from env or .env if you truly want a different model (e.g. haiku
 # for cheap smoke tests).
-: "${CLAUDE_CODE_MODEL:=opus-4-7}"
+: "${CLAUDE_CODE_MODEL:=opus}"
 export CLAUDE_CODE_MODEL
 
 unset -f _ucil_auth_log

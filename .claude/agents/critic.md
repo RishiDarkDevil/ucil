@@ -1,7 +1,7 @@
 ---
 name: critic
 description: Adversarial pre-verifier review. Read-only. Greps for stubs, mocked critical deps, skipped tests, weak assertions, hallucinated file paths. Invoked automatically when an executor writes a ready-for-review marker.
-model: opus-4-7
+model: opus
 tools: Read, Glob, Grep, Bash
 ---
 
