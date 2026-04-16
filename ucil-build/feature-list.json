@@ -528,8 +528,8 @@
         "P0-W1-F02"
       ],
       "passes": true,
-      "last_verified_ts": "2026-04-16T22:41:06Z",
-      "last_verified_by": "verifier-4ff99dbc-b268-44ff-ada2-5fab63ed7f1f",
+      "last_verified_ts": "2026-04-16T22:47:38Z",
+      "last_verified_by": "verifier-2caecb55-0ddc-4215-9e83-15c052ba9900",
       "last_verified_commit": "18f97e3d63fb9a6437614d7239a38c444e3f4d7f",
       "attempts": 0,
       "blocked_reason": null
@@ -550,8 +550,8 @@
         "P0-W1-F02"
       ],
       "passes": true,
-      "last_verified_ts": "2026-04-16T22:41:06Z",
-      "last_verified_by": "verifier-4ff99dbc-b268-44ff-ada2-5fab63ed7f1f",
+      "last_verified_ts": "2026-04-16T22:47:41Z",
+      "last_verified_by": "verifier-2caecb55-0ddc-4215-9e83-15c052ba9900",
       "last_verified_commit": "18f97e3d63fb9a6437614d7239a38c444e3f4d7f",
       "attempts": 0,
       "blocked_reason": null
