@@ -7,6 +7,10 @@ blocks_loop: false
 session_role: orchestrator
 session_work: harness-infrastructure-only
 auto_resolve_on_next_triage: bucket-A
+resolved: true
+resolved_by: triage
+resolved_at: 2026-04-17T03:00:00Z
+bucket: A
 ---
 
 # Phase 1 gate incomplete — expected at end of harness-infra session
@@ -103,3 +107,26 @@ cleanly. Next session's triage pass will classify this as Bucket A
 append a `## Resolution` note, and set `resolved: true` in a follow-up
 commit. This is the same lifecycle as the 8 prior precedents enumerated
 above, all of which were triage-resolved within one loop iteration.
+
+## Resolution
+
+Bucket A (auto-resolve) by triage at 2026-04-17T03:00Z, triage pass 1.
+
+Verified the conditions match the 8 prior gate-expected-incomplete
+precedents that were Bucket-A'd:
+
+- `blocks_loop: false` (frontmatter) — autonomous loop can proceed.
+- `session_work: harness-infrastructure-only` — no `crates/`, `adapters/`,
+  `ml/`, `plugin*/`, or `tests/` mutation; only harness mutations.
+- WO-0007 (`ucil-build/work-orders/0007-fix-storage-test-selector.json`)
+  is present and unclaimed; the normal executor → critic → verifier loop
+  will pick it up and turn P1-W2-F02/F03/F06 green.
+- `gate-check.sh 1` continues to report 32 unfinished phase-1 features
+  (P1-W2-F02..F06, P1-W3-F01..F09, P1-W4-F01..F10, P1-W5-F01..F09) —
+  this is the planned phase-1 backlog, not regressions.
+- `attempts` cap on P1-W2-F06 still at 3 per `feature-list.json`; that
+  is tracked separately by escalation `20260415-1856-wo-WO-0006-attempts-exhausted`
+  (already resolved with cap-reset/cap-rescue notes in `triage-log.md`)
+  and by WO-0007 supplying the actual fix.
+
+No fresh material action required from a human. Marker flipped.
