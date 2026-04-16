@@ -19,11 +19,16 @@ fi
 source "$HOME/.cargo/env"
 rustup toolchain install stable nightly
 rustup component add rustfmt clippy rust-src rust-analyzer
-for bin in cargo-nextest cargo-mutants cargo-criterion cargo-deny cargo-audit; do
+for bin in cargo-nextest cargo-mutants cargo-criterion cargo-deny cargo-audit cargo-llvm-cov; do
   if ! command -v "$bin" >/dev/null; then
     cargo install "$bin" --locked || true
   fi
 done
+# sccache + shared target-dir + sccache wrapper (scripts/setup-build-cache.sh
+# installs sccache if missing and writes .cargo/config.toml).
+if [[ -x scripts/setup-build-cache.sh ]]; then
+  scripts/setup-build-cache.sh || log "WARN: setup-build-cache.sh failed — non-fatal, continuing"
+fi
 
 log "[3/10] Node 20 + pnpm + Biome + vitest"
 if ! command -v node >/dev/null; then
