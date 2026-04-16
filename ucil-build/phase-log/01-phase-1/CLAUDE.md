@@ -77,3 +77,13 @@ P1-W5-F09  ucil-daemon: _meta.startup_health populated on first response
 - Serena availability: Serena integration tests (W5) need Docker; run locally may be slow.
 - heed/LMDB on CI: may need `libclang` or `lmdb-sys` bundled feature. Document in ADR if needed.
 - Grammar crate version alignment: tree-sitter-language-pack exists as an alternative to individual grammar crates — evaluate before picking (ADR if non-obvious).
+
+---
+
+# Lessons Learned Log
+
+Populated by `docs-writer` (via `scripts/run-phase.sh` step 5b) after each
+work-order merges. The `planner` reads this section before emitting the
+next WO (per `.claude/agents/planner.md` Workflow step 3). Structure of
+each entry is documented in `.claude/agents/docs-writer.md` under "After
+each work-order merges".
