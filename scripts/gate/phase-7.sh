@@ -12,4 +12,10 @@ check "cargo test --workspace"                cargo nextest run --workspace --no
 [[ -x scripts/verify/query-database-tool.sh ]]  && check "query_database tool"          scripts/verify/query-database-tool.sh
 [[ -x scripts/verify/check-runtime-tool.sh ]]   && check "check_runtime tool"           scripts/verify/check-runtime-tool.sh
 check "effectiveness (phase 7 scenarios)"       scripts/verify/effectiveness-gate.sh 7
+
+# Anti-laziness quality gates on all live Rust crates.
+for crate in ucil-core ucil-daemon ucil-treesitter ucil-lsp-diagnostics ucil-embeddings ucil-agents ucil-cli; do
+  check "mutation gate: ${crate}"               scripts/verify/mutation-gate.sh "${crate}" 70
+  check "coverage gate: ${crate}"               scripts/verify/coverage-gate.sh "${crate}" 85 75
+done
 exit $FAIL

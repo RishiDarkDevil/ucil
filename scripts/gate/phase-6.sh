@@ -21,4 +21,10 @@ done
 check "effectiveness (phase 6 scenarios)"  scripts/verify/effectiveness-gate.sh 6
 check "bonus-context usage rate >= 0.30"   scripts/verify/bonus-usage-rate.sh 6
 check "stability (30-min mixed load)"      scripts/verify/stability.sh 6
+
+# Anti-laziness quality gates on all live Rust crates (regression gate).
+for crate in ucil-core ucil-daemon ucil-treesitter ucil-lsp-diagnostics ucil-embeddings ucil-agents ucil-cli; do
+  check "mutation gate: ${crate}"          scripts/verify/mutation-gate.sh "${crate}" 70
+  check "coverage gate: ${crate}"          scripts/verify/coverage-gate.sh "${crate}" 85 75
+done
 exit $FAIL

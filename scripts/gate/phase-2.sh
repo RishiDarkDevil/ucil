@@ -13,4 +13,11 @@ check "cargo test --workspace"             cargo nextest run --workspace --no-fa
 check "effectiveness (phase 2 scenarios)"  scripts/verify/effectiveness-gate.sh 2
 check "multi-lang probes"                  scripts/verify/multi-lang-coverage.sh 2
 check "real-repo smoke"                    scripts/verify/real-repo-smoke.sh 2
+
+# Anti-laziness quality gates — Phase 2 lights up embeddings + agents crates
+# on top of Phase 1's four. Auto-skip any crate dir not yet present.
+for crate in ucil-core ucil-daemon ucil-treesitter ucil-lsp-diagnostics ucil-embeddings ucil-agents; do
+  check "mutation gate: ${crate}"          scripts/verify/mutation-gate.sh "${crate}" 70
+  check "coverage gate: ${crate}"          scripts/verify/coverage-gate.sh "${crate}" 85 75
+done
 exit $FAIL

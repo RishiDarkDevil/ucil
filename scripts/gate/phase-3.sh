@@ -14,4 +14,10 @@ check "effectiveness (phase 3 scenarios)"  scripts/verify/effectiveness-gate.sh 
 check "multi-lang probes"                  scripts/verify/multi-lang-coverage.sh 3
 check "concurrency (3-agent)"              scripts/verify/concurrency.sh 3
 check "dogfood on ucil repo"               scripts/verify/dogfood-on-self.sh 3
+
+# Anti-laziness quality gates — Phase 3 adds ucil-cli (orchestration).
+for crate in ucil-core ucil-daemon ucil-treesitter ucil-lsp-diagnostics ucil-embeddings ucil-agents ucil-cli; do
+  check "mutation gate: ${crate}"          scripts/verify/mutation-gate.sh "${crate}" 70
+  check "coverage gate: ${crate}"          scripts/verify/coverage-gate.sh "${crate}" 85 75
+done
 exit $FAIL

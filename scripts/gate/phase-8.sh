@@ -34,4 +34,11 @@ fi
 check "user-journey (full new-user flow)"    scripts/verify/user-journey.sh 8
 check "docs walkthrough (simulated new user)" scripts/verify/docs-walkthrough.sh 8
 
+# Anti-laziness quality gates on all live Rust crates — final regression
+# before v0.1.0 release. These MUST remain green or the release halts.
+for crate in ucil-core ucil-daemon ucil-treesitter ucil-lsp-diagnostics ucil-embeddings ucil-agents ucil-cli; do
+  check "mutation gate: ${crate}"            scripts/verify/mutation-gate.sh "${crate}" 70
+  check "coverage gate: ${crate}"            scripts/verify/coverage-gate.sh "${crate}" 85 75
+done
+
 exit $FAIL
