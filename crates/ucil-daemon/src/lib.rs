@@ -7,5 +7,7 @@
 #![warn(clippy::all, clippy::pedantic, clippy::nursery)]
 #![deny(rustdoc::broken_intra_doc_links)]
 
+pub mod lifecycle;
 pub mod session_manager;
+pub use lifecycle::{PidFile, PidFileError};
 pub use session_manager::{SessionId, SessionInfo, SessionManager, WorktreeInfo};
