@@ -1,15 +1,15 @@
-# Coverage Gate — ucil-core
+# Coverage Gate — ucil-daemon
 
 - **Verdict**: PASS
 - **Min line coverage**: 85%
 - **Min branch coverage**: 75%
-- **Generated**: 2026-04-16T22:38:16Z
+- **Generated**: 2026-04-16T22:38:28Z
 
 ## Summary
 
 | Metric       | Value |
 |--------------|-------|
-| Line         | 98.43260188087774% (floor 85%) |
+| Line         | 89.07922912205566% (floor 85%) |
 | Branch       | _unavailable (toolchain)_ |
 
 ## Raw JSON
@@ -23,19 +23,19 @@
     "percent": 0
   },
   "functions": {
-    "count": 41,
-    "covered": 40,
-    "percent": 97.5609756097561
+    "count": 59,
+    "covered": 50,
+    "percent": 84.7457627118644
   },
   "instantiations": {
-    "count": 56,
-    "covered": 47,
-    "percent": 83.92857142857143
+    "count": 99,
+    "covered": 62,
+    "percent": 62.62626262626263
   },
   "lines": {
-    "count": 319,
-    "covered": 314,
-    "percent": 98.43260188087774
+    "count": 467,
+    "covered": 416,
+    "percent": 89.07922912205566
   },
   "mcdc": {
     "count": 0,
@@ -44,10 +44,10 @@
     "percent": 0
   },
   "regions": {
-    "count": 555,
-    "covered": 546,
-    "notcovered": 9,
-    "percent": 98.37837837837839
+    "count": 720,
+    "covered": 644,
+    "notcovered": 76,
+    "percent": 89.44444444444444
   }
 }
 ```
