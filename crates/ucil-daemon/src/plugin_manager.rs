@@ -694,6 +694,160 @@ fn parse_tools_list_response(frame: &str) -> Result<Vec<String>, PluginError> {
     Ok(names)
 }
 
+// ── Module-level acceptance test ─────────────────────────────────────────────
+//
+// NOTE on placement: this test is intentionally a peer of — not nested
+// inside — the `mod tests { }` block that follows.  The feature-list
+// oracle for P1-W3-F06 carries the frozen selector
+// `plugin_manager::test_hot_cold_lifecycle`; placing the function in
+// `mod tests { }` would change its nextest path to
+// `plugin_manager::tests::test_hot_cold_lifecycle` and the verifier
+// would reject.  See ucil-build/escalations/20260415-1856 and DEC-0007.
+
+/// Locate the `mock-mcp-plugin` binary that Cargo compiles alongside
+/// this crate's lib tests.
+///
+/// `CARGO_BIN_EXE_*` env vars are only injected for integration tests
+/// (files under `tests/`).  For a library unit test we derive the path
+/// from [`std::env::current_exe`]: the test binary lives in
+/// `target/{profile}/deps/`, so two `pop`s yield `target/{profile}/`,
+/// where cargo places the `mock-mcp-plugin` bin output.
+#[cfg(test)]
+fn mock_mcp_plugin_path() -> std::path::PathBuf {
+    let mut exe = std::env::current_exe().expect("current_exe must succeed in tests");
+    // .../target/{profile}/deps/<test_binary>
+    exe.pop();
+    // .../target/{profile}/deps
+    exe.pop();
+    exe.push(if cfg!(windows) {
+        "mock-mcp-plugin.exe"
+    } else {
+        "mock-mcp-plugin"
+    });
+    exe
+}
+
+/// End-to-end HOT/COLD lifecycle exercise — the acceptance test for
+/// `P1-W3-F06`.
+///
+/// Frozen selector: `plugin_manager::test_hot_cold_lifecycle`.
+///
+/// The test walks a real runtime through:
+///
+/// 1. `PluginManager::activate` spawns the `mock-mcp-plugin` binary,
+///    runs a real `tools/list` health check, and returns a runtime in
+///    [`PluginState::Active`].
+/// 2. `PluginRuntime::tick` demotes the runtime to
+///    [`PluginState::Idle`] once its `idle_timeout` (overridden here to
+///    50 ms) elapses with no call.
+/// 3. `PluginRuntime::mark_call` flips `Idle → Loading`.
+/// 4. `PluginManager::wake` runs another real health check, driving
+///    `Loading → Active`.
+///
+/// The health checks spawn a real subprocess (no mocks of
+/// `tokio::process::Command` or the child's stdio).
+#[cfg(test)]
+#[tokio::test]
+async fn test_hot_cold_lifecycle() {
+    use std::time::Duration as Dur;
+
+    let mock = mock_mcp_plugin_path();
+    assert!(
+        mock.exists(),
+        "expected mock-mcp-plugin binary at {} — run `cargo build -p ucil-daemon --bin mock-mcp-plugin` first",
+        mock.display()
+    );
+
+    // Manifest with an explicit short idle-timeout of 1 minute — the
+    // test also overrides the resolved `idle_timeout` on the runtime
+    // directly so `tick` fires within test wall-time.
+    let manifest = PluginManifest {
+        plugin: PluginSection {
+            name: "hot-cold-lifecycle".into(),
+            version: "0.1.0".into(),
+            description: Some("HOT/COLD acceptance test manifest".into()),
+        },
+        transport: TransportSection {
+            kind: "stdio".into(),
+            command: mock.to_string_lossy().into_owned(),
+            args: vec![],
+        },
+        lifecycle: Some(LifecycleSection {
+            hot_cold: true,
+            idle_timeout_minutes: Some(1),
+        }),
+    };
+
+    // ── Phase 1: activate → Registered → Loading → Active ────────────
+    let mut mgr = PluginManager::new();
+    let mut runtime = mgr
+        .activate(&manifest)
+        .await
+        .expect("activate must succeed against the real mock plugin");
+
+    assert_eq!(
+        runtime.state,
+        PluginState::Active,
+        "after a successful health check the runtime must be Active",
+    );
+    let snapshot = mgr.registered_runtimes().await;
+    assert_eq!(
+        snapshot.len(),
+        1,
+        "activate should register the runtime with the manager (got {} runtimes)",
+        snapshot.len(),
+    );
+    assert_eq!(
+        snapshot[0].state,
+        PluginState::Active,
+        "registered snapshot should also be Active",
+    );
+
+    // ── Phase 2: tick → Active → Idle ────────────────────────────────
+    // Shrink the idle budget and back-date last_call so `tick` fires
+    // immediately.  This exercises the real clock comparison inside
+    // PluginRuntime::tick without requiring the test to sleep an
+    // idle_timeout_minutes worth of wall-clock time.
+    runtime.idle_timeout = Dur::from_millis(50);
+    runtime.last_call = Instant::now()
+        .checked_sub(Dur::from_millis(250))
+        .expect("test clock must support a 250 ms rewind");
+
+    let transition = runtime.tick(Instant::now());
+    assert_eq!(
+        transition,
+        Some(PluginState::Idle),
+        "tick must demote an Active runtime whose idle budget is exhausted",
+    );
+    assert_eq!(runtime.state, PluginState::Idle);
+
+    // Idempotence: a second tick on an Idle runtime must not re-fire.
+    let second = runtime.tick(Instant::now());
+    assert_eq!(
+        second, None,
+        "tick on an already-Idle runtime must return None",
+    );
+
+    // ── Phase 3: mark_call → Idle → Loading ──────────────────────────
+    runtime.mark_call();
+    assert_eq!(
+        runtime.state,
+        PluginState::Loading,
+        "mark_call on Idle must flip to Loading",
+    );
+
+    // ── Phase 4: wake → Loading → Active (real health check) ─────────
+    PluginManager::wake(&mut runtime)
+        .await
+        .expect("wake must succeed against the real mock plugin");
+
+    assert_eq!(
+        runtime.state,
+        PluginState::Active,
+        "wake must drive Loading → Active via a real health check",
+    );
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
