@@ -45,3 +45,9 @@ if [[ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" && -z "${ANTHROPIC_API_KEY:-}" ]]; then
 fi
 
 unset -f _ucil_auth_log
+
+# 4. W3C trace-context propagation + OTel env wiring for child claude -p
+# sessions. Always attempted (idempotent + cheap). Only actually exports OTel
+# bits if OTEL_ENABLED=1 in the environment.
+# shellcheck source=scripts/_trace.sh
+source "$(dirname "${BASH_SOURCE[0]}")/_trace.sh"
