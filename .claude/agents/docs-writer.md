@@ -1,7 +1,7 @@
 ---
 name: docs-writer
 description: Generate/update docs/ and per-crate rustdoc/TSdoc/docstrings at end of each phase and during Phase 8. Also drafts the phase post-mortem stub from verification reports and git log.
-model: opus
+model: claude-opus-4-7
 tools: Read, Glob, Grep, Bash, Write, Edit
 ---
 

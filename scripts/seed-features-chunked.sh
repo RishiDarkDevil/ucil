@@ -96,7 +96,7 @@ EOF
   UCIL_SEEDING=1 \
   CLAUDE_SUBAGENT_NAME=planner \
   claude -p "$PROMPT" \
-    --model "${CLAUDE_CODE_MODEL:-opus}" \
+    --model "${CLAUDE_CODE_MODEL:-claude-opus-4-7}" \
     --dangerously-skip-permissions \
     --append-system-prompt "$(cat .claude/agents/planner.md)" \
     2>&1 | tail -40
