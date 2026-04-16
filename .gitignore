@@ -37,6 +37,7 @@ adapters/*/dist/
 ucil-build/telemetry/
 ucil-build/runs/
 ucil-build/.verifier-lock
+ucil-build/.watchdog.pid
 ucil-build/drift-counters.json
 
 # Triage-pass counters (per phase, transient)
