@@ -409,6 +409,84 @@ fn parse_worktree_porcelain(output: &str) -> Vec<WorktreeInfo> {
     result
 }
 
+// NOTE: this test MUST live at module level — NOT inside the inner
+// tests submodule below. The frozen acceptance-test selector for
+// P1-W4-F07 is the exact path
+// `session_manager::test_session_state_tracking`; placing this function
+// inside the inner tests submodule would produce
+// `session_manager::tests::test_session_state_tracking` and nextest's
+// exact-match selector would NOT match it. See escalation
+// 20260415-1856-wo-WO-0006-attempts-exhausted §Root cause 2.
+#[cfg(test)]
+#[tokio::test]
+async fn test_session_state_tracking() {
+    use std::path::PathBuf;
+
+    let repo = std::env::current_dir().expect("current dir");
+    let sm = SessionManager::new();
+    let id = sm
+        .create_session(&repo)
+        .await
+        .expect("create_session should succeed inside a git repo");
+
+    // (2) Record two calls; assert history grows to 2.
+    sm.record_call(&id, "search_symbol")
+        .await
+        .expect("record_call first invocation");
+    sm.record_call(&id, "read_file")
+        .await
+        .expect("record_call second invocation");
+    let info = sm.get_session(&id).await.expect("session present");
+    assert_eq!(
+        info.call_history.len(),
+        2,
+        "both record_call invocations should be persisted"
+    );
+    assert_eq!(info.call_history[0].tool, "search_symbol");
+    assert_eq!(info.call_history[1].tool, "read_file");
+
+    // (3) Add two files; the second insertion of the same file must
+    // de-duplicate (BTreeSet semantics).
+    let file_a = PathBuf::from("src/lib.rs");
+    let file_b = PathBuf::from("src/main.rs");
+    sm.add_file_to_context(&id, file_a.clone())
+        .await
+        .expect("add first file");
+    sm.add_file_to_context(&id, file_b.clone())
+        .await
+        .expect("add second file");
+    sm.add_file_to_context(&id, file_a.clone())
+        .await
+        .expect("re-add first file — must be a no-op");
+    let info = sm.get_session(&id).await.expect("session present");
+    assert_eq!(
+        info.files_in_context.len(),
+        2,
+        "files_in_context must de-duplicate re-inserted paths"
+    );
+    assert!(info.files_in_context.contains(&file_a));
+    assert!(info.files_in_context.contains(&file_b));
+
+    // (4) Set and round-trip the inferred domain.
+    sm.set_inferred_domain(&id, "rust".to_owned())
+        .await
+        .expect("set_inferred_domain");
+    let info = sm.get_session(&id).await.expect("session present");
+    assert_eq!(info.inferred_domain.as_deref(), Some("rust"));
+
+    // (5) Set a short TTL (1s), compute now = created_at + 1 + 1,
+    // then purge. The session must be removed; count must equal 1.
+    let created_at = info.created_at;
+    sm.set_ttl(&id, 1).await.expect("set_ttl");
+    let now = created_at + 1 + 1;
+    let removed = sm.purge_expired(now).await;
+    assert_eq!(removed, 1, "expected exactly one session to be purged");
+    assert!(
+        sm.get_session(&id).await.is_none(),
+        "purge_expired must remove the session"
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
