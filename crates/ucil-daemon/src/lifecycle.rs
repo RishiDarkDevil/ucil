@@ -5,9 +5,29 @@
 //! 1. A best-effort [`PidFile`] that records the running daemon's PID at a
 //!    caller-supplied path (typically `.ucil/daemon.pid`). The file is
 //!    written once at startup and removed on `Drop`.
-//! 2. (Added in a follow-up commit) a shutdown-signal awaiter and a
-//!    [`Lifecycle`] convenience handle that owns the PID file and awaits
-//!    `SIGTERM` / `SIGHUP`.
+//! 2. A cross-platform (Unix) [`wait_for_shutdown`] helper that resolves
+//!    with a [`ShutdownReason`] the first time the process receives
+//!    `SIGTERM` or `SIGHUP`.
+//!
+//! A convenience [`Lifecycle`] handle owns the [`PidFile`] and exposes
+//! [`Lifecycle::run_until_shutdown`] for call-sites that want to await
+//! the signal directly.
+//!
+//! # Examples
+//!
+//! ```no_run
+//! use std::path::Path;
+//! use ucil_daemon::lifecycle::{Lifecycle, PidFile};
+//!
+//! # #[tokio::main]
+//! # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let pid_file = PidFile::write(Path::new(".ucil/daemon.pid"))?;
+//! let lifecycle = Lifecycle::new(pid_file);
+//! let reason = lifecycle.run_until_shutdown().await;
+//! println!("daemon shutting down: {reason:?}");
+//! # Ok(())
+//! # }
+//! ```
 
 // Public API items intentionally share a name prefix with the module
 // ("lifecycle" → "Lifecycle", no repetition today but keep parity with
@@ -123,6 +143,76 @@ impl Drop for PidFile {
     }
 }
 
+/// Reason a [`Lifecycle`] returned from its `run_until_shutdown` loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShutdownReason {
+    /// Received `SIGTERM` — normal shutdown request.
+    Sigterm,
+    /// Received `SIGHUP` — reload or hang-up shutdown.
+    Sighup,
+}
+
+/// Await a Unix shutdown signal and return the [`ShutdownReason`] that
+/// caused resolution.
+///
+/// Listens on both `SIGTERM` and `SIGHUP`; whichever arrives first wins.
+///
+/// # Errors
+///
+/// Returns [`std::io::Error`] if the underlying signal handler could not
+/// be installed (for example, too many signal handlers already
+/// registered).
+pub async fn wait_for_shutdown() -> std::io::Result<ShutdownReason> {
+    use tokio::signal::unix::{signal, SignalKind};
+
+    let mut term = signal(SignalKind::terminate())?;
+    let mut hup = signal(SignalKind::hangup())?;
+
+    let reason = tokio::select! {
+        _ = term.recv() => ShutdownReason::Sigterm,
+        _ = hup.recv() => ShutdownReason::Sighup,
+    };
+    Ok(reason)
+}
+
+/// Convenience handle bundling a [`PidFile`] with a shutdown-signal
+/// awaiter.
+///
+/// Dropping the `Lifecycle` removes the PID file. Callers typically
+/// construct it at daemon startup and await [`Self::run_until_shutdown`]
+/// at the end of `main`.
+#[derive(Debug)]
+pub struct Lifecycle {
+    _pid_file: PidFile,
+}
+
+impl Lifecycle {
+    /// Construct a new `Lifecycle` that owns `pid_file`.
+    #[must_use]
+    pub const fn new(pid_file: PidFile) -> Self {
+        Self {
+            _pid_file: pid_file,
+        }
+    }
+
+    /// Await shutdown.
+    ///
+    /// Returns the [`ShutdownReason`] indicating which signal fired. If
+    /// the signal handlers cannot be installed, falls back to
+    /// [`ShutdownReason::Sigterm`] after logging a trace message. (The
+    /// daemon is effectively un-shuttable in that pathological case, so
+    /// we still return *some* reason rather than panic.)
+    pub async fn run_until_shutdown(&self) -> ShutdownReason {
+        match wait_for_shutdown().await {
+            Ok(reason) => reason,
+            Err(err) => {
+                tracing::error!(?err, "failed to install shutdown signal handlers");
+                ShutdownReason::Sigterm
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -196,6 +286,27 @@ mod tests {
         assert!(
             matches!(err, PidFileError::Stale { .. }),
             "expected Stale variant, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn shutdown_reason_debug_is_readable() {
+        assert_eq!(format!("{:?}", ShutdownReason::Sigterm), "Sigterm");
+        assert_eq!(format!("{:?}", ShutdownReason::Sighup), "Sighup");
+    }
+
+    #[test]
+    fn lifecycle_holds_pid_file_and_removes_on_drop() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let path = tmp.path().join("daemon.pid");
+        {
+            let pid_file = PidFile::write(&path).expect("write pid-file");
+            let _life = Lifecycle::new(pid_file);
+            assert!(path.exists(), "pid-file must exist while Lifecycle is live");
+        }
+        assert!(
+            !path.exists(),
+            "Lifecycle dropping the PidFile must remove the file"
         );
     }
 }

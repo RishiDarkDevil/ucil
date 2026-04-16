@@ -9,5 +9,5 @@
 
 pub mod lifecycle;
 pub mod session_manager;
-pub use lifecycle::{PidFile, PidFileError};
+pub use lifecycle::{Lifecycle, PidFile, PidFileError, ShutdownReason};
 pub use session_manager::{SessionId, SessionInfo, SessionManager, WorktreeInfo};
