@@ -1,0 +1,88 @@
+{
+  "id": "WO-0008",
+  "slug": "daemon-lifecycle-session-state",
+  "phase": 1,
+  "week": 3,
+  "features": ["P1-W3-F01", "P1-W4-F07"],
+  "feature_ids": ["P1-W3-F01", "P1-W4-F07"],
+  "branch": "feat/WO-0008-daemon-lifecycle-session-state",
+  "worktree_branch": "feat/WO-0008-daemon-lifecycle-session-state",
+  "executor_agent": "executor",
+  "goal": "Add the ucil-daemon process lifecycle (PID file + SIGTERM/SIGHUP clean shutdown) as a new `lifecycle` module, and extend the existing session_manager with call history, inferred domain, files_in_context set, and TTL expiry.",
+  "plan_summary": "Part 1 (ucil-daemon/src/lifecycle.rs): NEW module exposing `PidFile` (write/read/remove at a caller-supplied path, typically `.ucil/daemon.pid`), a `ShutdownSignal` future that completes on SIGTERM or SIGHUP via `tokio::signal::unix`, and a `Lifecycle` handle that wires them together. All unit tests live under `lifecycle::tests::…` — any path under the `lifecycle::` module satisfies the frozen selector `lifecycle::`. Part 2 (ucil-daemon/src/session_manager.rs): extend `SessionInfo` with `call_history: Vec<CallRecord>`, `inferred_domain: Option<String>`, `files_in_context: std::collections::BTreeSet<PathBuf>`, and `expires_at: u64` (unix seconds). Add SessionManager methods `record_call`, `add_file_to_context`, `set_inferred_domain`, `set_ttl`, and `purge_expired`. Add ONE new `#[tokio::test] async fn test_session_state_tracking()` at **module level** (NOT inside the existing `#[cfg(test)] mod tests { … }` block) so the frozen exact-match selector `session_manager::test_session_state_tracking` matches. Part 3 (lib.rs): `pub mod lifecycle;` + re-exports.",
+  "scope_in": [
+    "crates/ucil-daemon/src/lifecycle.rs — NEW file. `PidFileError` (thiserror): `Io { path: PathBuf, source: std::io::Error }`, `Stale { path: PathBuf, pid: u32 }`. `PidFile` struct with `pub fn write(path: &Path) -> Result<Self, PidFileError>` (writes `std::process::id()` as decimal string), `pub fn read(path: &Path) -> Result<u32, PidFileError>`, and `Drop` impl that best-effort removes the file. `ShutdownReason` enum { Sigterm, Sighup }. `pub async fn wait_for_shutdown() -> ShutdownReason` using `tokio::signal::unix::{signal, SignalKind}` with SIGTERM + SIGHUP streams selected via `tokio::select!`. `Lifecycle` struct holding the `PidFile` handle with `pub async fn run_until_shutdown(&self) -> ShutdownReason` that awaits `wait_for_shutdown()`. Unit tests at `lifecycle::tests::…` (this is fine — frozen selector is the module prefix `lifecycle::`): `pid_file_write_creates_file_with_current_pid`, `pid_file_read_returns_written_pid`, `pid_file_drop_removes_file`, `pid_file_double_write_is_idempotent_or_errors_cleanly`, `shutdown_reason_debug_is_readable`. Use `tempfile::TempDir` for pid-file paths; never hard-code `/tmp`. Do not actually send SIGTERM in a unit test — test the signal-handling helper via dependency injection if needed, but keep signal delivery out of the unit-test path. An integration test that spawns a subprocess and sends SIGTERM may be added to `crates/ucil-daemon/tests/lifecycle_signals.rs` as an optional follow-up but is NOT required for this WO.",
+    "crates/ucil-daemon/src/session_manager.rs — EXTEND. Add `CallRecord { tool: String, at: u64 }` (#[derive(Debug, Clone, Serialize, Deserialize)]). Extend `SessionInfo` with the four new fields listed above (default-constructed in `create_session`: empty vec, None, empty set, `created_at + DEFAULT_TTL_SECS`). Add `pub const DEFAULT_TTL_SECS: u64 = 3600;`. Add new methods on `SessionManager`: `pub async fn record_call(&self, id: &SessionId, tool: &str) -> Option<()>`, `pub async fn add_file_to_context(&self, id: &SessionId, file: PathBuf) -> Option<()>`, `pub async fn set_inferred_domain(&self, id: &SessionId, domain: String) -> Option<()>`, `pub async fn set_ttl(&self, id: &SessionId, ttl_secs: u64) -> Option<()>`, `pub async fn purge_expired(&self, now_secs: u64) -> usize` (returns count removed). Add EXACTLY ONE new test `test_session_state_tracking` at MODULE LEVEL with `#[cfg(test)]` + `#[tokio::test]` decorators — placed BEFORE the existing `#[cfg(test)] mod tests { … }` block, NOT inside it. The frozen selector is the exact path `session_manager::test_session_state_tracking`; nesting it inside `mod tests` produces `session_manager::tests::test_session_state_tracking` and the selector will NOT match (see WO-0007 / escalation 20260415-1856). The test must: (1) create a session, (2) record two calls, (3) add two files to files_in_context (assert set de-duplicates), (4) set inferred_domain and assert round-trip, (5) set a short TTL and call purge_expired with now = created_at + ttl + 1 to confirm the session is removed and count==1.",
+    "crates/ucil-daemon/src/lib.rs — ADD `pub mod lifecycle;` module declaration and `pub use lifecycle::{Lifecycle, PidFile, PidFileError, ShutdownReason};` re-exports. Keep the existing `pub mod session_manager;` line and its re-exports unchanged beyond appending `CallRecord` and `DEFAULT_TTL_SECS` to the re-export list."
+  ],
+  "scope_out": [
+    "Do NOT wire `crates/ucil-daemon/src/main.rs` to call Lifecycle::run — leave main.rs as-is. Main-wiring is a separate Phase 1 Week 3 WO (integration of lifecycle + watcher + MCP server).",
+    "Do NOT daemonize in the fork(2) sense. The `daemonize` requirement in the feature description is satisfied by PID-file + signal-handling. A full double-fork implementation is out of scope and will land in a later WO if the master plan requires it (master plan §11 line 1064 only specifies `daemon.pid` — not fork semantics).",
+    "Do NOT touch crates/ucil-treesitter/** or crates/ucil-daemon/src/storage.rs — those are in-flight on branch feat/WO-0006-symbol-extraction-chunker-storage and branch feat/WO-0007-fix-storage-test-selector. Editing them on this branch will create merge hazards.",
+    "Do NOT modify the existing `session_manager::tests` module contents — only ADD a module-level test next to it, and extend `SessionInfo` and `SessionManager` impl blocks.",
+    "Do NOT add notify/notify-debouncer-full — that is P1-W3-F02 (next WO).",
+    "Do NOT add salsa dependency — that is P1-W3-F04 (separate WO).",
+    "Do NOT add plugin.toml parsing or process spawning for plugins — that is P1-W3-F05 (separate WO).",
+    "Do NOT add any SQLite schema work — P1-W4-F01 is a separate WO.",
+    "Do NOT touch tests/fixtures/** or ucil-build/feature-list.json."
+  ],
+  "acceptance": [
+    "cargo nextest run -p ucil-daemon lifecycle:: — 5 passing tests under lifecycle::tests",
+    "cargo nextest run -p ucil-daemon session_manager::test_session_state_tracking — exactly 1 matching test, passing",
+    "cargo nextest run -p ucil-daemon session_manager:: — existing session_manager tests still pass (regression safety net for P1-W2-F05)",
+    "cargo clippy -p ucil-daemon -- -D warnings — no new warnings",
+    "cargo build --workspace — exits 0"
+  ],
+  "acceptance_criteria": [
+    "cargo nextest run -p ucil-daemon lifecycle:: exits 0 and reports >=5 passing tests",
+    "cargo nextest run -p ucil-daemon session_manager::test_session_state_tracking exits 0 and matches exactly 1 test",
+    "cargo nextest run -p ucil-daemon session_manager:: exits 0 (no regression on P1-W2-F05 tests)",
+    "cargo clippy -p ucil-daemon -- -D warnings exits 0",
+    "cargo build --workspace exits 0",
+    "grep -n 'fn test_session_state_tracking' crates/ucil-daemon/src/session_manager.rs | head -1 | awk -F: '{print $2}' — the line number must be BEFORE the line reporting 'mod tests {' in the same file (module-level placement check)"
+  ],
+  "implementation_notes": [
+    "SIGNAL HANDLING: `tokio::signal::unix::signal(SignalKind::terminate())` returns a `Signal` stream. Hold two streams (SIGTERM and SIGHUP) and `tokio::select!` on their `recv()` futures. Wrap each `.recv()` in `tokio::time::timeout` only if you need a shutdown deadline — not required for this WO. Example skeleton: `let mut term = signal(SignalKind::terminate())?; let mut hup = signal(SignalKind::hangup())?; tokio::select! { _ = term.recv() => ShutdownReason::Sigterm, _ = hup.recv() => ShutdownReason::Sighup }`.",
+    "FROZEN SELECTOR LESSON FROM WO-0007: the P1-W4-F07 selector `session_manager::test_session_state_tracking` is an EXACT test-path match; it does NOT match `session_manager::tests::test_session_state_tracking`. Nextest treats `::tests::` as a distinct path segment. Placing the new test inside the existing `mod tests { … }` block will cause the verifier to reject. The fix is structural: add a stand-alone `#[cfg(test)] #[tokio::test] async fn test_session_state_tracking() { … }` at the file's module level, anywhere outside the existing `mod tests { … }` block. The existing `mod tests` block stays intact — do not flatten it (its tests satisfy `session_manager::` module-prefix selector for P1-W2-F05; touching them risks regressing an already-passing feature).",
+    "PID FILE SEMANTICS: `PidFile::write` uses `std::fs::OpenOptions::new().write(true).create(true).truncate(true).open(path)` — this is synchronous, which is fine because PID-file writes happen exactly once at startup. Async tokio::fs is not required for this; keep the module simple. The `Drop` impl uses `let _ = std::fs::remove_file(&self.path);` — best-effort, never panic in Drop.",
+    "SESSIONINFO EXTENSION: keep backwards compatibility of the existing fields (`id`, `branch`, `worktree_root`, `created_at`). Use `#[serde(default)]` on the new fields so serialisation of older `SessionInfo` values (if any exist on disk) does not break. `files_in_context: BTreeSet<PathBuf>` — BTreeSet (not HashSet) so iteration order in tests is deterministic.",
+    "PURGE SEMANTICS: `purge_expired(now_secs)` iterates the sessions map, removes entries where `expires_at <= now_secs`, and returns the count. Take the write lock once for the full pass. `set_ttl(id, ttl_secs)` recomputes `expires_at = created_at + ttl_secs`.",
+    "COMMIT CADENCE (aim for ~8 commits, each ≤150 lines of diff; DEC-0005 allows a single oversized module-introduction commit if the critic flags it, but try to split): (1) feat(daemon): add lifecycle module skeleton with PidFile, (2) test(daemon): pid-file write/read/drop tests, (3) feat(daemon): add ShutdownReason + wait_for_shutdown via SIGTERM/SIGHUP, (4) test(daemon): lifecycle module smoke tests (pid-file only; do not send real signals), (5) feat(daemon): add CallRecord, DEFAULT_TTL_SECS, SessionInfo state fields, (6) feat(daemon): add SessionManager methods record_call/add_file/set_domain/set_ttl/purge_expired, (7) test(daemon): add module-level test_session_state_tracking, (8) chore(daemon): lib.rs re-exports + clippy cleanup.",
+    "CRITIC PRE-CHECK: run `cargo clippy -p ucil-daemon -- -D warnings` before writing the ready-for-review marker. A single clippy warning will block the critic. Common traps in this WO: unused imports in lifecycle.rs if you prototype with more types than you use, `must_use` on PidFile::write (recommended), and `clippy::missing_errors_doc` on public `Result`-returning functions (add a `# Errors` section).",
+    "NO UNWRAP IN NON-TEST CODE (.claude/rules/rust-style.md). Use `?` with typed errors. In tests, `.expect(\"msg\")` is permitted."
+  ],
+  "forbidden_paths": [
+    "ucil-build/feature-list.json",
+    "ucil-build/feature-list.schema.json",
+    "ucil-master-plan-v2.1-final.md",
+    "tests/fixtures/**",
+    "scripts/gate/**",
+    "scripts/flip-feature.sh",
+    "crates/ucil-treesitter/**",
+    "crates/ucil-daemon/src/storage.rs",
+    "crates/ucil-daemon/src/main.rs",
+    "crates/ucil-core/**"
+  ],
+  "context_refs": [
+    "master-plan:§18 Phase 1 Week 3 line 1740 — process lifecycle (daemonize, PID file, signal handling, crash recovery)",
+    "master-plan:§18 Phase 1 Week 4 line 1753 — session state tracking",
+    "master-plan:§11 line 1064 — .ucil/ layout includes daemon.sock / daemon.pid",
+    "master-plan:§11 line 1082 — per-agent session state file format",
+    "master-plan:§3 lines 191, 209, 517, 666, 769 — CEQP parameters (files_in_context is one of the universal parameters the session must track)",
+    "phase-log:ucil-build/phase-log/01-phase-1/CLAUDE.md §Invariants — tokio::time::timeout on every IO await, tokio::process::Command in async paths, no global mutable state outside OnceLock/LazyLock",
+    "decision:DEC-0005-WO-0006-module-coherence-commits — large module-introduction commits are acceptable when splitting would produce non-compiling intermediates",
+    "escalation:20260415-1856-wo-WO-0006-attempts-exhausted §Root cause 2 — frozen exact-match selector rejected inside `mod tests {}` wrapper",
+    ".claude/rules/rust-style.md — thiserror for libs, no unwrap outside test, pub(crate) default visibility, `# Errors` rustdoc on Result-returning pub fns",
+    ".claude/rules/commit-style.md — conventional commits with Phase/Feature/Work-order trailers, ~50 lines target per commit"
+  ],
+  "dependencies_met": true,
+  "lessons_applied": [
+    "WO-0006 taught: module-prefix selectors (`foo::`) match `foo::tests::…` but exact selectors (`foo::bar`) do NOT match `foo::tests::bar`. This WO's second feature (P1-W4-F07) uses the exact form — the plan calls out module-level placement explicitly in scope_in, implementation_notes, AND an acceptance_criteria grep check.",
+    "WO-0006 taught: module-introduction commits can exceed the 200-line critic ceiling when atomic (DEC-0005). The plan splits lifecycle.rs across ≥2 commits (skeleton + tests, then signals + tests) to stay close to the ≤150-line target, which avoids needing a DEC-0005-style ADR.",
+    "WO-0005 taught: session_manager.rs already exists and has its own `mod tests` wrapper. This WO extends it additively; it does not touch existing tests and keeps the existing `mod tests` intact to preserve P1-W2-F05 passing status."
+  ],
+  "estimated_commits": 8,
+  "estimated_complexity": "medium",
+  "created_at": "2026-04-17T12:30:00Z",
+  "created_by": "planner"
+}
