@@ -3,7 +3,7 @@
 **Phase**: 0
 **Dates**: 2026-04-14 → 2026-04-15
 **Features completed**: 14 / 14
-**Commits**: 115 (from `edde83f` Initial commit to `583b1dd` post-mortem draft)
+**Commits**: 113 total from `edde83f` Initial commit through `3b9ff72` WO-0004 merge (39 feature-tagged via `Feature: P0-W1-F*` trailer; remainder harness/chore/meta)
 **Work-orders**: 4 (WO-0001, WO-0002, WO-0003, WO-0004)
 **Rejections**: 5 total (WO-0001: 0 · WO-0002: 1 · WO-0003: 3 · WO-0004: 2)
 **Escalations**: 9 (all resolved)
