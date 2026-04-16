@@ -79,6 +79,7 @@ echo "[run-rcf] rejection:  ${REJECTION}"
 echo "[run-rcf] output:     ${OUT}"
 echo "[run-rcf] log:        ${LOG}"
 
+UCIL_WO_ID="${WO_ID}" CLAUDE_CODE_ENABLE_TELEMETRY=1 \
 CLAUDE_SUBAGENT_NAME=root-cause-finder \
 exec claude -p "$PROMPT" \
   --dangerously-skip-permissions \

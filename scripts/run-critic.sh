@@ -72,6 +72,7 @@ echo "[run-critic] log:        ${LOG}"
 echo "[run-critic] starting in 3s..."
 sleep 3
 
+UCIL_WO_ID="${WO_ID}" CLAUDE_CODE_ENABLE_TELEMETRY=1 \
 CLAUDE_SUBAGENT_NAME=critic \
 exec claude -p "$PROMPT" \
   --dangerously-skip-permissions \

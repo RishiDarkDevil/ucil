@@ -96,6 +96,7 @@ echo "[run-planner] log: ${LOG}"
 echo "[run-planner] starting in 3s..."
 sleep 3
 
+CLAUDE_CODE_ENABLE_TELEMETRY=1 \
 CLAUDE_SUBAGENT_NAME=planner \
 exec claude -p "$PROMPT" \
   --dangerously-skip-permissions \

@@ -44,6 +44,7 @@ EOF
 
 echo "[run-effectiveness] phase=${PHASE} log=${LOG}"
 
+CLAUDE_CODE_ENABLE_TELEMETRY=1 \
 CLAUDE_SUBAGENT_NAME=effectiveness-evaluator \
 exec claude -p "$PROMPT" \
   --dangerously-skip-permissions \

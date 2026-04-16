@@ -59,6 +59,7 @@ DO NOT edit any source code. Write your verification report and/or rejection, co
 echo "[spawn-verifier] new session: $NEW_SESSION"
 echo "[spawn-verifier] target: $TARGET"
 
+UCIL_WO_ID="${TARGET}" CLAUDE_CODE_ENABLE_TELEMETRY=1 \
 CLAUDE_SUBAGENT_NAME=verifier \
 CLAUDE_SESSION_ID="$NEW_SESSION" \
 exec claude -p "$PROMPT" \

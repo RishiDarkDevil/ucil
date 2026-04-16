@@ -73,6 +73,7 @@ echo "[run-triage] starting..."
 
 UCIL_PHASE="$PHASE" \
 UCIL_TRIAGE_PASS="$TRIAGE_PASS" \
+CLAUDE_CODE_ENABLE_TELEMETRY=1 \
 CLAUDE_SUBAGENT_NAME=triage \
 claude -p "$PROMPT" \
   --dangerously-skip-permissions \

@@ -81,6 +81,7 @@ echo "[run-executor] log: ${LOG}"
 echo "[run-executor] starting in ~5s..."
 sleep 5
 
+UCIL_WO_ID="${WO_ID}" CLAUDE_CODE_ENABLE_TELEMETRY=1 \
 CLAUDE_SUBAGENT_NAME=executor \
 exec claude -p "$PROMPT" \
   --dangerously-skip-permissions \
