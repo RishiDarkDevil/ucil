@@ -1,0 +1,36 @@
+# Serena MCP plugin manifest (master-plan §14.1 category = "structural").
+#
+# pinned 2026-04-18: tag v1.0.0
+#   source      : https://github.com/oraios/serena/releases/tag/v1.0.0
+#   commit      : first stable v1 major release (serena-mcp-server entry point preserved)
+#   binary      : `serena-mcp-server` (direct entry-point; equivalent to `serena start-mcp-server`)
+#   context     : `ide-assistant` — IDE-style tool surface (README "Contexts" section)
+#   transport   : stdio (master-plan §13; no HTTP in Phase 1)
+#
+# A moving `main` ref is deliberately avoided — reproducibility is required
+# by .claude/rules/commit-style.md.  Upstream tag v1.1.x removed the
+# `serena-mcp-server` binary entry-point in favour of `serena start-mcp-server`;
+# v1.0.0 is the latest stable that keeps both forms, matching the WO-0013
+# scope_in requirement and the WO's planner-notes recorded shape.
+
+[plugin]
+name = "serena"
+version = "1.0.0"
+description = "LSP-powered symbol navigation for 40+ languages (oraios/serena)."
+
+[transport]
+type = "stdio"
+command = "uvx"
+args = [
+    "--from",
+    "git+https://github.com/oraios/serena@v1.0.0",
+    "serena-mcp-server",
+    "--context",
+    "ide-assistant",
+    "--project",
+    ".",
+]
+
+[lifecycle]
+hot_cold = true
+idle_timeout_minutes = 10
