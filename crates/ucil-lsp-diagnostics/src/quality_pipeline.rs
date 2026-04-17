@@ -2,13 +2,13 @@
 //!
 //! This module is the diagnostics → `quality_issues` feed that
 //! master-plan §13.5 line 1437 describes: once the
-//! [`DiagnosticsClient`](crate::diagnostics::DiagnosticsClient) returns
-//! an `lsp_types::Diagnostic` payload, [`persist_diagnostics`] projects
+//! [`crate::diagnostics::DiagnosticsClient`] returns an
+//! `lsp_types::Diagnostic` payload, [`persist_diagnostics`] projects
 //! every diagnostic into a §12.1 `quality_issues` row and writes the
 //! whole batch through
-//! [`KnowledgeGraph::execute_in_transaction`](ucil_core::KnowledgeGraph::execute_in_transaction)
-//! — a single `BEGIN IMMEDIATE` scope per call, so the §11 atomicity
-//! invariant is preserved.
+//! [`ucil_core::KnowledgeGraph::execute_in_transaction`] — a single
+//! `BEGIN IMMEDIATE` scope per call, so the §11 atomicity invariant
+//! is preserved.
 //!
 //! # LSP-4 → quality-5 severity collapse
 //!
@@ -55,14 +55,14 @@
 //! # Timeout discipline
 //!
 //! The `.await` inside [`persist_diagnostics`] goes through
-//! [`DiagnosticsClient::diagnostics`](crate::diagnostics::DiagnosticsClient::diagnostics),
-//! which already wraps the call in
+//! [`crate::diagnostics::DiagnosticsClient::diagnostics`], which
+//! already wraps the call in
 //! `tokio::time::timeout(Duration::from_millis(LSP_REQUEST_TIMEOUT_MS), …)`.
 //! This module deliberately adds **no** second timeout layer — a
 //! double-wrap would mask the typed
-//! [`DiagnosticsClientError::Timeout`](crate::diagnostics::DiagnosticsClientError::Timeout)
-//! variant behind an opaque outer future and is an explicit
-//! anti-pattern per the `WO-0015` surface contract.
+//! [`crate::diagnostics::DiagnosticsClientError::Timeout`] variant
+//! behind an opaque outer future and is an explicit anti-pattern per
+//! the `WO-0015` surface contract.
 //!
 //! # Tracing spans
 //!
@@ -101,8 +101,8 @@ use crate::types::Language;
 #[non_exhaustive]
 pub enum QualityPipelineError {
     /// The LSP dispatch through
-    /// [`DiagnosticsClient`](crate::diagnostics::DiagnosticsClient)
-    /// failed — timeout, transport, or any other variant surfaced by
+    /// [`crate::diagnostics::DiagnosticsClient`] failed — timeout,
+    /// transport, or any other variant surfaced by
     /// [`DiagnosticsClientError`].
     #[error("LSP dispatch failed: {0}")]
     Dispatch(#[from] DiagnosticsClientError),
