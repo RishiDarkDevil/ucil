@@ -7,6 +7,7 @@ blocks_loop: false
 session_role: monitor
 session_work: watched-WO-0014-full-cycle-executor-to-merge; +1-feature-P1-W5-F03-flipped; triage-pass-1-auto-resolved-prior-heartbeat
 auto_resolve_on_next_triage: bucket-A
+resolved: true
 ---
 
 # Phase 1 gate incomplete — monitor session (post WO-0014 merge)
@@ -21,3 +22,13 @@ Loop iter3 clean. 24 phase-1 features still unfinished — normal
 mid-phase state; the stop-hook's escalation-bypass handles this.
 
 No source code changes this session. Triage Bucket-A on next pass.
+
+## Resolution
+
+Bucket A auto-resolve. Escalation is an admin heartbeat; `blocks_loop: false`
+and the `auto_resolve_on_next_triage: bucket-A` flag was set by the author.
+Since filing, the loop has continued healthy: WO-0015 merged cleanly (ff60f36)
+and P1-W5-F04 (lsp-diagnostics-client) flipped to passes=true. Phase-1 feature
+count is now 11/34 (total 25/234), consistent with normal mid-phase progression.
+The gate-incomplete condition cited is expected mid-phase and is governed by
+the stop-hook's escalation-bypass, not this file. Triage pass 2 on 2026-04-18.
