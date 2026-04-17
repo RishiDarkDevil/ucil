@@ -33,3 +33,17 @@ tree-sitter-cpp.workspace = true
 tree-sitter-ruby.workspace = true
 tree-sitter-bash.workspace = true
 tree-sitter-json.workspace = true
+
+# LMDB-backed tag cache (Phase 1 Week 2, WO-0018; feature P1-W2-F04).
+# `heed` is a typed wrapper over LMDB; `bincode` encodes the stored
+# `Vec<ExtractedSymbol>` values.  The tag cache is the L1 tier of the
+# master-plan §2.1 tiered cache and lives on-disk at
+# `.ucil/branches/<branch>/tags.lmdb` (master-plan §9.1).
+heed = { workspace = true }
+bincode = { workspace = true }
+
+[dev-dependencies]
+# Temp LMDB envs for `tag_cache` module-root tests (Phase 1 Week 2,
+# WO-0018).  Phase-log invariant 1 forbids mocking LMDB — we open a real
+# `heed::Env` under a `TempDir` instead.
+tempfile = { workspace = true }

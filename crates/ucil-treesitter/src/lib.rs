@@ -9,6 +9,8 @@
 
 pub mod parser;
 pub mod symbols;
+pub mod tag_cache;
 
 pub use parser::{Language, ParseError, Parser, SUPPORTED_LANGUAGES};
 pub use symbols::{ExtractedSymbol, SymbolExtractor, SymbolKind};
+pub use tag_cache::{TagCache, TagCacheError};
