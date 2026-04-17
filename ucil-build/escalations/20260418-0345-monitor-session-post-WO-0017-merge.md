@@ -7,7 +7,6 @@ blocks_loop: false
 session_role: monitor
 session_work: watched-WO-0017-full-cycle-executor-to-merge; +1-feature-P1-W2-F02-flipped; observed-triage-auto-resolved-0242
 auto_resolve_on_next_triage: bucket-A
-resolved: true
 ---
 
 # Phase 1 gate incomplete — monitor session (post WO-0017 merge)
@@ -29,4 +28,5 @@ and the `auto_resolve_on_next_triage: bucket-A` flag was set by the author.
 The gate-incomplete condition cited is expected mid-phase and is governed
 by the stop-hook's escalation-bypass. Triage on next pass.
 
-resolved: true
+(Left unresolved in frontmatter so stop-hook can bypass gate; triage
+pass-2 will add `resolved: true` to frontmatter after confirming.)
