@@ -667,3 +667,85 @@ async fn test_all_22_tools_registered() {
         .expect("server task must not panic");
     serve_result.expect("server loop must return Ok after clean EOF");
 }
+
+/// Acceptance test for `P1-W4-F06`.
+///
+/// Frozen selector: `server::test_ceqp_params_on_all_tools` (exact
+/// match — must live at module level, not under `mod tests { … }`).
+///
+/// `test_all_22_tools_registered` above exercises the full wire
+/// protocol and already contains a CEQP-properties check, but its
+/// selector is `server::test_all_22_tools_registered`.  Master-plan
+/// §8.2 assigns CEQP universals their own feature (`P1-W4-F06`) with
+/// its own frozen selector, so this is the named regression test that
+/// lives independently of the `tools/list` IO test and asserts:
+///
+/// 1. `ucil_tools()` reports exactly 22 descriptors.
+/// 2. Every descriptor's `input_schema.properties` carries the four
+///    CEQP universal keys (`reason`, `current_task`,
+///    `files_in_context`, `token_budget`).
+/// 3. Each CEQP key's `type` matches master-plan §8.2
+///    (`string`, `string`, `array`, `integer`).
+///
+/// Failures are collected across **all** tools then asserted at the
+/// end so that a broken schema points at every offender at once —
+/// much cheaper to diagnose than fail-at-first.
+#[cfg(test)]
+#[tokio::test]
+async fn test_ceqp_params_on_all_tools() {
+    // (key, expected JSON-Schema type) per master-plan §8.2.
+    const CEQP_FIELDS: [(&str, &str); 4] = [
+        ("reason", "string"),
+        ("current_task", "string"),
+        ("files_in_context", "array"),
+        ("token_budget", "integer"),
+    ];
+
+    let tools = ucil_tools();
+    assert_eq!(
+        tools.len(),
+        TOOL_COUNT,
+        "ucil_tools() must return exactly {TOOL_COUNT} descriptors, got {}",
+        tools.len(),
+    );
+
+    let mut missing: Vec<String> = Vec::new();
+    let mut type_mismatches: Vec<String> = Vec::new();
+
+    for tool in &tools {
+        let props = tool
+            .input_schema
+            .get("properties")
+            .and_then(Value::as_object)
+            .unwrap_or_else(|| {
+                panic!(
+                    "tool `{}` input_schema is missing a `properties` object",
+                    tool.name
+                );
+            });
+
+        for (key, expected_type) in CEQP_FIELDS {
+            let Some(prop) = props.get(key) else {
+                missing.push(format!("{}.{}", tool.name, key));
+                continue;
+            };
+
+            let got_type = prop.get("type").and_then(Value::as_str).unwrap_or("<none>");
+            if got_type != expected_type {
+                type_mismatches.push(format!(
+                    "{}.{}: expected type=`{}`, got `{}`",
+                    tool.name, key, expected_type, got_type,
+                ));
+            }
+        }
+    }
+
+    assert!(
+        missing.is_empty(),
+        "CEQP universal params missing on these (tool.prop) pairs: {missing:?}",
+    );
+    assert!(
+        type_mismatches.is_empty(),
+        "CEQP universal param types mismatch master-plan §8.2: {type_mismatches:?}",
+    );
+}
