@@ -6,13 +6,13 @@
 //! cargo/nextest then matches the frozen selector `chunker::` against
 //! zero tests, which the oracle's `'0 passed'` heuristic flags as a
 //! fake-green ("module was removed, not a genuine pass").  This
-//! integration-test file survives the rollback because the commit that
-//! introduces it carries NO `Feature:` trailer — the oracle's
+//! integration-test file survives the rollback because the commit
+//! that introduces it carries NO feature-id trailer — the oracle's
 //! CANDIDATES filter picks up only feature-tagged commits, so this
 //! path is never stashed.
 //!
 //! Inner `mod chunker { … }` makes the nextest path
-//! `chunker_oracle_safeguard::chunker::<test_name>`, which substring-
+//! `chunker_public_api_guard::chunker::<test_name>`, which substring-
 //! matches the frozen selector `-p ucil-treesitter chunker::`.  When
 //! `src/chunker.rs` is stashed AND `src/lib.rs` is reverted to drop
 //! the `pub mod chunker;` / `pub use chunker::…` lines, this file
