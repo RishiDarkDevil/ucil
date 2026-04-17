@@ -25,3 +25,19 @@ lsp-types = { workspace = true }
 # so the bridge can store an `Arc<dyn SerenaClient + Send + Sync>`.
 async-trait = { workspace = true }
 ucil-core = { path = "../ucil-core" }
+# Required by `quality_pipeline.rs` to drive
+# `KnowledgeGraph::execute_in_transaction` — the transaction closure
+# signature is `FnOnce(&Transaction<'_>) -> Result<T, rusqlite::Error>`,
+# so the crate must be able to name `rusqlite::Error` and the
+# `rusqlite::params!` macro.  Pinned to the workspace dep so the
+# `bundled` feature matches `ucil-core` exactly; a duplicate edge here
+# compiles to the same crate instance at the workspace level.
+rusqlite = { workspace = true }
+
+[dev-dependencies]
+# Real on-disk `KnowledgeGraph` handle for `quality_pipeline` module-root
+# tests (`P1-W5-F05`, `WO-0016`).  Opening the knowledge graph on a
+# `TempDir` lets the test exercise the §12.1 DDL, WAL pragma, and
+# `BEGIN IMMEDIATE` transaction behaviour without an in-memory shortcut
+# or a `rusqlite::Connection` mock.
+tempfile = { workspace = true }

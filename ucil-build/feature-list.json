@@ -972,10 +972,10 @@
         "P1-W5-F04",
         "P1-W4-F01"
       ],
-      "passes": false,
-      "last_verified_ts": null,
-      "last_verified_by": null,
-      "last_verified_commit": null,
+      "passes": true,
+      "last_verified_ts": "2026-04-17T21:05:50Z",
+      "last_verified_by": "verifier-a9c66996-ed87-4e6f-9113-77026dcbcfaa",
+      "last_verified_commit": "bcffe30f76857944be23ccd662b672f539c68f40",
       "attempts": 0,
       "blocked_reason": null
     },
