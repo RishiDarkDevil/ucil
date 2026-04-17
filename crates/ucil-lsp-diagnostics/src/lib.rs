@@ -16,8 +16,10 @@
 #![warn(clippy::all, clippy::pedantic, clippy::nursery)]
 #![deny(rustdoc::broken_intra_doc_links)]
 
+pub mod bridge;
 pub mod types;
 
 // ── Re-exports ────────────────────────────────────────────────────────────────
 
+pub use bridge::{BridgeError, LspDiagnosticsBridge};
 pub use types::{Diagnostic, DiagnosticSeverity, Language, LspEndpoint, LspTransport};
