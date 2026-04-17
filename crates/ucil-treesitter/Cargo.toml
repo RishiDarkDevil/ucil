@@ -11,6 +11,13 @@ description = "UCIL tree-sitter integration: multi-language parser, symbol extra
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+# Serde is required by `symbols::ExtractedSymbol` / `symbols::SymbolKind`,
+# which derive `Serialize`/`Deserialize` so downstream consumers (Phase 1
+# knowledge-graph pipeline, LMDB tag cache) can persist extracted symbols.
+serde = { workspace = true }
+# tree-sitter 0.25's `QueryMatches` yields captures via `StreamingIterator`
+# (not `Iterator`); `symbols::run_query` uses this trait to iterate matches.
+streaming-iterator.workspace = true
 ucil-core = { path = "../ucil-core" }
 
 # tree-sitter core + grammar crates (≥10 languages required)

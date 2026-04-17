@@ -8,4 +8,7 @@
 #![deny(rustdoc::broken_intra_doc_links)]
 
 pub mod parser;
+pub mod symbols;
+
 pub use parser::{Language, ParseError, Parser, SUPPORTED_LANGUAGES};
+pub use symbols::{ExtractedSymbol, SymbolExtractor, SymbolKind};
