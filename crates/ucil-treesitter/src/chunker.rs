@@ -59,10 +59,11 @@
 //!
 //! # Token-count heuristic
 //!
-//! `token_count = max(1, ⌈content.len() / 4⌉)` — OpenAI's standard
-//! English-text byte heuristic, exposed via [`BYTES_PER_TOKEN`] inside
-//! the module (private).  This is intentional; the real tokenizer is
-//! scoped to `ucil-embeddings` in Phase 3 (master plan §14 line 1657).
+//! `token_count = max(1, ⌈content.len() / 4⌉)` — `OpenAI`'s standard
+//! English-text byte heuristic.  The divisor (4 bytes per token) is
+//! the private `BYTES_PER_TOKEN` constant inside the module.  This is
+//! intentional; the real tokenizer is scoped to `ucil-embeddings` in
+//! Phase 3 (master plan §14 line 1657).
 //! A byte-based estimate is sufficient to enforce the "no chunk larger
 //! than 512 tokens" invariant at this layer — any minor drift between
 //! the estimate and a real tokenizer is absorbed by the downstream
@@ -100,8 +101,8 @@ pub const MAX_TOKENS: u32 = 512;
 
 /// Byte-per-token estimator coefficient.
 ///
-/// `token_count = max(1, ⌈content.len() / BYTES_PER_TOKEN⌉)` — OpenAI's
-/// standard English-text heuristic.  The real tokenizer is owned by
+/// `token_count = max(1, ⌈content.len() / BYTES_PER_TOKEN⌉)` —
+/// `OpenAI`'s standard English-text heuristic.  The real tokenizer is owned by
 /// `ucil-embeddings` (Phase 3, master plan §14 line 1657); this constant
 /// is intentionally private to the module so downstream code does NOT
 /// build on the estimate and silently diverge from a real tokenizer.
@@ -565,10 +566,7 @@ fn first_non_blank_line(source: &str) -> &str {
 /// characters (`/`, `!`, `*`, whitespace).  The returned slice is
 /// right-trimmed.
 fn first_doc_paragraph(doc: &str) -> &str {
-    match find_paragraph_break(doc) {
-        Some(idx) => doc[..idx].trim_end(),
-        None => doc.trim_end(),
-    }
+    find_paragraph_break(doc).map_or_else(|| doc.trim_end(), |idx| doc[..idx].trim_end())
 }
 
 /// Scan `doc` for the first "paragraph break" — either a plain blank
