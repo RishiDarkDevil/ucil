@@ -84,6 +84,12 @@ lsp-types = "0.95"
 # `Arc<dyn SerenaClient + Send + Sync>` across `.await` points.
 async-trait = "0.1"
 
+# Streaming iterator — required by tree-sitter 0.25's `QueryMatches`, which
+# yields captures via `StreamingIterator` (not `Iterator`) so the internal
+# match buffer can be reused across iterations.  Used by
+# `ucil-treesitter::symbols` (Phase 1 Week 2, WO-0017).
+streaming-iterator = "0.1"
+
 [profile.dev]
 opt-level = 0
 

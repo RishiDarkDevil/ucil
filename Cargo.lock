@@ -1778,6 +1778,8 @@ dependencies = [
 name = "ucil-treesitter"
 version = "0.1.0"
 dependencies = [
+ "serde",
+ "streaming-iterator",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
