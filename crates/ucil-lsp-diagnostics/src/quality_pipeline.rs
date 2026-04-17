@@ -384,14 +384,17 @@ pub async fn persist_diagnostics(
     Ok(inserted)
 }
 
-// ── Test-side FakeSerenaClient ───────────────────────────────────────────────
+// ── Test-side helpers ────────────────────────────────────────────────────────
 //
-// This nested `#[cfg(test)]` submodule exists per DEC-0008's
-// dependency-inversion seam: it houses a real implementation of
-// UCIL's own `SerenaClient` trait that returns canned
-// `lsp_types::Diagnostic` payloads for the module-root tests below.
-// It is **not** a mock of Serena's MCP wire format — it implements
-// UCIL's own trait, which is the abstraction the bridge holds on to.
+// The nested `#[cfg(test)]` submodules below support the module-root
+// tests (`test_*`).  `fake_serena_client` houses the real
+// `SerenaClient` impl the tests drive per DEC-0008's
+// dependency-inversion seam — it is **not** a mock of Serena's MCP
+// wire format, just a concrete impl of UCIL's own trait.
+// `test_fixtures` houses pure constructors for `lsp_types::Diagnostic`
+// values and a `TempDir` + `KnowledgeGraph` opener so the tests stay
+// under `clippy::too_many_lines` while still asserting column-for-column
+// against `quality_issues` reads.
 
 #[cfg(test)]
 mod fake_serena_client {
@@ -471,6 +474,118 @@ mod fake_serena_client {
     }
 }
 
+#[cfg(test)]
+mod test_fixtures {
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    use lsp_types::{Diagnostic as LspDiagnostic, NumberOrString, Position, Range, Url};
+    use tempfile::TempDir;
+    use ucil_core::KnowledgeGraph;
+
+    use super::fake_serena_client::ScriptedFakeSerenaClient;
+    use crate::diagnostics::{DiagnosticsClient, SerenaClient};
+
+    /// Construct an `lsp_types::Diagnostic` from a compact set of
+    /// fields.  Saves ~15 lines per fixture relative to building the
+    /// struct literal inline.
+    pub(super) fn make_diag(
+        start_line: u32,
+        end_line: u32,
+        severity: Option<lsp_types::DiagnosticSeverity>,
+        code: Option<NumberOrString>,
+        source: Option<&str>,
+        message: &str,
+    ) -> LspDiagnostic {
+        LspDiagnostic {
+            range: Range::new(Position::new(start_line, 0), Position::new(end_line, 1)),
+            severity,
+            code,
+            code_description: None,
+            source: source.map(str::to_owned),
+            message: message.to_owned(),
+            related_information: None,
+            tags: None,
+            data: None,
+        }
+    }
+
+    /// Open a fresh on-disk `KnowledgeGraph` in a tempdir.  Returns
+    /// the owner `TempDir` (drop-order-preserving — the caller must
+    /// hold onto it for the lifetime of the test) alongside the
+    /// opened `KnowledgeGraph`.
+    pub(super) fn open_fresh_kg() -> (TempDir, KnowledgeGraph) {
+        let tmp = TempDir::new().expect("tempdir must be creatable");
+        let db_path = tmp.path().join("knowledge.db");
+        let kg = KnowledgeGraph::open(&db_path).expect("KnowledgeGraph::open must succeed");
+        (tmp, kg)
+    }
+
+    /// Wrap a pre-built `ScriptedFakeSerenaClient` into a
+    /// `DiagnosticsClient`.  Hides the `Arc<dyn SerenaClient + Send +
+    /// Sync>` coercion boilerplate from every test.
+    pub(super) fn client_from(fake: ScriptedFakeSerenaClient) -> DiagnosticsClient {
+        let shared: Arc<dyn SerenaClient + Send + Sync> = Arc::new(fake);
+        DiagnosticsClient::new(shared)
+    }
+
+    /// Convert a `file://` URI into the `String` that
+    /// `persist_diagnostics` will write into `quality_issues.file_path`.
+    pub(super) fn uri_to_path_string(uri: &Url) -> String {
+        let pb: PathBuf = uri.to_file_path().expect("file URI must convert to path");
+        pb.to_string_lossy().into_owned()
+    }
+
+    /// Tuple alias for a full `quality_issues` row readback.
+    pub(super) type IssueRow = (
+        String,
+        i64,
+        i64,
+        String,
+        String,
+        String,
+        Option<String>,
+        String,
+    );
+
+    /// Fetch the single `quality_issues` row matching `severity`.
+    ///
+    /// Used by the header test to assert every column of every row
+    /// without repeating the 8-column projection inline three times.
+    pub(super) fn fetch_row_by_severity(kg: &KnowledgeGraph, severity: &str) -> IssueRow {
+        kg.conn()
+            .query_row(
+                "SELECT file_path, line_start, line_end, category, severity, message, rule_id, source_tool \
+                 FROM quality_issues WHERE severity = ?1;",
+                rusqlite::params![severity],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                    ))
+                },
+            )
+            .unwrap_or_else(|e| panic!("row with severity={severity} must exist: {e}"))
+    }
+
+    /// Fetch `source_tool` for the (unique) row matching `file_path`.
+    pub(super) fn fetch_source_tool_by_path(kg: &KnowledgeGraph, path: &str) -> String {
+        kg.conn()
+            .query_row(
+                "SELECT source_tool FROM quality_issues WHERE file_path = ?1;",
+                rusqlite::params![path],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap_or_else(|e| panic!("row with file_path={path} must exist: {e}"))
+    }
+}
+
 // ── Module-root acceptance tests (F05 oracle) ────────────────────────────────
 //
 // The five tests below live at module root (NOT under `mod tests { … }`)
@@ -484,66 +599,45 @@ mod fake_serena_client {
 #[cfg(test)]
 #[tokio::test]
 async fn test_diagnostics_to_quality_issues() {
-    use std::sync::Arc;
-
-    use lsp_types::{Position, Range};
-    use tempfile::TempDir;
-
     use self::fake_serena_client::ScriptedFakeSerenaClient;
-    use crate::diagnostics::{DiagnosticsClient, SerenaClient};
+    use self::test_fixtures::{
+        client_from, fetch_row_by_severity, make_diag, open_fresh_kg, uri_to_path_string,
+    };
 
-    // Fixture: three canned diagnostics across two files.  The
-    // projections below are the exact values the test asserts
-    // persist in `quality_issues`.
+    // Fixture: three canned diagnostics across two files.
     let uri_a = Url::parse("file:///fixture/main.rs").expect("file URI must parse");
     let uri_b = Url::parse("file:///fixture/lib.rs").expect("file URI must parse");
 
-    let diag_error = LspDiagnostic {
-        range: Range::new(Position::new(4, 0), Position::new(4, 8)),
-        severity: Some(DiagnosticSeverity::ERROR),
-        code: Some(NumberOrString::String("E0308".to_owned())),
-        code_description: None,
-        source: Some("rust-analyzer".to_owned()),
-        message: "mismatched types".to_owned(),
-        related_information: None,
-        tags: None,
-        data: None,
-    };
-    let diag_warning = LspDiagnostic {
-        range: Range::new(Position::new(10, 0), Position::new(10, 3)),
-        severity: Some(DiagnosticSeverity::WARNING),
-        code: Some(NumberOrString::Number(42)),
-        code_description: None,
-        source: Some("clippy".to_owned()),
-        message: "unused variable".to_owned(),
-        related_information: None,
-        tags: None,
-        data: None,
-    };
-    let diag_hint = LspDiagnostic {
-        range: Range::new(Position::new(0, 0), Position::new(0, 1)),
-        severity: Some(DiagnosticSeverity::HINT),
-        code: None,
-        code_description: None,
-        source: None,
-        message: "inlay-hint candidate".to_owned(),
-        related_information: None,
-        tags: None,
-        data: None,
-    };
+    let diag_error = make_diag(
+        4,
+        4,
+        Some(DiagnosticSeverity::ERROR),
+        Some(NumberOrString::String("E0308".to_owned())),
+        Some("rust-analyzer"),
+        "mismatched types",
+    );
+    let diag_warning = make_diag(
+        10,
+        10,
+        Some(DiagnosticSeverity::WARNING),
+        Some(NumberOrString::Number(42)),
+        Some("clippy"),
+        "unused variable",
+    );
+    let diag_hint = make_diag(
+        0,
+        0,
+        Some(DiagnosticSeverity::HINT),
+        None,
+        None,
+        "inlay-hint candidate",
+    );
 
-    let fake = Arc::new(ScriptedFakeSerenaClient::new(vec![
-        (
-            uri_a.clone(),
-            vec![diag_error.clone(), diag_warning.clone()],
-        ),
-        (uri_b.clone(), vec![diag_hint.clone()]),
+    let client = client_from(ScriptedFakeSerenaClient::new(vec![
+        (uri_a.clone(), vec![diag_error, diag_warning]),
+        (uri_b.clone(), vec![diag_hint]),
     ]));
-    let client = DiagnosticsClient::new(fake as Arc<dyn SerenaClient + Send + Sync>);
-
-    let tmp = TempDir::new().expect("tempdir must be creatable");
-    let db_path = tmp.path().join("knowledge.db");
-    let mut kg = KnowledgeGraph::open(&db_path).expect("KnowledgeGraph::open must succeed");
+    let (_tmp, mut kg) = open_fresh_kg();
 
     let rows_a = persist_diagnostics(&client, &mut kg, uri_a.clone(), Language::Rust)
         .await
@@ -554,8 +648,6 @@ async fn test_diagnostics_to_quality_issues() {
         .await
         .expect("persist_diagnostics for uri_b must succeed");
     assert_eq!(rows_b, 1, "one row expected from uri_b");
-
-    // ── Readback: assert every column matches the canned projection ─────────
 
     let total_rows: i64 = kg
         .conn()
@@ -568,47 +660,10 @@ async fn test_diagnostics_to_quality_issues() {
         "exactly three rows must land in quality_issues"
     );
 
-    let path_a = uri_a
-        .to_file_path()
-        .expect("file URI must convert to path")
-        .to_string_lossy()
-        .into_owned();
-    let path_b = uri_b
-        .to_file_path()
-        .expect("file URI must convert to path")
-        .to_string_lossy()
-        .into_owned();
+    let path_a = uri_to_path_string(&uri_a);
+    let path_b = uri_to_path_string(&uri_b);
 
-    // Row 1: the Error diagnostic in file A.
-    let (fp, ls, le, cat, sev, msg, rid, src): (
-        String,
-        i64,
-        i64,
-        String,
-        String,
-        String,
-        Option<String>,
-        String,
-    ) = kg
-        .conn()
-        .query_row(
-            "SELECT file_path, line_start, line_end, category, severity, message, rule_id, source_tool \
-             FROM quality_issues WHERE severity = 'high';",
-            [],
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                    row.get(5)?,
-                    row.get(6)?,
-                    row.get(7)?,
-                ))
-            },
-        )
-        .expect("high-severity row must exist");
+    let (fp, ls, le, cat, sev, msg, rid, src) = fetch_row_by_severity(&kg, "high");
     assert_eq!(fp, path_a);
     assert_eq!(ls, 5, "LSP line 4 projects to 1-indexed 5");
     assert_eq!(le, 5);
@@ -618,36 +673,7 @@ async fn test_diagnostics_to_quality_issues() {
     assert_eq!(rid.as_deref(), Some("E0308"));
     assert_eq!(src, "lsp:rust-analyzer");
 
-    // Row 2: the Warning diagnostic in file A.
-    let (fp, ls, le, cat, sev, msg, rid, src): (
-        String,
-        i64,
-        i64,
-        String,
-        String,
-        String,
-        Option<String>,
-        String,
-    ) = kg
-        .conn()
-        .query_row(
-            "SELECT file_path, line_start, line_end, category, severity, message, rule_id, source_tool \
-             FROM quality_issues WHERE severity = 'medium';",
-            [],
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                    row.get(5)?,
-                    row.get(6)?,
-                    row.get(7)?,
-                ))
-            },
-        )
-        .expect("medium-severity row must exist");
+    let (fp, ls, le, cat, sev, msg, rid, src) = fetch_row_by_severity(&kg, "medium");
     assert_eq!(fp, path_a);
     assert_eq!(ls, 11, "LSP line 10 projects to 1-indexed 11");
     assert_eq!(le, 11);
@@ -657,37 +683,7 @@ async fn test_diagnostics_to_quality_issues() {
     assert_eq!(rid.as_deref(), Some("42"));
     assert_eq!(src, "lsp:clippy");
 
-    // Row 3: the Hint diagnostic in file B — source absent, so
-    // `source_tool` falls back to the Rust default server.
-    let (fp, ls, le, cat, sev, msg, rid, src): (
-        String,
-        i64,
-        i64,
-        String,
-        String,
-        String,
-        Option<String>,
-        String,
-    ) = kg
-        .conn()
-        .query_row(
-            "SELECT file_path, line_start, line_end, category, severity, message, rule_id, source_tool \
-             FROM quality_issues WHERE severity = 'info';",
-            [],
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                    row.get(5)?,
-                    row.get(6)?,
-                    row.get(7)?,
-                ))
-            },
-        )
-        .expect("info-severity row must exist");
+    let (fp, ls, le, cat, sev, msg, rid, src) = fetch_row_by_severity(&kg, "info");
     assert_eq!(fp, path_b);
     assert_eq!(ls, 1, "LSP line 0 projects to 1-indexed 1");
     assert_eq!(le, 1);
@@ -697,9 +693,6 @@ async fn test_diagnostics_to_quality_issues() {
     assert_eq!(rid, None);
     assert_eq!(src, "lsp:rust-analyzer");
 
-    // first_seen is NOT NULL with DEFAULT (datetime('now')) — assert
-    // every row got a non-empty value so the write path honoured the
-    // schema default.
     let null_first_seen: i64 = kg
         .conn()
         .query_row(
@@ -717,26 +710,15 @@ async fn test_diagnostics_to_quality_issues() {
 #[cfg(test)]
 #[tokio::test]
 async fn test_persist_empty_diagnostics_returns_zero() {
-    use std::sync::Arc;
-
-    use tempfile::TempDir;
-
     use self::fake_serena_client::ScriptedFakeSerenaClient;
-    use crate::diagnostics::{DiagnosticsClient, SerenaClient};
+    use self::test_fixtures::{client_from, open_fresh_kg};
 
     let uri = Url::parse("file:///fixture/empty.py").expect("file URI must parse");
-    // Scripted fake returns an empty vector for `uri` (the default
-    // unscripted behaviour too, but we script it explicitly for
-    // clarity).
-    let fake = Arc::new(ScriptedFakeSerenaClient::new(vec![(
+    let client = client_from(ScriptedFakeSerenaClient::new(vec![(
         uri.clone(),
         Vec::new(),
     )]));
-    let client = DiagnosticsClient::new(fake as Arc<dyn SerenaClient + Send + Sync>);
-
-    let tmp = TempDir::new().expect("tempdir must be creatable");
-    let db_path = tmp.path().join("knowledge.db");
-    let mut kg = KnowledgeGraph::open(&db_path).expect("KnowledgeGraph::open must succeed");
+    let (_tmp, mut kg) = open_fresh_kg();
 
     let inserted = persist_diagnostics(&client, &mut kg, uri, Language::Python)
         .await
@@ -782,69 +764,53 @@ fn test_category_mapping_covers_all_lsp_levels() {
 #[cfg(test)]
 #[tokio::test]
 async fn test_source_tool_falls_back_to_language_default() {
-    use std::sync::Arc;
-
-    use lsp_types::{Position, Range};
-    use tempfile::TempDir;
-
     use self::fake_serena_client::ScriptedFakeSerenaClient;
-    use crate::diagnostics::{DiagnosticsClient, SerenaClient};
+    use self::test_fixtures::{
+        client_from, fetch_source_tool_by_path, make_diag, open_fresh_kg, uri_to_path_string,
+    };
 
     // Diagnostic 1: source = None → fall back to Python default
     // (`pyright`).
     let uri_py = Url::parse("file:///fixture/app.py").expect("file URI must parse");
-    let diag_no_source = LspDiagnostic {
-        range: Range::new(Position::new(2, 0), Position::new(2, 10)),
-        severity: Some(DiagnosticSeverity::ERROR),
-        code: None,
-        code_description: None,
-        source: None,
-        message: "undefined name".to_owned(),
-        related_information: None,
-        tags: None,
-        data: None,
-    };
+    let diag_no_source = make_diag(
+        2,
+        2,
+        Some(DiagnosticSeverity::ERROR),
+        None,
+        None,
+        "undefined name",
+    );
 
     // Diagnostic 2: source = Some("ruff") → preserved verbatim.
     let uri_py_b = Url::parse("file:///fixture/ruff.py").expect("file URI must parse");
-    let diag_ruff = LspDiagnostic {
-        range: Range::new(Position::new(0, 0), Position::new(0, 5)),
-        severity: Some(DiagnosticSeverity::WARNING),
-        code: Some(NumberOrString::String("F401".to_owned())),
-        code_description: None,
-        source: Some("ruff".to_owned()),
-        message: "imported but unused".to_owned(),
-        related_information: None,
-        tags: None,
-        data: None,
-    };
+    let diag_ruff = make_diag(
+        0,
+        0,
+        Some(DiagnosticSeverity::WARNING),
+        Some(NumberOrString::String("F401".to_owned())),
+        Some("ruff"),
+        "imported but unused",
+    );
 
     // Diagnostic 3: source = None on a Rust URI → fall back to
     // `rust-analyzer`.  Exercised via a separate call because the
     // Language parameter is per-call.
     let uri_rs = Url::parse("file:///fixture/lib.rs").expect("file URI must parse");
-    let diag_rs_no_source = LspDiagnostic {
-        range: Range::new(Position::new(7, 0), Position::new(7, 1)),
-        severity: Some(DiagnosticSeverity::ERROR),
-        code: None,
-        code_description: None,
-        source: None,
-        message: "use of unstable feature".to_owned(),
-        related_information: None,
-        tags: None,
-        data: None,
-    };
+    let diag_rs_no_source = make_diag(
+        7,
+        7,
+        Some(DiagnosticSeverity::ERROR),
+        None,
+        None,
+        "use of unstable feature",
+    );
 
-    let fake = Arc::new(ScriptedFakeSerenaClient::new(vec![
+    let client = client_from(ScriptedFakeSerenaClient::new(vec![
         (uri_py.clone(), vec![diag_no_source]),
         (uri_py_b.clone(), vec![diag_ruff]),
         (uri_rs.clone(), vec![diag_rs_no_source]),
     ]));
-    let client = DiagnosticsClient::new(fake as Arc<dyn SerenaClient + Send + Sync>);
-
-    let tmp = TempDir::new().expect("tempdir must be creatable");
-    let db_path = tmp.path().join("knowledge.db");
-    let mut kg = KnowledgeGraph::open(&db_path).expect("KnowledgeGraph::open must succeed");
+    let (_tmp, mut kg) = open_fresh_kg();
 
     persist_diagnostics(&client, &mut kg, uri_py.clone(), Language::Python)
         .await
@@ -856,58 +822,19 @@ async fn test_source_tool_falls_back_to_language_default() {
         .await
         .expect("persist_diagnostics for uri_rs must succeed");
 
-    let path_py = uri_py
-        .to_file_path()
-        .expect("file URI must convert to path")
-        .to_string_lossy()
-        .into_owned();
-    let path_py_b = uri_py_b
-        .to_file_path()
-        .expect("file URI must convert to path")
-        .to_string_lossy()
-        .into_owned();
-    let path_rs = uri_rs
-        .to_file_path()
-        .expect("file URI must convert to path")
-        .to_string_lossy()
-        .into_owned();
-
-    let src_py: String = kg
-        .conn()
-        .query_row(
-            "SELECT source_tool FROM quality_issues WHERE file_path = ?1;",
-            rusqlite::params![path_py],
-            |row| row.get::<_, String>(0),
-        )
-        .expect("uri_py row must exist");
     assert_eq!(
-        src_py, "lsp:pyright",
+        fetch_source_tool_by_path(&kg, &uri_to_path_string(&uri_py)),
+        "lsp:pyright",
         "source=None on a Python URI must fall back to `lsp:pyright`",
     );
-
-    let src_py_b: String = kg
-        .conn()
-        .query_row(
-            "SELECT source_tool FROM quality_issues WHERE file_path = ?1;",
-            rusqlite::params![path_py_b],
-            |row| row.get::<_, String>(0),
-        )
-        .expect("uri_py_b row must exist");
     assert_eq!(
-        src_py_b, "lsp:ruff",
+        fetch_source_tool_by_path(&kg, &uri_to_path_string(&uri_py_b)),
+        "lsp:ruff",
         "source=Some(\"ruff\") must be preserved as `lsp:ruff`",
     );
-
-    let src_rs: String = kg
-        .conn()
-        .query_row(
-            "SELECT source_tool FROM quality_issues WHERE file_path = ?1;",
-            rusqlite::params![path_rs],
-            |row| row.get::<_, String>(0),
-        )
-        .expect("uri_rs row must exist");
     assert_eq!(
-        src_rs, "lsp:rust-analyzer",
+        fetch_source_tool_by_path(&kg, &uri_to_path_string(&uri_rs)),
+        "lsp:rust-analyzer",
         "source=None on a Rust URI must fall back to `lsp:rust-analyzer`",
     );
 }
