@@ -1,4 +1,4 @@
-//! `.ucil/shared/knowledge.db` — the SQLite knowledge graph (Phase 1 Week 4).
+//! `.ucil/shared/knowledge.db` — the `SQLite` knowledge graph (Phase 1 Week 4).
 //!
 //! This module owns the **persistent-storage substrate** for every
 //! downstream UCIL memory tier.  It does NOT yet expose CRUD helpers,
@@ -55,7 +55,7 @@ use thiserror::Error;
 /// Errors produced by [`KnowledgeGraph`].
 ///
 /// Marked `#[non_exhaustive]` so downstream crates cannot rely on
-/// exhaustive matching — new variants can be added without a SemVer
+/// exhaustive matching — new variants can be added without a `SemVer`
 /// break as Phase-1 work-orders add CRUD paths that surface new failure
 /// modes.
 #[derive(Debug, Error)]
@@ -410,7 +410,7 @@ impl KnowledgeGraph {
     /// the `BEGIN IMMEDIATE` invariant is preserved across every
     /// writer in the codebase.
     #[must_use]
-    pub fn conn(&self) -> &Connection {
+    pub const fn conn(&self) -> &Connection {
         &self.conn
     }
 
@@ -453,7 +453,7 @@ impl KnowledgeGraph {
 /// Frozen selector: `knowledge_graph::test_schema_creation` (exact
 /// match — must live at module level, not under `mod tests { … }`).
 ///
-/// The test walks a real on-disk SQLite file through:
+/// The test walks a real on-disk `SQLite` file through:
 ///
 /// 1. Open a [`tempfile::TempDir`], create `KnowledgeGraph` against
 ///    `<tempdir>/knowledge.db`.
