@@ -11,4 +11,9 @@ description = "UCIL LSP diagnostics bridge: complements Serena with call/type hi
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+# Required for `Language` serde derives — future work-orders (F05 quality-issue
+# feeds, F06 architecture deltas, F08 integration fixtures) serialise language
+# tags into the knowledge-graph JSON blobs, so we pull the workspace `serde`
+# dep in at the F03 skeleton stage to avoid churn later.
+serde = { workspace = true }
 ucil-core = { path = "../ucil-core" }
