@@ -25,3 +25,16 @@ later succeeded.
 
 23 phase-1 features still unfinished — normal mid-phase state.
 Stop-hook's escalation-bypass handles this. Triage Bucket-A next pass.
+
+
+## Resolution
+
+Triage pass 3 force-halt (c3740c5) misclassified this admin heartbeat as Bucket E
+due to pass-3 default rule, ignoring the `blocks_loop: false` + `auto_resolve_on_next_triage: bucket-A` hints.
+
+Since filing, WO-0016 merged cleanly (77186fe, +1 → 26/234 features passing). Phase-1
+gate-expected-incomplete is normal mid-phase state. No source changes pending from this file.
+
+Monitor-session bypass: rule 6e/7e auto-resolve + resume.
+
+resolved: true
