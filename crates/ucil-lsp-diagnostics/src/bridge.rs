@@ -184,3 +184,123 @@ impl LspDiagnosticsBridge {
         &self.diagnostics_cache
     }
 }
+
+// ── Module-root acceptance tests (F03 oracle) ────────────────────────────────
+//
+// The two tests below live at module root (NOT inside `mod tests { … }`) to
+// honour the WO-0006/WO-0007/WO-0010/WO-0011/WO-0013 lesson — keeping them
+// at the module root means a future planner who promotes either test to a
+// frozen exact-match selector gets the path
+// `bridge::test_bridge_with_serena_managed_has_no_own_endpoints` rather than
+// `bridge::tests::…`.  The feature-list selector for `P1-W5-F03` is the
+// module prefix `bridge::` so either placement would match today, but the
+// project convention is module-root discipline for frozen-pattern-aligned
+// tests.
+
+/// Bridge with `serena_managed = true` has no UCIL-owned endpoints.
+///
+/// This is the `serena_managed` branch of `DEC-0008`: UCIL never
+/// spawns LSP subprocesses while Serena is active, so the endpoint
+/// map must be empty and every `endpoint_for` lookup must return
+/// `None`.
+#[cfg(test)]
+#[test]
+fn test_bridge_with_serena_managed_has_no_own_endpoints() {
+    let bridge = LspDiagnosticsBridge::new(true);
+    assert!(bridge.is_serena_managed());
+    assert!(bridge.endpoints().is_empty());
+    assert!(bridge.endpoint_for(Language::Python).is_none());
+    assert!(bridge.endpoint_for(Language::Rust).is_none());
+    assert!(bridge.endpoint_for(Language::TypeScript).is_none());
+    assert!(bridge.diagnostics_cache().is_empty());
+}
+
+/// Bridge with `serena_managed = false` also has no endpoints at
+/// `P1-W5-F03` — the degraded-mode branch does not spawn anything
+/// until `P1-W5-F07` lands.
+#[cfg(test)]
+#[test]
+fn test_bridge_without_serena_has_no_endpoints_until_f07() {
+    let bridge = LspDiagnosticsBridge::new(false);
+    assert!(!bridge.is_serena_managed());
+    assert!(bridge.endpoints().is_empty());
+    assert!(bridge.endpoint_for(Language::Rust).is_none());
+    assert!(bridge.endpoint_for(Language::Python).is_none());
+    assert!(bridge.diagnostics_cache().is_empty());
+}
+
+// ── Supporting tests (non-selector-frozen) ───────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::{BridgeError, LspDiagnosticsBridge};
+    use crate::types::{Language, LspEndpoint, LspTransport};
+
+    /// Round-trip `insert_endpoint` → `endpoint_for` → re-insert to
+    /// prove the endpoint map wiring is real.
+    ///
+    /// This test is not selector-frozen in `feature-list.json`, so
+    /// wrapping it in `mod tests { … }` (for shared helpers and
+    /// clearer `super::` imports) is acceptable.
+    #[test]
+    fn test_insert_endpoint_round_trip() {
+        let mut bridge = LspDiagnosticsBridge::new(false);
+        let pyright = LspEndpoint {
+            language: Language::Python,
+            transport: LspTransport::Standalone {
+                command: "pyright-langserver".into(),
+                args: vec!["--stdio".into()],
+            },
+        };
+
+        let prior = bridge.insert_endpoint(pyright.clone());
+        assert!(
+            prior.is_none(),
+            "first insert must return None (no prior entry)"
+        );
+        assert_eq!(bridge.endpoints().len(), 1);
+        assert_eq!(bridge.endpoint_for(Language::Python), Some(&pyright));
+        assert!(bridge.endpoint_for(Language::Rust).is_none());
+
+        // Re-insert a different endpoint for the same language — the
+        // prior entry should be returned per HashMap::insert semantics.
+        let ruff = LspEndpoint {
+            language: Language::Python,
+            transport: LspTransport::Standalone {
+                command: "ruff-lsp".into(),
+                args: vec![],
+            },
+        };
+        let displaced = bridge.insert_endpoint(ruff.clone());
+        assert_eq!(
+            displaced.as_ref(),
+            Some(&pyright),
+            "re-insert must return the prior entry"
+        );
+        assert_eq!(bridge.endpoint_for(Language::Python), Some(&ruff));
+    }
+
+    /// Exercises the `BridgeError::DuplicateEndpoint` variant's
+    /// `Debug` + `Display` surface.  The variant is not produced by
+    /// the skeleton itself (`insert_endpoint` returns the prior entry
+    /// rather than erroring), but the enum must still carry a usable
+    /// variant to anchor the crate-wide error surface for
+    /// `P1-W5-F04`/`F07`.
+    #[test]
+    fn test_bridge_error_duplicate_endpoint_render() {
+        let err = BridgeError::DuplicateEndpoint {
+            language: Language::Rust,
+        };
+        let rendered = format!("{err}");
+        assert!(
+            rendered.contains("duplicate endpoint"),
+            "Display must mention the failure mode, got: {rendered}"
+        );
+        assert!(
+            rendered.contains("Rust"),
+            "Display must name the colliding language, got: {rendered}"
+        );
+        // Debug must not panic.
+        let _ = format!("{err:?}");
+    }
+}
