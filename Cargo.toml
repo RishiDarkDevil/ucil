@@ -69,6 +69,9 @@ tree-sitter-json = "0.24"
 # Unique IDs for session manager
 uuid = { version = "1", features = ["v4", "serde"] }
 
+# Recursive filesystem walker for plugin discovery (Phase 1 Week 5)
+walkdir = "2"
+
 [profile.dev]
 opt-level = 0
 
