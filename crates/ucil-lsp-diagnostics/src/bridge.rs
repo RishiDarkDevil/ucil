@@ -24,9 +24,11 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use thiserror::Error;
 
+use crate::diagnostics::{DiagnosticsClient, SerenaClient};
 use crate::types::{Diagnostic, Language, LspEndpoint};
 
 // ── Errors ───────────────────────────────────────────────────────────────────
@@ -56,6 +58,23 @@ pub enum BridgeError {
     #[error("duplicate endpoint for language {language:?}")]
     DuplicateEndpoint {
         /// The [`Language`] whose endpoint was already registered.
+        language: Language,
+    },
+    /// The bridge was queried for an LSP endpoint in the degraded-mode
+    /// branch (Serena absent) but the endpoint map does not yet hold
+    /// an entry for the requested [`Language`].
+    ///
+    /// `P1-W5-F04` surfaces this variant from
+    /// [`LspDiagnosticsBridge::require_endpoint`] — the endpoint map
+    /// is populated exclusively by `P1-W5-F07`, so until that feature
+    /// lands every degraded-mode lookup returns this error.  The
+    /// variant is distinct from [`Self::DuplicateEndpoint`] so callers
+    /// (quality-issue feed `F05`, architecture feed `F06`) can fall
+    /// back to Serena-delegation or surface a clear "no LSP server
+    /// configured" diagnostic to the user.
+    #[error("no LSP server configured for language {language:?}")]
+    NoLspServerConfigured {
+        /// The [`Language`] for which no endpoint has been registered.
         language: Language,
     },
 }
@@ -104,6 +123,25 @@ pub struct LspDiagnosticsBridge {
     /// `textDocument/diagnostic` LSP responses.  Standard
     /// `HashMap` for the same reason as [`Self::endpoints`].
     diagnostics_cache: HashMap<PathBuf, Vec<Diagnostic>>,
+    /// Optional reference to an MCP-backed Serena client.
+    ///
+    /// Populated via [`Self::with_serena_client`] at `P1-W5-F04`;
+    /// [`Self::new`] leaves this as `None`.  When `Some`, the
+    /// [`Self::diagnostics_client`] accessor surfaces a typed
+    /// [`DiagnosticsClient`] that callers use to dispatch
+    /// `textDocument/diagnostic`, `callHierarchy/*`, and
+    /// `typeHierarchy/supertypes` requests through Serena's MCP
+    /// channel per `DEC-0008` §4.  When `None`, `diagnostics_client`
+    /// returns `None` — callers must fall back to the degraded-mode
+    /// path (populated by `P1-W5-F07`) or surface
+    /// [`BridgeError::NoLspServerConfigured`].
+    ///
+    /// The trait object is wrapped in `Arc` (rather than `Box`) so
+    /// each emitted [`DiagnosticsClient`] can clone-share ownership
+    /// cheaply — future daemon-integration WOs may spawn multiple
+    /// per-session `DiagnosticsClient`s from the same bridge.  The
+    /// `Send + Sync` bounds are required for `tokio::spawn`.
+    serena_client: Option<Arc<dyn SerenaClient + Send + Sync>>,
 }
 
 impl LspDiagnosticsBridge {
@@ -125,6 +163,35 @@ impl LspDiagnosticsBridge {
             serena_managed,
             endpoints: HashMap::new(),
             diagnostics_cache: HashMap::new(),
+            serena_client: None,
+        }
+    }
+
+    /// Construct a bridge pre-bound to a [`SerenaClient`] for the
+    /// `serena_managed = true` branch of `DEC-0008` §4.
+    ///
+    /// Unlike [`Self::new`], this constructor sets
+    /// [`Self::is_serena_managed`] to `true` and stores the provided
+    /// client so [`Self::diagnostics_client`] can hand a typed
+    /// [`DiagnosticsClient`] to callers.  The caller supplies the
+    /// concrete `SerenaClient` implementation — in Phase 1 the
+    /// daemon-integration WO will pass a `PluginManager`-backed
+    /// forwarder; unit tests may pass a `FakeSerenaClient` that
+    /// implements UCIL's own trait (not a mock of Serena's MCP wire
+    /// format — those are two structurally distinct concerns per
+    /// `DEC-0008`).
+    ///
+    /// This constructor is additive per `DEC-0008` §Consequences:
+    /// [`Self::new`]'s `(serena_managed: bool) -> Self` signature
+    /// stays byte-for-byte unchanged, so existing call sites are not
+    /// perturbed.
+    #[must_use]
+    pub fn with_serena_client(serena_client: Arc<dyn SerenaClient + Send + Sync>) -> Self {
+        Self {
+            serena_managed: true,
+            endpoints: HashMap::new(),
+            diagnostics_cache: HashMap::new(),
+            serena_client: Some(serena_client),
         }
     }
 
@@ -182,6 +249,54 @@ impl LspDiagnosticsBridge {
     #[must_use]
     pub const fn diagnostics_cache(&self) -> &HashMap<PathBuf, Vec<Diagnostic>> {
         &self.diagnostics_cache
+    }
+
+    /// Hand out a [`DiagnosticsClient`] when the bridge is bound to a
+    /// Serena client (via [`Self::with_serena_client`]); returns
+    /// `None` otherwise.
+    ///
+    /// `None` is returned in two legitimate cases:
+    ///
+    /// * The bridge was constructed through [`Self::new`] — no client
+    ///   has been bound yet (Phase 1 daemon-integration WO will pass
+    ///   one in via [`Self::with_serena_client`]).
+    /// * The bridge was constructed in degraded mode
+    ///   (`serena_managed = false`), in which case callers should
+    ///   resolve LSP requests through the endpoint map populated by
+    ///   `P1-W5-F07` — see [`Self::require_endpoint`].
+    ///
+    /// Each call clones the underlying `Arc`, so multiple callers
+    /// can hold their own `DiagnosticsClient` without contention.
+    #[must_use]
+    pub fn diagnostics_client(&self) -> Option<DiagnosticsClient> {
+        self.serena_client
+            .as_ref()
+            .map(|client| DiagnosticsClient::new(Arc::clone(client)))
+    }
+
+    /// Look up the degraded-mode LSP endpoint for `language`,
+    /// returning [`BridgeError::NoLspServerConfigured`] when no
+    /// endpoint has been registered.
+    ///
+    /// This is the typed counterpart of [`Self::endpoint_for`],
+    /// intended for `P1-W5-F07`'s degraded-mode dispatch path.  At
+    /// `P1-W5-F04` the endpoint map is still empty because `F07` has
+    /// not yet populated it, so this method currently always returns
+    /// the error when `is_serena_managed` is `false`.  Callers in the
+    /// `serena_managed = true` branch should use
+    /// [`Self::diagnostics_client`] instead; invoking this method on
+    /// a Serena-managed bridge is legal but simply mirrors the
+    /// empty-map behaviour (the degraded-mode map is empty by design
+    /// when Serena is active per `DEC-0008` §3).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BridgeError::NoLspServerConfigured`] when the bridge
+    /// has no endpoint registered for `language`.
+    pub fn require_endpoint(&self, language: Language) -> Result<&LspEndpoint, BridgeError> {
+        self.endpoints
+            .get(&language)
+            .ok_or(BridgeError::NoLspServerConfigured { language })
     }
 }
 

@@ -17,9 +17,13 @@
 #![deny(rustdoc::broken_intra_doc_links)]
 
 pub mod bridge;
+pub mod diagnostics;
 pub mod types;
 
 // ── Re-exports ────────────────────────────────────────────────────────────────
 
 pub use bridge::{BridgeError, LspDiagnosticsBridge};
+pub use diagnostics::{
+    DiagnosticsClient, DiagnosticsClientError, SerenaClient, LSP_REQUEST_TIMEOUT_MS,
+};
 pub use types::{Diagnostic, DiagnosticSeverity, Language, LspEndpoint, LspTransport};
