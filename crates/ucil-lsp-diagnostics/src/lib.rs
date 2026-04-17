@@ -1,8 +1,25 @@
 //! `ucil-lsp-diagnostics` — LSP diagnostics bridge: complements Serena with
 //! call hierarchy, type hierarchy, and diagnostics integration.
 //!
-//! This `lib.rs` only re-exports public sub-modules; all logic lives in sub-modules.
+//! Per master-plan §13, this crate owns the thin bridge that the daemon
+//! uses to surface LSP data into the fusion engine.  When Serena is
+//! registered as an ACTIVE plugin UCIL delegates LSP responsibilities
+//! to it (no duplicate subprocesses); otherwise the bridge spawns and
+//! supervises its own language servers.  Per `DEC-0008`, the
+//! Serena-delegation path runs through Serena's existing MCP channel
+//! rather than a literal shared socket.
+//!
+//! This `lib.rs` only re-exports public sub-modules; all logic lives in
+//! sub-modules.
 
 #![deny(warnings)]
 #![warn(clippy::all, clippy::pedantic, clippy::nursery)]
 #![deny(rustdoc::broken_intra_doc_links)]
+
+pub mod bridge;
+pub mod types;
+
+// ── Re-exports ────────────────────────────────────────────────────────────────
+
+pub use bridge::{BridgeError, LspDiagnosticsBridge};
+pub use types::{Diagnostic, DiagnosticSeverity, Language, LspEndpoint, LspTransport};
