@@ -20,6 +20,8 @@ struct Cli {
 enum Commands {
     /// Initialise a `.ucil/` directory in the current project.
     Init(commands::init::InitArgs),
+    /// Plugin management: `install <name>`, etc.
+    Plugin(commands::plugin::PluginArgs),
 }
 
 #[tokio::main]
@@ -28,5 +30,6 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Commands::Init(args) => commands::init::run(args).await,
+        Commands::Plugin(args) => commands::plugin::run(args).await,
     }
 }

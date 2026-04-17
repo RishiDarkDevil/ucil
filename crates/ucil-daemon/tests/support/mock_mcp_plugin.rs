@@ -1,16 +1,25 @@
 //! Mock MCP plugin binary used by the `ucil-daemon` plugin-manager
 //! integration tests.
 //!
-//! This binary speaks a tiny subset of JSON-RPC 2.0 over stdio:
+//! This binary speaks a tiny subset of JSON-RPC 2.0 over stdio, mirroring
+//! the handshake sequence a real MCP server must accept:
 //!
-//! * Reads one newline-terminated JSON-RPC request from stdin.
-//! * If the `method` field is `"tools/list"`, writes a newline-terminated
-//!   JSON-RPC 2.0 response whose `result.tools` array contains two static
+//! * Reads newline-terminated JSON-RPC frames from stdin in a loop,
+//!   exiting cleanly on EOF.
+//! * Requests carrying an `id` field receive a response frame; bare
+//!   notifications (no `id`) are processed silently — per the JSON-RPC 2.0
+//!   spec §4.1.
+//! * `tools/list` is answered with a `result.tools` array of two static
 //!   entries (`echo` and `reverse`).
-//! * If the method is anything else, writes a JSON-RPC error response
+//! * `initialize` is answered with a minimal MCP-shaped `result`
+//!   (`protocolVersion`, empty `capabilities`, `serverInfo`) so the plugin
+//!   manager's handshake can succeed.  The mock's capability surface is
+//!   intentionally trivial — it exists to exercise the UCIL plumbing, not
+//!   the MCP negotiation logic.
+//! * Any other method (e.g. `resources/list`) returns a JSON-RPC error
 //!   with code `-32601` (Method not found).
-//! * Parse errors on the request produce a JSON-RPC error with code
-//!   `-32700` (Parse error).
+//! * Parse errors on a request produce a JSON-RPC error with code
+//!   `-32700` (Parse error) and the loop continues.
 //!
 //! The binary is intentionally synchronous and uses `std::io` (not `tokio`)
 //! so that it has no transitive dependencies on the daemon's async runtime
@@ -26,43 +35,70 @@ fn main() -> io::Result<()> {
     let mut stdin = stdin.lock();
     let mut stdout = stdout.lock();
 
-    let mut line = String::new();
-    let n = stdin.read_line(&mut line)?;
-    if n == 0 {
-        // EOF before any request — nothing to reply to.
-        return Ok(());
-    }
+    loop {
+        let mut line = String::new();
+        let n = stdin.read_line(&mut line)?;
+        if n == 0 {
+            // EOF — client closed its end of the pipe.  Nothing left to
+            // respond to, so exit cleanly.
+            return Ok(());
+        }
+        let trimmed = line.trim_end();
+        if trimmed.is_empty() {
+            continue;
+        }
 
-    let response = build_response(line.trim_end());
-    let encoded = serde_json::to_string(&response)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    stdout.write_all(encoded.as_bytes())?;
-    stdout.write_all(b"\n")?;
-    stdout.flush()?;
-    Ok(())
+        if let Some(response) = build_response(trimmed) {
+            let encoded = serde_json::to_string(&response)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            stdout.write_all(encoded.as_bytes())?;
+            stdout.write_all(b"\n")?;
+            stdout.flush()?;
+        }
+    }
 }
 
 /// Build the JSON-RPC 2.0 response to a single request line.
 ///
-/// Pure function: no I/O, no side effects.  Separated from `main` so
-/// that a focused unit test could exercise it directly if needed.
-fn build_response(request_line: &str) -> Value {
+/// Returns `None` when the request is a notification (no `id` field) —
+/// per JSON-RPC §4.1 a notification MUST NOT receive a response.  Pure
+/// function: no I/O, no side effects.
+fn build_response(request_line: &str) -> Option<Value> {
     let request: Value = match serde_json::from_str(request_line) {
         Ok(v) => v,
         Err(_) => {
-            return json!({
+            return Some(json!({
                 "jsonrpc": "2.0",
                 "id": Value::Null,
                 "error": { "code": -32700, "message": "Parse error" }
-            });
+            }));
         }
     };
 
-    let id = request.get("id").cloned().unwrap_or(Value::Null);
+    // Notifications (no `id` field) receive no response per the spec.
+    let raw_id = request.get("id").cloned();
+    let is_notification = raw_id.is_none();
+    if is_notification {
+        return None;
+    }
+
+    let id = raw_id.unwrap_or(Value::Null);
     let method = request.get("method").and_then(Value::as_str).unwrap_or("");
 
-    if method == "tools/list" {
-        json!({
+    match method {
+        "initialize" => Some(json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": { "tools": {} },
+                "serverInfo": {
+                    "name": "mock-mcp-plugin",
+                    "version": "0.1.0"
+                }
+            }
+        })),
+        "tools/list" => Some(json!({
             "jsonrpc": "2.0",
             "id": id,
             "result": {
@@ -79,12 +115,11 @@ fn build_response(request_line: &str) -> Value {
                     }
                 ]
             }
-        })
-    } else {
-        json!({
+        })),
+        _ => Some(json!({
             "jsonrpc": "2.0",
             "id": id,
             "error": { "code": -32601, "message": "Method not found" }
-        })
+        })),
     }
 }

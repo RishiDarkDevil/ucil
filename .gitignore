@@ -30,6 +30,9 @@ __pycache__/
 # --- UCIL runtime (per-project) ---
 .ucil/
 
+# --- Serena per-project cache (written by `serena-mcp-server --project .`) ---
+.serena/
+
 # --- Adapter build outputs ---
 adapters/*/dist/
 

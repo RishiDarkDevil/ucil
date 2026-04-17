@@ -20,7 +20,10 @@ toml.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 serde.workspace = true
+thiserror.workspace = true
+walkdir.workspace = true
 ucil-core = { path = "../ucil-core" }
+ucil-daemon = { path = "../ucil-daemon" }
 
 [dev-dependencies]
 tempfile.workspace = true

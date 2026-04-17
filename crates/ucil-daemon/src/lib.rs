@@ -16,6 +16,8 @@ pub use plugin_manager::{
     PluginRuntime, PluginSection, PluginState, TransportSection, DEFAULT_IDLE_TIMEOUT_MINUTES,
     HEALTH_CHECK_TIMEOUT_MS,
 };
+// `health_check_with_timeout` is a method on `PluginManager`; it is reached via the
+// re-exported `PluginManager` above — no additional item-level re-export is needed.
 pub use server::{
     ceqp_input_schema, ucil_tools, McpError, McpServer, ToolDescriptor, JSONRPC_VERSION,
     MCP_PROTOCOL_VERSION, READ_TIMEOUT_MS, TOOL_COUNT, WRITE_TIMEOUT_MS,

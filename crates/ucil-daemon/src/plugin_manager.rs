@@ -68,8 +68,6 @@ use tokio::{
 /// state.
 pub const HEALTH_CHECK_TIMEOUT_MS: u64 = 5_000;
 
-const HEALTH_CHECK_TIMEOUT: Duration = Duration::from_millis(HEALTH_CHECK_TIMEOUT_MS);
-
 /// Default idle-timeout, in minutes, for a HOT/COLD plugin when the
 /// manifest does not set `[lifecycle] idle_timeout_minutes` (master-plan
 /// §14.1 shipped example default).
@@ -493,11 +491,41 @@ impl PluginManager {
     /// * [`PluginError::ProtocolError`] — malformed or error-kind
     ///   response frame.
     pub async fn health_check(manifest: &PluginManifest) -> Result<PluginHealth, PluginError> {
+        Self::health_check_with_timeout(manifest, HEALTH_CHECK_TIMEOUT_MS).await
+    }
+
+    /// Variant of [`Self::health_check`] that accepts a caller-supplied
+    /// timeout budget.
+    ///
+    /// The existing 5 s [`HEALTH_CHECK_TIMEOUT_MS`] is appropriate for
+    /// plugins that are already installed on disk (e.g. HOT/COLD
+    /// lifecycle ticks, in-flight daemon probes).  Callers that launch
+    /// a plugin via a package manager on a cold cache — for example
+    /// `uvx --from git+<url>@<ref> serena-mcp-server` — should pass a
+    /// larger budget (≥30 s on first run) because uvx may have to
+    /// download, build, and install Python dependencies before the
+    /// plugin's `tools/list` reply can arrive.
+    ///
+    /// # Errors
+    ///
+    /// * [`PluginError::UnsupportedTransport`] / [`PluginError::Spawn`]
+    ///   — as for [`Self::spawn`].
+    /// * [`PluginError::MissingStdio`] — child did not expose a piped
+    ///   stdin or stdout.
+    /// * [`PluginError::StdioTransport`] — underlying I/O error.
+    /// * [`PluginError::HealthCheckTimeout`] — no response inside the
+    ///   caller-supplied timeout budget.  The timeout is user-supplied;
+    ///   callers on slow-uvx-install paths should budget ≥30 s on
+    ///   first-run.
+    /// * [`PluginError::ProtocolError`] — malformed or error-kind
+    ///   response frame.
+    pub async fn health_check_with_timeout(
+        manifest: &PluginManifest,
+        timeout_ms: u64,
+    ) -> Result<PluginHealth, PluginError> {
+        let budget = Duration::from_millis(timeout_ms);
         let mut child = Self::spawn(manifest)?;
-        let result = timeout(HEALTH_CHECK_TIMEOUT, async {
-            Self::run_tools_list(&mut child).await
-        })
-        .await;
+        let result = timeout(budget, async { Self::run_tools_list(&mut child).await }).await;
 
         // Always try to reap the child — don't let it linger if the
         // health check timed out.
@@ -507,9 +535,7 @@ impl PluginManager {
         let tool_names = match result {
             Ok(inner) => inner?,
             Err(_elapsed) => {
-                return Err(PluginError::HealthCheckTimeout {
-                    ms: HEALTH_CHECK_TIMEOUT_MS,
-                });
+                return Err(PluginError::HealthCheckTimeout { ms: timeout_ms });
             }
         };
 
@@ -529,13 +555,27 @@ impl PluginManager {
         })
     }
 
-    /// Send a JSON-RPC 2.0 `tools/list` request to the child's stdin,
-    /// read a single newline-terminated response frame from stdout, and
-    /// return the list of tool names.
+    /// Drive the MCP handshake and return the plugin's advertised tool
+    /// names.
     ///
-    /// Extracted from [`Self::health_check`] so the timeout wrapper can
-    /// cover the entire I/O choreography without duplicating it across
-    /// three separate `.await` points.
+    /// Per the Model Context Protocol (spec 2024-11-05 onward) every
+    /// server MUST process an `initialize` round-trip followed by the
+    /// `notifications/initialized` notification before it accepts any
+    /// other request; real MCP servers such as Serena reject a bare
+    /// `tools/list` with JSON-RPC error `-32602`.  This helper therefore
+    /// performs the full handshake:
+    ///
+    /// 1. Send `initialize` with the minimal client-capabilities frame.
+    /// 2. Read and discard the server's `initialize` response — we treat
+    ///    it as best-effort so the same code path works against the
+    ///    in-tree `mock-mcp-plugin` binary and against real servers.
+    /// 3. Send `notifications/initialized` (no response expected).
+    /// 4. Send `tools/list` and parse the response frame.
+    ///
+    /// Extracted from [`Self::health_check`] so the outer
+    /// [`tokio::time::timeout`] wrapper covers the entire handshake
+    /// without duplicating the timeout across three separate `.await`
+    /// points.
     async fn run_tools_list(child: &mut Child) -> Result<Vec<String>, PluginError> {
         let mut stdin = child
             .stdin
@@ -546,24 +586,51 @@ impl PluginManager {
             .take()
             .ok_or(PluginError::MissingStdio("stdout"))?;
 
-        let request = br#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}
+        // ── Step 1: initialize ──────────────────────────────────────────
+        let initialize = br#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"ucil","version":"0.1.0"}}}
 "#;
         stdin
-            .write_all(request)
+            .write_all(initialize)
             .await
             .map_err(PluginError::StdioTransport)?;
         stdin.flush().await.map_err(PluginError::StdioTransport)?;
-        // Signal EOF so the mock plugin (and any real plugin that reads
-        // one request per invocation) can exit cleanly.
-        drop(stdin);
 
         let mut reader = BufReader::new(stdout);
-        let mut line = String::new();
+        let mut initialize_response = String::new();
         reader
-            .read_line(&mut line)
+            .read_line(&mut initialize_response)
             .await
             .map_err(PluginError::StdioTransport)?;
-        parse_tools_list_response(&line)
+        // Best-effort: a JSON-RPC error here (e.g. a mock that doesn't
+        // speak `initialize`) is swallowed so the same code path drives
+        // both the mock and real MCP servers.
+
+        // ── Step 2: notifications/initialized (no response expected) ────
+        let initialized = br#"{"jsonrpc":"2.0","method":"notifications/initialized"}
+"#;
+        stdin
+            .write_all(initialized)
+            .await
+            .map_err(PluginError::StdioTransport)?;
+        stdin.flush().await.map_err(PluginError::StdioTransport)?;
+
+        // ── Step 3: tools/list ──────────────────────────────────────────
+        let tools_list = br#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}
+"#;
+        stdin
+            .write_all(tools_list)
+            .await
+            .map_err(PluginError::StdioTransport)?;
+        stdin.flush().await.map_err(PluginError::StdioTransport)?;
+        // Signal EOF so the plugin's loop exits cleanly after responding.
+        drop(stdin);
+
+        let mut tools_response = String::new();
+        reader
+            .read_line(&mut tools_response)
+            .await
+            .map_err(PluginError::StdioTransport)?;
+        parse_tools_list_response(&tools_response)
     }
 
     // ── HOT/COLD lifecycle façade ────────────────────────────────────────────
