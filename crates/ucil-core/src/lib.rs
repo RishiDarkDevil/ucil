@@ -8,6 +8,7 @@
 #![deny(rustdoc::broken_intra_doc_links)]
 
 pub mod incremental;
+pub mod knowledge_graph;
 pub mod otel;
 pub mod schema_migration;
 pub mod types;
@@ -18,6 +19,7 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 // ── Re-exports ────────────────────────────────────────────────────────────────
 
 pub use incremental::{dependent_metric, symbol_count, FileRevision, UcilDatabase, UcilDb};
+pub use knowledge_graph::{KnowledgeGraph, KnowledgeGraphError};
 pub use otel::{init_tracer, shutdown_tracer};
 pub use schema_migration::{MigrationError, SCHEMA_VERSION};
 pub use types::{
