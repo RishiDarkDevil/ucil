@@ -7,6 +7,7 @@ blocks_loop: false
 session_role: monitor
 session_work: resolved-pass3-misclassified-heartbeat-0205; ran-resume.sh-yes; loop-resumed-planner-iter6-spawned
 auto_resolve_on_next_triage: bucket-A
+resolved: true
 ---
 
 # Phase 1 gate incomplete — monitor session (post pass-3 resume)
@@ -22,3 +23,14 @@ New run-phase PID 367357 + planner iter6 PID 367851 active.
 
 22 phase-1 features still unfinished — normal mid-phase state.
 No source code changes this session. Triage Bucket-A on next pass.
+
+## Resolution
+
+Bucket A (auto-resolve). Triage pass-1 on 2026-04-18 confirms the loop
+progressed cleanly after the resume: WO-0016 merged (commit `77186fe`,
+P1-W5-F05 `diagnostics-quality-pipeline`) and WO-0017 merged (commit
+`54be049`, P1-W2-F02 `treesitter-symbol-extraction`). Phase-1 feature
+count advanced from 11 → 13 passing. Gate-incomplete is the expected
+mid-phase state (13/34 phase-1 features passing is normal for week 1);
+no material action remains. Escalation was tagged
+`auto_resolve_on_next_triage: bucket-A` by its author.
