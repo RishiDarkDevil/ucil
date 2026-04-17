@@ -63,4 +63,19 @@ once `origin/main` contains `c42cd94`.
 - If the outage persists into the next phase tick, escalate to
   Bucket E so the user can restore connectivity.
 
-resolved: false
+## Resolution
+
+**Resolved at**: 2026-04-17T11:00:00Z (triage pass 1)
+**Resolved by**: triage
+
+Network connectivity has been restored. `origin/main` is now at
+`f0683d1c2257e17bb87bac801ccbf86abfb5e7cd`, which is a strict
+descendant of `c42cd94` (the critic-report commit). Subsequent
+commits `bc692d9`, `a16f11c`, and the merge commit `f0683d1`
+(WO-0011 merged into main) were all successfully pushed. The
+critic report is published, WO-0011 passed verification, and
+features `P1-W4-F01` and `P1-W4-F06` were flipped to `passes=true`.
+
+Bucket A — admin, condition resolved in HEAD.
+
+resolved: true
