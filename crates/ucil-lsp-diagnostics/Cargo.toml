@@ -16,4 +16,12 @@ tracing.workspace = true
 # tags into the knowledge-graph JSON blobs, so we pull the workspace `serde`
 # dep in at the F03 skeleton stage to avoid churn later.
 serde = { workspace = true }
+# LSP 3.17 request/response types — used by the `diagnostics` module to
+# decode `textDocument/diagnostic`, `callHierarchy/*`, and
+# `typeHierarchy/supertypes` payloads.  Added in WO-0015 for P1-W5-F04.
+lsp-types = { workspace = true }
+# `async-trait` macro — allows the `SerenaClient` trait in
+# `diagnostics.rs` to declare async methods while remaining object-safe
+# so the bridge can store an `Arc<dyn SerenaClient + Send + Sync>`.
+async-trait = { workspace = true }
 ucil-core = { path = "../ucil-core" }

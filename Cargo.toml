@@ -72,6 +72,18 @@ uuid = { version = "1", features = ["v4", "serde"] }
 # Recursive filesystem walker for plugin discovery (Phase 1 Week 5)
 walkdir = "2"
 
+# LSP community types (LSP 3.17 wire structs) — used by
+# `ucil-lsp-diagnostics::diagnostics` for `Diagnostic`,
+# `CallHierarchyItem`, `CallHierarchyIncomingCall`,
+# `CallHierarchyOutgoingCall`, and `TypeHierarchyItem` so UCIL does not
+# hand-roll LSP wire types.  Introduced in Phase 1 Week 5 (WO-0015).
+lsp-types = "0.95"
+
+# Object-safe async trait macro — used by the `SerenaClient` trait in
+# `ucil-lsp-diagnostics` so the bridge can hold an
+# `Arc<dyn SerenaClient + Send + Sync>` across `.await` points.
+async-trait = "0.1"
+
 [profile.dev]
 opt-level = 0
 
