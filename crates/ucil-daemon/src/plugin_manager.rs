@@ -68,8 +68,6 @@ use tokio::{
 /// state.
 pub const HEALTH_CHECK_TIMEOUT_MS: u64 = 5_000;
 
-const HEALTH_CHECK_TIMEOUT: Duration = Duration::from_millis(HEALTH_CHECK_TIMEOUT_MS);
-
 /// Default idle-timeout, in minutes, for a HOT/COLD plugin when the
 /// manifest does not set `[lifecycle] idle_timeout_minutes` (master-plan
 /// §14.1 shipped example default).
@@ -493,11 +491,41 @@ impl PluginManager {
     /// * [`PluginError::ProtocolError`] — malformed or error-kind
     ///   response frame.
     pub async fn health_check(manifest: &PluginManifest) -> Result<PluginHealth, PluginError> {
+        Self::health_check_with_timeout(manifest, HEALTH_CHECK_TIMEOUT_MS).await
+    }
+
+    /// Variant of [`Self::health_check`] that accepts a caller-supplied
+    /// timeout budget.
+    ///
+    /// The existing 5 s [`HEALTH_CHECK_TIMEOUT_MS`] is appropriate for
+    /// plugins that are already installed on disk (e.g. HOT/COLD
+    /// lifecycle ticks, in-flight daemon probes).  Callers that launch
+    /// a plugin via a package manager on a cold cache — for example
+    /// `uvx --from git+<url>@<ref> serena-mcp-server` — should pass a
+    /// larger budget (≥30 s on first run) because uvx may have to
+    /// download, build, and install Python dependencies before the
+    /// plugin's `tools/list` reply can arrive.
+    ///
+    /// # Errors
+    ///
+    /// * [`PluginError::UnsupportedTransport`] / [`PluginError::Spawn`]
+    ///   — as for [`Self::spawn`].
+    /// * [`PluginError::MissingStdio`] — child did not expose a piped
+    ///   stdin or stdout.
+    /// * [`PluginError::StdioTransport`] — underlying I/O error.
+    /// * [`PluginError::HealthCheckTimeout`] — no response inside the
+    ///   caller-supplied timeout budget.  The timeout is user-supplied;
+    ///   callers on slow-uvx-install paths should budget ≥30 s on
+    ///   first-run.
+    /// * [`PluginError::ProtocolError`] — malformed or error-kind
+    ///   response frame.
+    pub async fn health_check_with_timeout(
+        manifest: &PluginManifest,
+        timeout_ms: u64,
+    ) -> Result<PluginHealth, PluginError> {
+        let budget = Duration::from_millis(timeout_ms);
         let mut child = Self::spawn(manifest)?;
-        let result = timeout(HEALTH_CHECK_TIMEOUT, async {
-            Self::run_tools_list(&mut child).await
-        })
-        .await;
+        let result = timeout(budget, async { Self::run_tools_list(&mut child).await }).await;
 
         // Always try to reap the child — don't let it linger if the
         // health check timed out.
@@ -507,9 +535,7 @@ impl PluginManager {
         let tool_names = match result {
             Ok(inner) => inner?,
             Err(_elapsed) => {
-                return Err(PluginError::HealthCheckTimeout {
-                    ms: HEALTH_CHECK_TIMEOUT_MS,
-                });
+                return Err(PluginError::HealthCheckTimeout { ms: timeout_ms });
             }
         };
 
