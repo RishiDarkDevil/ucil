@@ -69,6 +69,15 @@ tree-sitter-json = "0.24"
 # Unique IDs for session manager
 uuid = { version = "1", features = ["v4", "serde"] }
 
+# Bi-temporal timestamps for the knowledge graph (`t_valid_from`,
+# `t_valid_to`, and the `get_entity_as_of` range query).
+# `default-features = false` avoids the `oldtime` / `time 0.1`
+# transitive chain which trips clippy-deny warnings on some rustc
+# versions; the subset `["clock", "serde", "std"]` is all we need —
+# `Utc::now()`, serde round-trips on `DateTime<Utc>`, and standard
+# library integration.  Used by `ucil-core::knowledge_graph` (WO-0020).
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
+
 # Recursive filesystem walker for plugin discovery (Phase 1 Week 5)
 walkdir = "2"
 
