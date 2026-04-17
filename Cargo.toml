@@ -90,6 +90,19 @@ async-trait = "0.1"
 # `ucil-treesitter::symbols` (Phase 1 Week 2, WO-0017).
 streaming-iterator = "0.1"
 
+# LMDB embedded key-value store (typed wrapper via `heed`) — backs the
+# tree-sitter tag cache keyed by `(file_path, mtime)`.  Used by
+# `ucil-treesitter::tag_cache` (Phase 1 Week 2, WO-0018).  `heed` 0.20
+# bundles `lmdb-master3-sys` which statically links LMDB — no system
+# LMDB required.
+heed = "0.20"
+
+# Binary serialization for the LMDB value codec (tag cache).  `bincode` 1.3
+# is the stable, widely-used serde-integrated binary encoder; v2 (alpha)
+# adds zero-copy borrowing but breaks API — v1 is the pragmatic pick for
+# Phase 1 Week 2 (WO-0018).
+bincode = "1.3"
+
 [profile.dev]
 opt-level = 0
 
