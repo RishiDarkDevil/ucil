@@ -18,6 +18,7 @@
 
 pub mod bridge;
 pub mod diagnostics;
+pub mod quality_pipeline;
 pub mod types;
 
 // ── Re-exports ────────────────────────────────────────────────────────────────
@@ -25,5 +26,9 @@ pub mod types;
 pub use bridge::{BridgeError, LspDiagnosticsBridge};
 pub use diagnostics::{
     DiagnosticsClient, DiagnosticsClientError, SerenaClient, LSP_REQUEST_TIMEOUT_MS,
+};
+pub use quality_pipeline::{
+    category_from_severity, language_default_server, persist_diagnostics, severity_to_quality,
+    QualityPipelineError,
 };
 pub use types::{Diagnostic, DiagnosticSeverity, Language, LspEndpoint, LspTransport};
