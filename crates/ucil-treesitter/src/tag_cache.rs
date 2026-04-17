@@ -38,8 +38,8 @@
 //! are stored at the same mtime.  Big-endian `i128` encoding makes the
 //! byte-lexicographic ordering imposed by LMDB's default comparator
 //! agree with numerical ordering for non-negative nanoseconds (all
-//! post-epoch mtimes), and yields an efficient prefix scan for the
-//! future `invalidate_path` helper — the prefix `[path_bytes, 0x00]`
+//! post-epoch mtimes), and yields an efficient prefix scan for
+//! [`TagCache::invalidate_path`] — the prefix `[path_bytes, 0x00]`
 //! captures every `(path, mtime)` pair for that path.
 //!
 //! ## Value encoding
@@ -59,12 +59,11 @@
 //!
 //! # Tracing
 //!
-//! [`TagCache::get`] and [`TagCache::put`] open `tracing` spans at
-//! `DEBUG` level named `ucil.treesitter.tag_cache_get` and
-//! `ucil.treesitter.tag_cache_put` respectively, per master-plan §15.2
-//! (`ucil.<layer>.<op>` naming).  The invalidation span
-//! `ucil.treesitter.tag_cache_invalidate` is added alongside
-//! `invalidate_path` in a follow-up commit.
+//! [`TagCache::get`], [`TagCache::put`], and [`TagCache::invalidate_path`]
+//! open `tracing` spans at `DEBUG` level named
+//! `ucil.treesitter.tag_cache_get`, `ucil.treesitter.tag_cache_put`, and
+//! `ucil.treesitter.tag_cache_invalidate` respectively, per master-plan
+//! §15.2 (`ucil.<layer>.<op>` naming).
 
 // Like `parser.rs` and `symbols.rs`, types inside the `tag_cache` module
 // share a name-prefix with the module; pedantic's
@@ -273,6 +272,90 @@ impl TagCache {
         wtxn.commit()?;
         Ok(())
     }
+
+    /// Remove every entry whose key starts with `path`, regardless of
+    /// mtime.  Returns the number of entries actually deleted.
+    ///
+    /// Invalidating `path = /foo` does **not** affect `/foo/bar` — the
+    /// NUL sentinel keeps prefixes disjoint.
+    ///
+    /// # Errors
+    ///
+    /// - [`TagCacheError::InvalidKey`] if the encoded path is empty
+    ///   (should not happen for any real [`Path`]).
+    /// - [`TagCacheError::Lmdb`] on transaction or cursor failure.
+    #[tracing::instrument(
+        name = "ucil.treesitter.tag_cache_invalidate",
+        level = "debug",
+        skip(self),
+        fields(path = %path.display())
+    )]
+    pub fn invalidate_path(&self, path: &Path) -> Result<usize, TagCacheError> {
+        let prefix = encode_path_prefix(path)?;
+        let mut wtxn = self.env.write_txn()?;
+        // Iterate every key matching the `path_bytes || 0x00` prefix and
+        // delete it.  We use `prefix_iter_mut` + `unsafe del_current` —
+        // the `unsafe` boundary is LMDB's rule "don't keep references
+        // from a previous cursor read across a write"; we take ownership
+        // of nothing from the yielded tuple (we only advance the
+        // iterator and delete), so the invariant holds.
+        let mut iter = self.db.prefix_iter_mut(&mut wtxn, prefix.as_slice())?;
+        let mut removed: usize = 0;
+        // A `for` loop over `iter` would consume the iterator so we could
+        // no longer call `iter.del_current()`; the `while let` is required
+        // here.
+        #[allow(clippy::while_let_on_iterator)]
+        while let Some(entry) = iter.next() {
+            // `entry` is `Result<(&[u8], &[u8]), heed::Error>`; propagate
+            // any decode error before advancing.
+            let _ = entry?;
+            // SAFETY: We own the `prefix` buffer and hold no borrow into
+            // the database mapping across this call — the local `entry`
+            // binding is only used for error propagation, not to read
+            // the key or value bytes after `del_current`.
+            unsafe { iter.del_current()? };
+            removed += 1;
+        }
+        drop(iter);
+        wtxn.commit()?;
+        Ok(removed)
+    }
+
+    /// Return the total number of entries currently stored.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TagCacheError::Lmdb`] if a read transaction cannot be
+    /// started or the DB stat lookup fails.
+    pub fn len(&self) -> Result<usize, TagCacheError> {
+        let rtxn = self.env.read_txn()?;
+        let n = self.db.len(&rtxn)?;
+        // `db.len` is `u64`; clamp to `usize::MAX` on 32-bit builds
+        // rather than error — this cache cannot realistically exceed
+        // 2^32 entries on the supported platforms.
+        Ok(usize::try_from(n).unwrap_or(usize::MAX))
+    }
+
+    /// Return `true` iff the cache holds no entries.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`TagCache::len`].
+    pub fn is_empty(&self) -> Result<bool, TagCacheError> {
+        Ok(self.len()? == 0)
+    }
+
+    /// Remove every entry from the cache.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TagCacheError::Lmdb`] on transaction or clear failure.
+    pub fn clear(&self) -> Result<(), TagCacheError> {
+        let mut wtxn = self.env.write_txn()?;
+        self.db.clear(&mut wtxn)?;
+        wtxn.commit()?;
+        Ok(())
+    }
 }
 
 // ── Key codec ──────────────────────────────────────────────────────────────
@@ -291,6 +374,19 @@ fn encode_key(path: &Path, mtime: SystemTime) -> Result<Vec<u8>, TagCacheError> 
     out.extend_from_slice(path_bytes);
     out.push(PATH_MTIME_SEP);
     out.extend_from_slice(&nanos.to_be_bytes());
+    Ok(out)
+}
+
+/// Encode the prefix half of a key — `[ path_bytes ] [ 0x00 ]` — for
+/// range / prefix operations.
+fn encode_path_prefix(path: &Path) -> Result<Vec<u8>, TagCacheError> {
+    let path_bytes = path.as_os_str().as_encoded_bytes();
+    if path_bytes.is_empty() {
+        return Err(TagCacheError::InvalidKey(path.to_path_buf()));
+    }
+    let mut out = Vec::with_capacity(path_bytes.len() + 1);
+    out.extend_from_slice(path_bytes);
+    out.push(PATH_MTIME_SEP);
     Ok(out)
 }
 
@@ -427,6 +523,58 @@ fn tag_cache_different_mtime_is_distinct_entry() {
 
 #[cfg(test)]
 #[test]
+fn tag_cache_invalidate_path_removes_all_mtimes() {
+    let (_dir, cache) = open_cache();
+    let path = Path::new("src/gamma.rs");
+    let mtimes: [SystemTime; 3] = [
+        UNIX_EPOCH + Duration::from_secs(1_000),
+        UNIX_EPOCH + Duration::from_secs(2_000),
+        UNIX_EPOCH + Duration::from_secs(3_000),
+    ];
+    for (i, mt) in mtimes.iter().enumerate() {
+        let line = u32::try_from(i).expect("test index fits u32") + 1;
+        let syms = vec![sample_symbol(&format!("s{i}"), "src/gamma.rs", line)];
+        cache.put(path, *mt, &syms).expect("put");
+    }
+
+    assert_eq!(cache.len().expect("len"), 3);
+
+    let removed = cache.invalidate_path(path).expect("invalidate");
+    assert_eq!(removed, 3, "every mtime under the path must be removed");
+    assert_eq!(cache.len().expect("len after"), 0);
+    for mt in mtimes {
+        assert!(cache.get(path, mt).expect("get after").is_none());
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn tag_cache_invalidate_path_leaves_other_paths_intact() {
+    let (_dir, cache) = open_cache();
+    let path_a = Path::new("src/keep_me.rs");
+    let path_b = Path::new("src/wipe_me.rs");
+    let mt = UNIX_EPOCH + Duration::from_secs(1_700_000_100);
+
+    let keepers = vec![sample_symbol("keeper", "src/keep_me.rs", 1)];
+    let wipers = vec![sample_symbol("wiper", "src/wipe_me.rs", 1)];
+    cache.put(path_a, mt, &keepers).expect("put a");
+    cache.put(path_b, mt, &wipers).expect("put b");
+
+    let removed = cache.invalidate_path(path_b).expect("invalidate b");
+    assert_eq!(removed, 1);
+    assert_eq!(
+        cache.get(path_a, mt).expect("get a").unwrap(),
+        keepers,
+        "path_a must survive invalidation of path_b"
+    );
+    assert!(
+        cache.get(path_b, mt).expect("get b").is_none(),
+        "path_b must be gone"
+    );
+}
+
+#[cfg(test)]
+#[test]
 fn tag_cache_reopen_persists_entries() {
     let dir = TempDir::new().expect("temp dir");
     let path = Path::new("src/persist.rs");
@@ -542,6 +690,30 @@ fn tag_cache_warm_read_under_1ms() {
 
 #[cfg(test)]
 #[test]
+fn tag_cache_len_reflects_writes() {
+    let (_dir, cache) = open_cache();
+    let base_mt = UNIX_EPOCH + Duration::from_secs(1_700_000_600);
+
+    assert_eq!(cache.len().expect("len empty"), 0);
+    assert!(cache.is_empty().expect("is_empty empty"));
+
+    for i in 0..5u64 {
+        let p = PathBuf::from(format!("src/len_{i}.rs"));
+        let syms = vec![sample_symbol("x", "src/x.rs", 1)];
+        cache
+            .put(&p, base_mt + Duration::from_secs(i), &syms)
+            .expect("put");
+    }
+    assert_eq!(cache.len().expect("len 5"), 5);
+    assert!(!cache.is_empty().expect("is_empty 5"));
+
+    cache.clear().expect("clear");
+    assert_eq!(cache.len().expect("len after clear"), 0);
+    assert!(cache.is_empty().expect("is_empty after clear"));
+}
+
+#[cfg(test)]
+#[test]
 fn tag_cache_key_ordering_is_lexicographic() {
     // Writes at mtimes t1 < t2 < t3 for one path — iterate the DB and
     // assert the natural order preserves ascending mtime.  This pins
@@ -583,6 +755,19 @@ fn tag_cache_key_ordering_is_lexicographic() {
 
 #[cfg(test)]
 #[test]
+fn tag_cache_invalidate_path_on_missing_path_is_noop() {
+    let (_dir, cache) = open_cache();
+    let removed = cache
+        .invalidate_path(Path::new("/does/not/exist.rs"))
+        .expect("invalidate unknown");
+    assert_eq!(
+        removed, 0,
+        "invalidating an unknown path removes zero entries"
+    );
+}
+
+#[cfg(test)]
+#[test]
 fn tag_cache_put_overwrites_same_key() {
     let (_dir, cache) = open_cache();
     let path = Path::new("src/overwrite.rs");
@@ -600,6 +785,11 @@ fn tag_cache_put_overwrites_same_key() {
     assert_eq!(
         got, second,
         "put at an existing key must overwrite, not accumulate"
+    );
+    assert_eq!(
+        cache.len().expect("len"),
+        1,
+        "only one entry must remain for a single (path, mtime)"
     );
 }
 
