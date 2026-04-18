@@ -904,6 +904,54 @@ impl KnowledgeGraph {
         let row_result = stmt.query_row(rusqlite::params![qualified_name, at_str], entity_from_row);
         Ok(row_result.map(Some).or_else(absent_to_none)?)
     }
+
+    // ── Hot-staging writers (P1-W4-F08) ─────────────────────────────
+    //
+    // Routes every hot-tier insert through `execute_in_transaction`
+    // (BEGIN IMMEDIATE per master-plan §11 line 1117) so the
+    // merge-consolidator's background sweep doesn't collide with
+    // concurrent producer writes.
+
+    /// Stage a [`HotObservation`] into the `hot_observations` table.
+    ///
+    /// `created_at` is set by the schema default (`datetime('now')`)
+    /// and `promoted_to_warm` starts at `0`; both are managed by the
+    /// merge-consolidator and are not part of the writer contract.
+    /// Returns the new `hot_observations.id`.
+    ///
+    /// # Errors
+    ///
+    /// * [`KnowledgeGraphError::Sqlite`] — transaction open, statement
+    ///   prepare, bind, or `RETURNING id` fetch failed.
+    #[tracing::instrument(
+        level = "debug",
+        skip(self, observation),
+        fields(session_id = observation.session_id.as_deref().unwrap_or("")),
+        name = "ucil.core.kg.stage_hot_observation",
+    )]
+    pub fn stage_hot_observation(
+        &mut self,
+        observation: &HotObservation,
+    ) -> Result<i64, KnowledgeGraphError> {
+        self.execute_in_transaction(|tx| {
+            let mut stmt = tx.prepare(
+                "INSERT INTO hot_observations (\
+                    raw_text, session_id, related_file, related_symbol\
+                 ) VALUES (?1, ?2, ?3, ?4) \
+                 RETURNING id;",
+            )?;
+            let id: i64 = stmt.query_row(
+                rusqlite::params![
+                    observation.raw_text,
+                    observation.session_id,
+                    observation.related_file,
+                    observation.related_symbol,
+                ],
+                |row| row.get::<_, i64>(0),
+            )?;
+            Ok(id)
+        })
+    }
 }
 
 // ── Row decoders ─────────────────────────────────────────────────────────────
@@ -1557,4 +1605,51 @@ fn test_bi_temporal_as_of() {
         miss.is_none(),
         "pre-1999 has no valid version, got {miss:?}",
     );
+}
+
+/// `test_hot_staging_writes` — **frozen F08 acceptance selector**
+/// (`knowledge_graph::test_hot_staging_writes`).
+///
+/// Exercises the hot-staging writers introduced by WO-0024 (P1-W4-F08):
+/// [`KnowledgeGraph::stage_hot_observation`].  Commit 7 extends this
+/// test to also cover `stage_hot_convention_signal` and
+/// `stage_hot_architecture_delta` — all three write through
+/// `execute_in_transaction` and satisfy the master-plan §11 line 1117
+/// BEGIN IMMEDIATE invariant.
+///
+/// No mocks of rusqlite — the test runs against a real
+/// tempfile-backed `SQLite` db via `tempfile::TempDir` per phase-log
+/// invariant 1.
+#[cfg(test)]
+#[test]
+fn test_hot_staging_writes() {
+    use tempfile::TempDir;
+
+    let tmp = TempDir::new().expect("tempdir must be creatable");
+    let mut kg =
+        KnowledgeGraph::open(&tmp.path().join("kg.db")).expect("KnowledgeGraph::open must succeed");
+
+    // ── hot_observations ────────────────────────────────────────────
+    let obs = HotObservation {
+        raw_text: "the daemon logged a retry on SIGHUP at 12:04".to_owned(),
+        session_id: Some("sess-001".to_owned()),
+        related_file: Some("crates/ucil-daemon/src/signals.rs".to_owned()),
+        related_symbol: Some("handle_sighup".to_owned()),
+    };
+    let obs_id = kg
+        .stage_hot_observation(&obs)
+        .expect("stage_hot_observation must succeed");
+    assert!(
+        obs_id > 0,
+        "RETURNING id on hot_observations must be positive (got {obs_id})",
+    );
+
+    // Count-check the row is present.
+    let count: i64 = kg
+        .conn()
+        .query_row("SELECT COUNT(*) FROM hot_observations;", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .expect("COUNT must succeed");
+    assert_eq!(count, 1, "exactly one hot_observations row inserted");
 }
