@@ -232,18 +232,24 @@ impl ReadyHandle {
 // ── ReadyProbeWriter ─────────────────────────────────────────────────────────
 
 /// Writer adapter that signals a `oneshot::Sender<Duration>` on the
-/// first successful write carrying a complete JSON-RPC response frame.
+/// first complete JSON-RPC response frame emitted by the wrapped writer.
 ///
-/// A frame is treated as "complete" when the buffer passed into
-/// [`AsyncWrite::poll_write`] ends with `\n` AND the buffer contents
-/// contain the token `"id"` somewhere — i.e. a JSON-RPC envelope with an
-/// `id` field, the only way the server formats responses (see
-/// `server.rs::jsonrpc_error` / `handle_tools_list` / `handle_initialize`
-/// / `handle_tools_call`). Subsequent writes pass through untouched.
+/// A frame is "complete" when the adapter has observed (a) a
+/// [`AsyncWrite::poll_write`] buffer containing the token `"id"` — every
+/// JSON-RPC response envelope the server produces carries an `id` field
+/// (see `server.rs::jsonrpc_error` / `handle_tools_list` /
+/// `handle_initialize` / `handle_tools_call`) — AND (b) a subsequent
+/// (or the same) `poll_write` whose final byte is `\n`, the per-frame
+/// terminator. The server's `serve` loop splits a response into two
+/// `write_all` calls (the JSON body, then the `\n`), so tracking the
+/// two markers as separate booleans across calls is required. Once the
+/// oneshot fires, subsequent writes pass through untouched.
 struct ReadyProbeWriter<W> {
     inner: W,
     start: Instant,
     tx: Option<oneshot::Sender<Duration>>,
+    seen_id: bool,
+    seen_newline: bool,
 }
 
 impl<W> ReadyProbeWriter<W> {
@@ -252,6 +258,8 @@ impl<W> ReadyProbeWriter<W> {
             inner,
             start,
             tx: Some(tx),
+            seen_id: false,
+            seen_newline: false,
         }
     }
 }
@@ -267,12 +275,22 @@ where
     ) -> Poll<std::io::Result<usize>> {
         let poll = Pin::new(&mut self.inner).poll_write(cx, buf);
         if let Poll::Ready(Ok(written)) = &poll {
-            if *written > 0 && self.tx.is_some() && is_probe_frame(&buf[..*written]) {
-                let elapsed = self.start.elapsed();
-                if let Some(sender) = self.tx.take() {
-                    // Ignore send failure — the receiver may already be
-                    // dropped if the caller never awaited `ReadyHandle`.
-                    let _ = sender.send(elapsed);
+            if *written > 0 && self.tx.is_some() {
+                let slice = &buf[..*written];
+                if !self.seen_id && slice.windows(4).any(|w| w == b"\"id\"") {
+                    self.seen_id = true;
+                }
+                if !self.seen_newline && matches!(slice.last(), Some(b'\n')) {
+                    self.seen_newline = true;
+                }
+                if self.seen_id && self.seen_newline {
+                    let elapsed = self.start.elapsed();
+                    if let Some(sender) = self.tx.take() {
+                        // Ignore send failure — the receiver may already
+                        // be dropped if the caller never awaited
+                        // `ReadyHandle`.
+                        let _ = sender.send(elapsed);
+                    }
                 }
             }
         }
@@ -286,10 +304,6 @@ where
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         Pin::new(&mut self.inner).poll_shutdown(cx)
     }
-}
-
-fn is_probe_frame(buf: &[u8]) -> bool {
-    matches!(buf.last(), Some(b'\n')) && buf.windows(4).any(|w| w == b"\"id\"")
 }
 
 // ── Priority-queue helper ────────────────────────────────────────────────────
