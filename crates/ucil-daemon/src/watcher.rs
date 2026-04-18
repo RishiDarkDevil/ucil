@@ -65,7 +65,7 @@ use std::{
 };
 
 use notify::{RecursiveMode, Watcher};
-use notify_debouncer_full::{new_debouncer, DebounceEventResult, Debouncer, FileIdMap};
+use notify_debouncer_full::{new_debouncer_opt, DebounceEventResult, Debouncer, FileIdMap};
 use thiserror::Error;
 use tokio::{
     sync::mpsc::{self, error::TrySendError},
@@ -364,18 +364,58 @@ pub enum WatcherError {
 
 /// File-change watcher for a single root directory.
 ///
-/// Wraps a `notify-debouncer-full` instance and a forwarder task that
-/// translates its `std::sync::mpsc` output into typed [`FileEvent`]s
-/// on an async channel. See module-level docs for the two detection
-/// paths this struct orchestrates.
+/// Wraps one of three backends — [`notify`]'s recommended watcher
+/// (default), [`notify::PollWatcher`] (network-mount fallback), or an
+/// external `watchman` subprocess (large-repo upgrade) — together
+/// with a forwarder task that emits typed [`FileEvent`]s on an async
+/// channel. See [`WatcherBackend`] for the selection policy and
+/// module-level docs for the two detection paths this struct
+/// orchestrates.
 pub struct FileWatcher {
     sender: mpsc::Sender<FileEvent>,
-    /// Kept alive so dropping the [`FileWatcher`] stops the notify
-    /// backend thread (via the upstream crate's `Drop` impl).
-    _debouncer: Debouncer<notify::RecommendedWatcher, FileIdMap>,
+    /// Kept alive so dropping the [`FileWatcher`] stops the backend
+    /// (debouncer threads via their upstream `Drop` impls; watchman
+    /// child via `kill_on_drop`).
+    _backend: BackendHandle,
     /// Forwarder task — joined implicitly when the watcher drops and
-    /// the std-side sender is closed by the debouncer's `Drop`.
+    /// the backend-side sender closes.
     _forwarder: JoinHandle<()>,
+}
+
+/// Private handle union for the three concrete backend shapes. Kept
+/// private because callers consume events through the shared
+/// [`FileEvent`] channel — the exact backend is an implementation
+/// detail they do not need to inspect. The variants are held purely
+/// for their `Drop` side effects (stop the backend thread / kill the
+/// subprocess), so the payloads are never read after construction —
+/// `#[allow(dead_code)]` silences the read-never-read lint without
+/// dropping the payloads (which would break the lifetime contract).
+#[allow(dead_code)]
+enum BackendHandle {
+    /// `notify-debouncer-full` with `notify::RecommendedWatcher`
+    /// underneath (inotify / `FSEvents` / `ReadDirectoryChangesW`).
+    NotifyDebounced(Debouncer<notify::RecommendedWatcher, FileIdMap>),
+    /// `notify-debouncer-full` with `notify::PollWatcher` underneath —
+    /// network-mount fallback that re-scans the tree at
+    /// [`POLL_WATCHER_INTERVAL`].
+    Poll(Debouncer<notify::PollWatcher, FileIdMap>),
+    /// Spawned `watchman` subprocess with `kill_on_drop(true)` — the
+    /// child is killed automatically when the [`FileWatcher`] drops.
+    Watchman(tokio::process::Child),
+}
+
+/// Decoded payload of a single JSONL line emitted by a Watchman
+/// subscription. Only the fields we act on are deserialised; unknown
+/// keys in the feed are ignored by `serde_json`'s default behaviour.
+///
+/// Private to the Watchman backend — not part of the public API.
+#[derive(Debug, serde::Deserialize)]
+struct WatchmanEvent {
+    name: String,
+    #[serde(default)]
+    exists: bool,
+    #[serde(default)]
+    new: bool,
 }
 
 /// Map a `notify::EventKind` to our total [`FileEventKind`].
@@ -399,18 +439,57 @@ pub(crate) const fn map_notify_kind(kind: notify::EventKind) -> FileEventKind {
     }
 }
 
+/// Spawn the blocking forwarder that drains a debouncer's std-mpsc
+/// output and pushes typed [`FileEvent`]s with
+/// [`EventSource::NotifyDebounced`] onto the async `sender`. Shared by
+/// the `NotifyDebounced` and `Poll` constructors — both debouncer
+/// shapes produce the same `DebounceEventResult` stream on the std
+/// side, so the forwarder body is identical.
+fn spawn_debouncer_forwarder(
+    std_rx: std_mpsc::Receiver<DebounceEventResult>,
+    sender: mpsc::Sender<FileEvent>,
+) -> JoinHandle<()> {
+    tokio::task::spawn_blocking(move || {
+        while let Ok(result) = std_rx.recv() {
+            match result {
+                Ok(events) => {
+                    for ev in events {
+                        let kind = map_notify_kind(ev.event.kind);
+                        for path in &ev.event.paths {
+                            let file_event = FileEvent {
+                                path: path.clone(),
+                                kind,
+                                source: EventSource::NotifyDebounced,
+                            };
+                            if sender.blocking_send(file_event).is_err() {
+                                return;
+                            }
+                        }
+                    }
+                }
+                Err(errors) => {
+                    tracing::warn!(
+                        target: "ucil.daemon.watcher",
+                        error_count = errors.len(),
+                        "debouncer reported errors"
+                    );
+                }
+            }
+        }
+    })
+}
+
 impl FileWatcher {
-    /// Start watching `root` recursively and forward debounced events to
-    /// `sender`.
+    /// Start watching `root` recursively with the default
+    /// [`WatcherBackend::NotifyDebounced`] backend.
     ///
-    /// The `notify-debouncer-full` backend runs on its own OS thread
-    /// (as `notify` does by design). This constructor spawns a
-    /// `tokio::task::spawn_blocking` forwarder that drains the
-    /// debouncer's `std::sync::mpsc` receiver and pushes typed
-    /// [`FileEvent`]s (with [`EventSource::NotifyDebounced`]) into the
-    /// caller-supplied async `sender`.
+    /// Thin delegate to [`FileWatcher::new_with_backend`] — the body
+    /// calls `Self::new_with_backend(root, sender,
+    /// WatcherBackend::NotifyDebounced)` so every WO-0026 call site
+    /// remains byte-identical across the WO-0027 refactor.
     ///
-    /// Tracing span: `ucil.daemon.watcher.new` (master-plan §15.2).
+    /// Tracing span: `ucil.daemon.watcher.new` (master-plan §15.2) —
+    /// kept on the thin wrapper so existing traces stay stable.
     ///
     /// # Errors
     ///
@@ -424,18 +503,73 @@ impl FileWatcher {
         fields(root = %root.display())
     )]
     pub fn new(root: &Path, sender: mpsc::Sender<FileEvent>) -> Result<Self, WatcherError> {
-        // Bridge: the debouncer calls the closure from its own thread.
-        // We forward the raw result into a std mpsc and let the
-        // spawn_blocking forwarder translate + push onto the async
-        // channel. `std::sync::mpsc::channel` is sufficient here — we
-        // never need select-style polling on the std side.
+        Self::new_with_backend(root, sender, WatcherBackend::NotifyDebounced)
+    }
+
+    /// Start watching `root` recursively with an explicit
+    /// [`WatcherBackend`].
+    ///
+    /// Dispatches on `backend`:
+    ///
+    /// - [`WatcherBackend::NotifyDebounced`] — the default path from
+    ///   WO-0026. Events flow through `notify-debouncer-full` with
+    ///   [`DEBOUNCE_WINDOW`] applied.
+    /// - [`WatcherBackend::Poll`] — uses `notify::PollWatcher` at
+    ///   [`POLL_WATCHER_INTERVAL`] underneath the same debouncer
+    ///   pipeline, so the emitted [`FileEvent`]s look identical to
+    ///   `NotifyDebounced` events from the consumer's POV (same
+    ///   `source`, same `kind` mapping). Use this backend only on
+    ///   roots where inotify / `FSEvents` do not fire (NFS, SMB, sshfs).
+    /// - [`WatcherBackend::Watchman`] — spawns the external `watchman`
+    ///   binary via `tokio::process::Command` and subscribes to a
+    ///   recursive file-change feed. The subprocess is killed
+    ///   automatically when this [`FileWatcher`] drops
+    ///   (`kill_on_drop(true)`).
+    ///
+    /// Tracing span: `ucil.daemon.watcher.new_with_backend`
+    /// (master-plan §15.2).
+    ///
+    /// # Errors
+    ///
+    /// - [`WatcherError::Notify`] — the selected `notify` backend
+    ///   could not be constructed or could not begin watching `root`.
+    /// - [`WatcherError::WatchmanSpawn`] — the `watchman` binary
+    ///   could not be launched (missing from `PATH`, permission
+    ///   denied, etc.) when `backend ==
+    ///   WatcherBackend::Watchman`.
+    #[tracing::instrument(
+        name = "ucil.daemon.watcher.new_with_backend",
+        level = "debug",
+        skip(sender),
+        fields(root = %root.display(), backend = ?backend)
+    )]
+    pub fn new_with_backend(
+        root: &Path,
+        sender: mpsc::Sender<FileEvent>,
+        backend: WatcherBackend,
+    ) -> Result<Self, WatcherError> {
+        match backend {
+            WatcherBackend::NotifyDebounced => Self::new_notify_debounced(root, sender),
+            WatcherBackend::Poll => Self::new_poll(root, sender),
+            WatcherBackend::Watchman => Self::new_watchman(root, sender),
+        }
+    }
+
+    /// Construct the default recommended-watcher + debouncer backend.
+    fn new_notify_debounced(
+        root: &Path,
+        sender: mpsc::Sender<FileEvent>,
+    ) -> Result<Self, WatcherError> {
         let (std_tx, std_rx) = std_mpsc::channel::<DebounceEventResult>();
-        let mut debouncer = new_debouncer(DEBOUNCE_WINDOW, None, move |result| {
-            // If the forwarder has dropped, the std-side send fails
-            // silently — that's fine because the watcher is shutting
-            // down; nothing else to do here.
-            let _ = std_tx.send(result);
-        })
+        let mut debouncer = new_debouncer_opt::<_, notify::RecommendedWatcher, FileIdMap>(
+            DEBOUNCE_WINDOW,
+            None,
+            move |result| {
+                let _ = std_tx.send(result);
+            },
+            FileIdMap::new(),
+            notify::Config::default(),
+        )
         .map_err(WatcherError::Notify)?;
 
         debouncer
@@ -443,47 +577,149 @@ impl FileWatcher {
             .watch(root, RecursiveMode::Recursive)
             .map_err(WatcherError::Notify)?;
 
-        // Forwarder: drain the std mpsc from a blocking task so we do
-        // not block the tokio runtime. `blocking_send` would block the
-        // runtime thread itself, so we use the dedicated blocking pool.
+        let forwarder = spawn_debouncer_forwarder(std_rx, sender.clone());
+
+        Ok(Self {
+            sender,
+            _backend: BackendHandle::NotifyDebounced(debouncer),
+            _forwarder: forwarder,
+        })
+    }
+
+    /// Construct the [`notify::PollWatcher`] + debouncer backend for
+    /// network mounts.
+    fn new_poll(root: &Path, sender: mpsc::Sender<FileEvent>) -> Result<Self, WatcherError> {
+        let (std_tx, std_rx) = std_mpsc::channel::<DebounceEventResult>();
+        let config = notify::Config::default().with_poll_interval(POLL_WATCHER_INTERVAL);
+        let mut debouncer = new_debouncer_opt::<_, notify::PollWatcher, FileIdMap>(
+            DEBOUNCE_WINDOW,
+            None,
+            move |result| {
+                let _ = std_tx.send(result);
+            },
+            FileIdMap::new(),
+            config,
+        )
+        .map_err(WatcherError::Notify)?;
+
+        debouncer
+            .watcher()
+            .watch(root, RecursiveMode::Recursive)
+            .map_err(WatcherError::Notify)?;
+
+        let forwarder = spawn_debouncer_forwarder(std_rx, sender.clone());
+
+        Ok(Self {
+            sender,
+            _backend: BackendHandle::Poll(debouncer),
+            _forwarder: forwarder,
+        })
+    }
+
+    /// Construct the external `watchman` subprocess backend.
+    ///
+    /// Spawns `watchman` with `kill_on_drop(true)` so the child
+    /// process terminates when this [`FileWatcher`] drops. Writes a
+    /// JSON `subscribe` command to the subprocess' stdin, then spawns
+    /// an async forwarder task that reads JSONL events from stdout
+    /// and emits [`FileEvent`]s on `sender`. Events carry
+    /// [`EventSource::NotifyDebounced`] — Watchman is a detection
+    /// backend swap, not a semantic channel change.
+    fn new_watchman(root: &Path, sender: mpsc::Sender<FileEvent>) -> Result<Self, WatcherError> {
+        use std::process::Stdio;
+        let capability = detect_watchman().ok_or_else(|| {
+            WatcherError::WatchmanSpawn(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "watchman binary not found on PATH",
+            ))
+        })?;
+
+        let subscribe_cmd = serde_json::json!([
+            "subscribe",
+            root.display().to_string(),
+            "ucil-daemon",
+            {
+                "expression": ["allof", ["type", "f"]],
+                "fields": ["name", "type", "exists", "new"]
+            }
+        ])
+        .to_string();
+
+        let mut child = tokio::process::Command::new(&capability.binary)
+            .arg("--no-spawner")
+            .arg("--server-encoding=json")
+            .arg("--json-command")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(WatcherError::WatchmanSpawn)?;
+
+        let stdin = child.stdin.take().ok_or_else(|| {
+            WatcherError::WatchmanSpawn(std::io::Error::other(
+                "watchman child exposed no stdin handle",
+            ))
+        })?;
+        let stdout = child.stdout.take().ok_or_else(|| {
+            WatcherError::WatchmanSpawn(std::io::Error::other(
+                "watchman child exposed no stdout handle",
+            ))
+        })?;
+
         let forwarder_tx = sender.clone();
-        let forwarder = tokio::task::spawn_blocking(move || {
-            while let Ok(result) = std_rx.recv() {
-                match result {
-                    Ok(events) => {
-                        for ev in events {
-                            let kind = map_notify_kind(ev.event.kind);
-                            for path in &ev.event.paths {
-                                let file_event = FileEvent {
-                                    path: path.clone(),
-                                    kind,
-                                    source: EventSource::NotifyDebounced,
-                                };
-                                if forwarder_tx.blocking_send(file_event).is_err() {
-                                    // Receiver dropped — stop draining.
-                                    return;
-                                }
-                            }
-                        }
-                    }
-                    Err(errors) => {
-                        // Surface debouncer errors through tracing; we do
-                        // not convert them into `FileEvent`s because the
-                        // mpsc only carries typed events. A follow-up WO
-                        // can introduce an error channel if needed.
-                        tracing::warn!(
+        let root_pathbuf = root.to_path_buf();
+        let forwarder = tokio::spawn(async move {
+            use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+            let mut stdin = stdin;
+            if stdin.write_all(subscribe_cmd.as_bytes()).await.is_err() {
+                return;
+            }
+            if stdin.write_all(b"\n").await.is_err() {
+                return;
+            }
+            drop(stdin);
+
+            let mut lines = BufReader::new(stdout).lines();
+            loop {
+                let Ok(Some(line)) = lines.next_line().await else {
+                    break;
+                };
+                let ev: WatchmanEvent = match serde_json::from_str(&line) {
+                    Ok(e) => e,
+                    Err(err) => {
+                        tracing::debug!(
                             target: "ucil.daemon.watcher",
-                            error_count = errors.len(),
-                            "debouncer reported errors"
+                            error = %err,
+                            line = %line,
+                            "watchman line did not decode as event; skipping"
                         );
+                        continue;
                     }
+                };
+                let path = root_pathbuf.join(&ev.name);
+                let kind = if !ev.exists {
+                    FileEventKind::Removed
+                } else if ev.new {
+                    FileEventKind::Created
+                } else {
+                    FileEventKind::Modified
+                };
+                let file_event = FileEvent {
+                    path,
+                    kind,
+                    source: EventSource::NotifyDebounced,
+                };
+                if forwarder_tx.send(file_event).await.is_err() {
+                    break;
                 }
             }
         });
 
         Ok(Self {
             sender,
-            _debouncer: debouncer,
+            _backend: BackendHandle::Watchman(child),
             _forwarder: forwarder,
         })
     }
