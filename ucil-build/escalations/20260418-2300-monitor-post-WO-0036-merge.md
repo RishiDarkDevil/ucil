@@ -63,3 +63,22 @@ search_code, understand_code. Eighteen still stub.
 - Bucket A auto-resolve on next triage pass.
 - Intentionally NO `resolved: true` line in frontmatter so stop-hook
   bypass fires this turn.
+
+## Resolution
+
+Auto-resolved by triage pass 2 (phase 1). Evidence:
+
+- Escalation's outstanding list (P1-W3-F03, P1-W5-F02, P1-W5-F08) has
+  materially advanced: **P1-W5-F02 flipped to passes=true** via WO-0037
+  (commit ec4d5d5, verifier PASS) and merged to main in 593542a
+  ("serena-g1-hover-fusion").
+- Feature-list snapshot now **46/234** passing (was 45/234 at heartbeat
+  authoring; delta matches the P1-W5-F02 flip).
+- Remaining phase-1 unfinished per `feature-list.json` at HEAD:
+  `P1-W3-F03`, `P1-W5-F08` — normal mid-phase state, no blockers.
+- Branch `main` clean, up-to-date with `origin/main`; working tree has
+  no uncommitted changes.
+- `blocks_loop: false` and the escalation is a monitor heartbeat, not a
+  gating page.
+
+resolved: true
