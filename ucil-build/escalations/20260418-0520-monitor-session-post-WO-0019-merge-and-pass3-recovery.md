@@ -29,3 +29,18 @@ on chunking-dependent features.
 - Bucket A auto-resolve on next triage pass (heartbeat).
 - Left unresolved in frontmatter; triage will mark resolved: true.
 - Gate-incomplete is expected; stop-hook escalation-bypass handles this.
+
+## Resolution
+
+Triage pass 1 (phase 1, 2026-04-18): Bucket A auto-resolve. Verified current
+state matches the heartbeat's description:
+- WO-0019 merged at 46f6658 (treesitter-chunker, P1-W2-F03 flipped at c91d831).
+- Main HEAD advanced through pass-3 recovery (15cbe63) and on to planner-emit
+  WO-0020 (e27cd40) and auto-stash (a5e6dec).
+- Global pass count 29/234, phase-1 pass count 15/34 — exactly as the
+  heartbeat reports; normal mid-phase state.
+- Gate-incomplete is expected (19 phase-1 features still in flight);
+  `blocks_loop: false`, `severity: low`, `auto_resolve_on_next_triage: bucket-A`
+  hint honored. No harness or source change required.
+
+resolved: true
