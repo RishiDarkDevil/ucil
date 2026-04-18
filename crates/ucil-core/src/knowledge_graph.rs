@@ -923,6 +923,62 @@ impl KnowledgeGraph {
         Ok(out)
     }
 
+    /// Substring-search the `entities` table by `name` or `qualified_name`.
+    ///
+    /// Backs the symbol-index half of the `search_code` MCP tool
+    /// (`P1-W5-F09`, master-plan §3.2 row 4 / §18 Phase 1 Week 5
+    /// line 1765).  The query is wrapped as `%query%` by the helper and
+    /// bound as a single `LIKE` parameter applied to both `name` and
+    /// `qualified_name`, so a caller searching for `"foo"` matches both
+    /// `name = "foo_bar"` and `qualified_name = "mod::foo::bar"`.
+    ///
+    /// Rows are returned newest-ingested-first (`ORDER BY t_ingested_at
+    /// DESC`) and capped at `limit`.  Empty result is `Ok(vec![])`, not
+    /// an error.  The returned [`Entity`] rows carry the same column
+    /// projection as [`Self::get_entity_by_qualified_name`] —
+    /// §12.1 entities schema, columns 1-15.
+    ///
+    /// # Errors
+    ///
+    /// * [`KnowledgeGraphError::Sqlite`] — statement prepare, bind, or
+    ///   iteration failure.
+    #[tracing::instrument(
+        level = "debug",
+        skip(self),
+        fields(query_len = query.len(), limit),
+        name = "ucil.core.kg.search_entities_by_name",
+    )]
+    pub fn search_entities_by_name(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<Entity>, KnowledgeGraphError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, kind, name, qualified_name, file_path, start_line, end_line, \
+                    signature, doc_comment, language, t_valid_from, t_valid_to, \
+                    importance, source_tool, source_hash \
+             FROM entities \
+             WHERE name LIKE ?1 OR qualified_name LIKE ?1 \
+             ORDER BY t_ingested_at DESC \
+             LIMIT ?2",
+        )?;
+        let like = format!("%{query}%");
+        // Cast `limit` to i64 for SQLite's integer parameter binding; `usize`
+        // on 64-bit platforms can exceed i64::MAX in pathological cases but
+        // SQLite's LIMIT argument is an i64 on the wire regardless.  Values
+        // above i64::MAX wrap to negative, which SQLite interprets as "no
+        // limit" — harmless in practice because the caller already clamps
+        // to the handler's own `SEARCH_CODE_MAX_RESULTS` ceiling.
+        #[allow(clippy::cast_possible_wrap)]
+        let limit_i64 = limit as i64;
+        let rows = stmt.query_map(rusqlite::params![like, limit_i64], entity_from_row)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
     // ── Relation CRUD ────────────────────────────────────────────────
     //
     // `relations` has NO UNIQUE constraint in §12.1 — each call to
