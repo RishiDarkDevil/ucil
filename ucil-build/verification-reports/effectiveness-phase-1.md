@@ -1,7 +1,7 @@
 # Effectiveness Report — Phase 1
 
-Run at: 2026-04-19T02:30:00Z
-Commit: 8d8fc0cfd0af879b33227d6946e56f58ec99180b
+Run at: 2026-04-19T02:45:00Z
+Commit: 5edc200bc1790b7a369392ef271e015b0f137381
 Evaluator: effectiveness-evaluator (fresh session)
 
 ## Summary
@@ -22,36 +22,27 @@ external `claude -p` run at this commit. The gate contract (see §"Gate
 contract") permits this as a vacuous pass. The §"Advisory" section documents
 what would make the pass *substantive* rather than vacuous.
 
-## Progress since the previous report (`effectiveness-phase-1.md` @ `316109e`)
+## Progress since the previous report (`effectiveness-phase-1.md` @ `8d8fc0c`)
 
-1. **WO-0040 merged** (`070204a`, `5418513`, `7737d92`). `ucil-daemon mcp
-   --stdio` is now a wired subcommand: `main.rs` dispatches on the first
-   positional arg, routes `"mcp"` to `McpServer::new().serve(stdin, stdout)`,
-   and routes tracing to `stderr` so `stdout` stays pristine for the JSON-RPC
-   frames. The stdio handshake **works**:
+HEAD advanced from `8d8fc0c` → `5edc200` (5 commits). The intervening commits
+are reporting-only — coverage report refresh, triage pass, escalation
+resolution note, and phase-1 integration report. **No source code, no
+settings.json, no scenario yaml, no feature-list fields relevant to the two
+required tools changed.** Specifically:
 
-   ```
-   printf '%s\n%s\n' \
-     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{...}}' \
-     '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
-     | timeout 15 ./target/debug/ucil-daemon mcp --stdio
-   ```
-   → two valid JSON-RPC responses; `tools/list` enumerates the full 22-tool
-   catalog from master-plan §3.2.
+- `McpServer::new()` still builds the stdio server with **no KG attached**
+  (`crates/ucil-daemon/src/main.rs:17`).
+- `handle_tools_call` at `crates/ucil-daemon/src/server.rs:515-571` still
+  routes `find_definition`, `get_conventions`, `search_code`,
+  `understand_code` to their real handlers only when `self.kg.is_some()`;
+  falls through to `_meta.not_yet_implemented: true` otherwise.
+- `find_references` is still NOT in that KG-routed allow-list; it's a
+  Phase-2 feature (`P2-W7-F05`, `passes: false`, `last_verified_by: null`).
+- `.claude/settings.json` still has zero `ucil` / `ucil-mcp` entries under
+  `mcpServers`.
 
-2. **Nothing else relevant changed** for the effectiveness gate. Specifically,
-   the two blockers that held back an actual scenario run last time are still
-   in force:
-
-   - `mcpServers.ucil` is still absent from `.claude/settings.json` (6
-     servers registered, none named `ucil` or `ucil-mcp`).
-   - The stdio MCP server is constructed via `McpServer::new()` with no KG
-     handle attached. The `handle_tools_call` dispatcher at
-     `crates/ucil-daemon/src/server.rs:515-571` routes `find_definition`,
-     `get_conventions`, `search_code`, `understand_code` to their real
-     handlers **only when `self.kg.is_some()`**; otherwise it falls through
-     to the `_meta.not_yet_implemented: true` stub envelope (phase-1
-     invariant #9). `find_references` is not even in the KG-routed allow-list.
+The full rationale below holds verbatim — only the HEAD sha, the "Progress"
+table, and the Environment-notes sha change from `8d8fc0c` to `5edc200`.
 
 ## Scenario discovery
 
@@ -77,7 +68,7 @@ test -x ./target/debug/ucil-mcp    → MISSING
 test -x ./target/release/ucil-mcp  → MISSING
 ```
 
-No `ucil-mcp` binary exists. Per WO-0040 the equivalent entry point is now
+No `ucil-mcp` binary exists. Per WO-0040 the equivalent entry point is
 `ucil-daemon mcp --stdio`, which the evaluator contract §"Tool-availability
 checks" explicitly permits.
 
@@ -87,7 +78,7 @@ checks" explicitly permits.
 printf '%s\n%s\n' \
   '{"jsonrpc":"2.0","id":1,"method":"initialize", ...}' \
   '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
-  | timeout 15 ./target/debug/ucil-daemon mcp --stdio
+  | timeout 20 ./target/debug/ucil-daemon mcp --stdio
 ```
 
 Response frame 1 (`initialize`) — valid:
@@ -104,27 +95,29 @@ Response frame 2 (`tools/list`) — valid; enumerates 22 tools including
 ### Probe 3 — `tools/call` responsiveness check
 
 The evaluator must confirm tools are not merely registered but actually answer
-the scenario's question. Direct probe of both required tools:
+the scenario's question. Direct probe of both required tools at current HEAD
+`5edc200`:
 
 ```
-printf '%s\n%s\n%s\n' \
+printf '%s\n%s\n%s\n%s\n' \
   '{"jsonrpc":"2.0","id":1,"method":"initialize", ...}' \
-  '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"find_definition","arguments":{"symbol":"main","reason":"test"}}}' \
-  '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"find_references","arguments":{"symbol":"main","reason":"test"}}}' \
-  | timeout 15 ./target/debug/ucil-daemon mcp --stdio
+  '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
+  '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"find_definition","arguments":{"symbol":"main","reason":"probe"}}}' \
+  '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"find_references","arguments":{"symbol":"main","reason":"probe"}}}' \
+  | timeout 20 ./target/debug/ucil-daemon mcp --stdio
 ```
 
-`find_definition` response:
+`find_definition` response (id=3):
 ```json
-{"id":2,"jsonrpc":"2.0","result":{
+{"id":3,"jsonrpc":"2.0","result":{
   "_meta":{"not_yet_implemented":true,"tool":"find_definition"},
   "content":[{"text":"tool `find_definition` is registered but its handler is not yet implemented (Phase 1 stub)","type":"text"}],
   "isError":false}}
 ```
 
-`find_references` response:
+`find_references` response (id=4):
 ```json
-{"id":3,"jsonrpc":"2.0","result":{
+{"id":4,"jsonrpc":"2.0","result":{
   "_meta":{"not_yet_implemented":true,"tool":"find_references"},
   "content":[{"text":"tool `find_references` is registered but its handler is not yet implemented (Phase 1 stub)","type":"text"}],
   "isError":false}}
@@ -132,11 +125,11 @@ printf '%s\n%s\n%s\n' \
 
 **Both return the Phase-1 stub envelope (`_meta.not_yet_implemented: true`).**
 
-Root cause: `main.rs:17` constructs the server via `McpServer::new()` with no
-KG handle. `handle_tools_call` at `server.rs:527-546` only dispatches to real
-handlers when `self.kg.is_some()`. Since the daemon has no KG init path from
-the stdio entry point (and no CLI flag to point it at a project), every call
-falls through to the stub.
+Root cause (unchanged): `main.rs:17` constructs the server via
+`McpServer::new()` with no KG handle. `handle_tools_call` at
+`server.rs:527-546` only dispatches to real handlers when `self.kg.is_some()`.
+Since the daemon has no KG init path from the stdio entry point (and no CLI
+flag to point it at a project), every call falls through to the stub.
 
 ### Probe 4 — host-level MCP registration
 
@@ -153,7 +146,7 @@ process level, independent of the stub issue above.
 
 ### Probe 5 — in-process feature status
 
-Per `ucil-build/feature-list.json`:
+Per `ucil-build/feature-list.json` (unchanged from previous report):
 
 | Tool | Feature ID | passes | last_verified_by |
 |---|---|---|---|
@@ -248,6 +241,8 @@ A phase-1 gate that passes with zero runnable effectiveness scenarios is a
 real tasks better than grep+Read — is not yet demonstrated at Phase 1.
 WO-0040 landed the stdio skeleton, which is real progress; however the
 stub-only dispatch means the external surface still delivers no UCIL value.
+None of the three advisory items from `316109e` / `8d8fc0c` landed in the
+`8d8fc0c → 5edc200` window.
 
 Concrete paths to a substantive pass (none blocks this gate; each is a
 candidate work-order):
@@ -274,21 +269,20 @@ candidate work-order):
    `nav-rust-symbol` stays phase-2+ because `find_references` is a hard
    dependency for its "every place it is CALLED FROM" requirement.
 
-All three items were advisory in the previous report (`316109e`); none
-landed between `316109e` and `8d8fc0c` apart from the stdio wiring itself
-(WO-0040). The evaluator does not block the gate on them — they are carried
-as planner input.
+All three items have now been advisory through three consecutive reports
+(`316109e`, `8d8fc0c`, `5edc200`); none have landed. The evaluator does not
+block the gate on them — they are carried as planner input.
 
 ## Environment notes (for reproducibility)
 
 - Repo root: `/home/rishidarkdevil/Desktop/ucil`
 - Branch: `main`
-- HEAD: `8d8fc0cfd0af879b33227d6946e56f58ec99180b`
+- HEAD: `5edc200bc1790b7a369392ef271e015b0f137381`
 - `target/debug/ucil-daemon` was present (built by earlier work-orders); no
   rebuild forced by this evaluator pass.
 - `/tmp/ucil-eval-*` tempdirs were **not** created (no runnable scenario).
-  `ls /tmp/ucil-eval-* → No such file or directory` confirmed at end of
-  run.
+  `ls /tmp/ucil-eval-* → No such file or directory` confirmed at start and
+  end of run.
 - No judge sessions spawned.
 - No fixture files modified (contract §"Hard rules").
 - No source files modified (contract §"Hard rules").
