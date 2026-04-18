@@ -1,10 +1,10 @@
 # Phase 1 Integration Report
 
-**Tester session**: itg-9f8747bf-3838-468e-a5b6-bd778247c07e
-**Started at**:     2026-04-18T23:00:48Z
-**Verified at**:    2026-04-18T23:01:42Z
+**Tester session**: itg-fbcd23c9-1918-46f3-9ade-74494eb283c0
+**Started at**:     2026-04-18T23:02:20Z
+**Verified at**:    2026-04-18T23:02:58Z
 **Phase**:          1 (Week 1, per `ucil-build/progress.json`)
-**HEAD commit**:    66245340c4358d98c9cbf44a960f0400eea336e4
+**HEAD commit**:    7436cf9df221951758c0512185dc58696538cac5
 **Verdict**:        FAIL
 
 ## Summary
@@ -16,24 +16,24 @@ pass — pyright LSP cannot be reached because no `pyright-langserver`
 binary is on PATH and the script's `npx -y pyright` fallback invokes
 the pyright CLI rather than the LSP server.
 
-- `scripts/verify/e2e-mcp-smoke.sh` — **exit 0** (PASS, 368ms). The
-  daemon binary builds (incremental cargo cache);
+- `scripts/verify/e2e-mcp-smoke.sh` — **exit 0** (PASS, 234ms). The
+  daemon binary is served from the incremental cargo cache;
   `ucil-daemon mcp --stdio` answers both `initialize` and
   `tools/list`; all 22 frozen MCP tools advertise the four CEQP
   universal params.
-- `scripts/verify/serena-live.sh` — **exit 0** (PASS, 3222ms). Serena
+- `scripts/verify/serena-live.sh` — **exit 0** (PASS, 3223ms). Serena
   v1.0.0 spawned via `uvx` and advertised 20 tools including the
   three required for G1 structural (`find_symbol`,
   `find_referencing_symbols`, `get_symbols_overview`).
-- `scripts/verify/diagnostics-bridge.sh` — **exit 1** (FAIL, 16036ms).
+- `scripts/verify/diagnostics-bridge.sh` — **exit 1** (FAIL, 16038ms).
   `pyright-langserver` not on PATH; the declared `npx -y pyright`
   fallback runs the CLI, not the LSP server, so no framed
   `textDocument/publishDiagnostics` ever arrives within the 15-second
   wait. Identical shape to the eight previous phase-1 integration
   reports (commits `855cdfa`, `f11ebfd`, `97932e0`, `5edc200`,
-  `8d8fc0c`, `316109e`, `04d5130`, `341b815`); HEAD `6624534` (chore:
-  manual escalation resolve + kill stuck triage subagent) did not
-  change the script or install pyright.
+  `8d8fc0c`, `316109e`, `04d5130`, `341b815`); HEAD `7436cf9`
+  (chore: gate log refresh post-resume) did not change the script or
+  install pyright.
 
 Because one gate script fails, the overall verdict is **FAIL**.
 
@@ -63,9 +63,9 @@ become relevant only in Phase 3+ per
 
 | Suite                                    | Passed | Failed | Skipped | Duration | Exit |
 |------------------------------------------|--------|--------|---------|----------|------|
-| scripts/verify/e2e-mcp-smoke.sh          | 1      | 0      | 0       | 368ms    | 0    |
-| scripts/verify/serena-live.sh            | 1      | 0      | 0       | 3222ms   | 0    |
-| scripts/verify/diagnostics-bridge.sh     | 0      | 1      | 0       | 16036ms  | 1    |
+| scripts/verify/e2e-mcp-smoke.sh          | 1      | 0      | 0       | 234ms    | 0    |
+| scripts/verify/serena-live.sh            | 1      | 0      | 0       | 3223ms   | 0    |
+| scripts/verify/diagnostics-bridge.sh     | 0      | 1      | 0       | 16038ms  | 1    |
 | cargo nextest integration (deferred)     | —      | —      | —       | —        | —    |
 | pnpm adapters integration (deferred)     | —      | —      | —       | —        | —    |
 | pytest integration (deferred)            | —      | —      | —       | —        | —    |
@@ -79,7 +79,7 @@ shadowing the gate's own invocation.
 
 ## Passes
 
-### 1. `scripts/verify/e2e-mcp-smoke.sh` — exit 0 (368ms)
+### 1. `scripts/verify/e2e-mcp-smoke.sh` — exit 0 (234ms)
 
 ```
 [e2e-mcp-smoke] building ucil-daemon...
@@ -94,7 +94,7 @@ params (`reason`, `current_task`, `files_in_context`, `token_budget`).
 
 Full logs: `phase-1-integration-logs/e2e-mcp-smoke.{stdout,stderr,rc,dur}`.
 
-### 2. `scripts/verify/serena-live.sh` — exit 0 (3222ms)
+### 2. `scripts/verify/serena-live.sh` — exit 0 (3223ms)
 
 ```
 [serena-live] spawning Serena via uvx (pinned v1.0.0)...
@@ -110,7 +110,7 @@ Full logs: `phase-1-integration-logs/serena-live.{stdout,stderr,rc,dur}`.
 
 ## Failures
 
-### 1. `scripts/verify/diagnostics-bridge.sh` — exit 1 (16036ms)
+### 1. `scripts/verify/diagnostics-bridge.sh` — exit 1 (16038ms)
 
 `pyright-langserver` is not installed on PATH, so the script takes its
 declared fallback `PYRIGHT=(npx -y pyright)`. The LSP probe sends
