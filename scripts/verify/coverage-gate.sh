@@ -88,18 +88,56 @@ trap 'rm -f "$JSON_OUT" "$LOG_OUT"' EXIT
 # idempotent.
 cargo llvm-cov clean --workspace >/dev/null 2>&1 || true
 
-# Single atomic wrapper: `cargo llvm-cov test` runs the full sequence
-# (show-env → cargo test → prune → merge → report) in one process so
-# profraw files can't drift between steps. `--summary-only --json`
-# emits the compact LLVM json-export v2 schema we parse below.
-if ! cargo llvm-cov test --package "$CRATE" --summary-only --json \
+# Set up env for two-step run: we need to prune corrupt profraw files
+# between `cargo test` and `cargo llvm-cov report`. Integration tests
+# that spawn subprocesses (e.g. e2e_mcp_stdio* in ucil-daemon) leave
+# behind profraw files from killed children whose headers are truncated.
+# `cargo llvm-cov test` wraps both steps atomically but then `llvm-profdata
+# merge` refuses the set with "no profile can be merged". Staging lets
+# us run a prune step before the merge.
+#
+# shellcheck disable=SC1090
+source <(cargo llvm-cov show-env --export-prefix 2>/dev/null || true)
+
+TEST_LOG="$(mktemp -t coverage-gate-test-XXXXXX.log)"
+trap 'rm -f "$JSON_OUT" "$LOG_OUT" "$TEST_LOG"' EXIT
+
+if ! cargo test --package "$CRATE" >"$TEST_LOG" 2>&1; then
+  write_report "FAIL" "\`cargo test -p $CRATE\` failed under coverage instrumentation. Tail of log:
+
+\`\`\`
+$(tail -40 "$TEST_LOG")
+\`\`\`"
+  echo "[coverage-gate] FAIL — cargo test under coverage errored for $CRATE" >&2
+  exit 1
+fi
+
+# Prune zero-byte AND corrupt-header .profraw files. `llvm-profdata
+# show` exits non-zero on corrupt files without modifying them, so we
+# can use it as a sanity check. Without this, crates whose tests spawn
+# subprocesses (eg. ucil-daemon's e2e_mcp_stdio tests) leave garbage
+# profraw that breaks the merge step.
+PROFRAW_DIR="${CARGO_LLVM_COV_TARGET_DIR:-$REPO_ROOT/target/llvm-cov-target}"
+LLVM_PROFDATA="$(rustc --print target-libdir)/../bin/llvm-profdata"
+if [[ -d "$PROFRAW_DIR" && -x "$LLVM_PROFDATA" ]]; then
+  # Zero-byte first (cheap), then corrupt-header (validate each).
+  find "$PROFRAW_DIR" -name '*.profraw' -size 0 -delete 2>/dev/null || true
+  find "$PROFRAW_DIR" -name '*.profraw' -print0 2>/dev/null \
+    | while IFS= read -r -d '' f; do
+        if ! "$LLVM_PROFDATA" show "$f" >/dev/null 2>&1; then
+          rm -f "$f"
+        fi
+      done
+fi
+
+if ! cargo llvm-cov report --package "$CRATE" --summary-only --json \
        >"$JSON_OUT" 2>"$LOG_OUT"; then
-  write_report "FAIL" "\`cargo llvm-cov test\` failed. Tail of log:
+  write_report "FAIL" "\`cargo llvm-cov report\` failed after profraw prune. Tail of log:
 
 \`\`\`
 $(tail -40 "$LOG_OUT")
 \`\`\`"
-  echo "[coverage-gate] FAIL — cargo llvm-cov test errored for $CRATE" >&2
+  echo "[coverage-gate] FAIL — cargo llvm-cov report errored for $CRATE" >&2
   exit 1
 fi
 
