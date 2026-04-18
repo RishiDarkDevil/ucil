@@ -1,10 +1,10 @@
 # Phase 1 Integration Report
 
-**Tester session**: itg-663a3946-71b6-40da-8025-fa672ce2708f
-**Started at**:     2026-04-18T21:51:02Z
-**Verified at**:    2026-04-18T21:51:59Z
+**Tester session**: itg-e4ceec0e-f256-4df5-b986-b3bc0366c126
+**Started at**:     2026-04-18T22:04:01Z
+**Verified at**:    2026-04-18T22:04:55Z
 **Phase**:          1 (Week 1, per `ucil-build/progress.json`)
-**HEAD commit**:    898032f556f3ef372499a7be21a94d3de4a9e9fb
+**HEAD commit**:    3e7fb807bd318f85e825397f759ffbd91f4a200a
 **Verdict**:        FAIL
 
 ## Summary
@@ -14,23 +14,23 @@ Serena, LSP, or the UCIL daemon). Two of the three pass in this run;
 one still fails — identical failure shape to every previous phase-1
 integration report:
 
-- `scripts/verify/e2e-mcp-smoke.sh` — **exit 0** (PASS, 1807ms). The
-  daemon binary builds from the warm cargo cache;
+- `scripts/verify/e2e-mcp-smoke.sh` — **exit 0** (PASS, 314ms). The
+  daemon binary is served from the warm cargo cache;
   `ucil-daemon mcp --stdio` answers both `initialize` and `tools/list`;
   all 22 frozen MCP tools are advertised, and every tool carries the
   four CEQP universal params.
-- `scripts/verify/serena-live.sh` — **exit 0** (PASS, 3223ms). Serena
+- `scripts/verify/serena-live.sh` — **exit 0** (PASS, 3222ms). Serena
   v1.0.0 spawned via `uvx` and advertised 20 tools including the three
   required for G1 structural (`find_symbol`,
   `find_referencing_symbols`, `get_symbols_overview`).
-- `scripts/verify/diagnostics-bridge.sh` — **exit 1** (FAIL, 16038ms).
+- `scripts/verify/diagnostics-bridge.sh` — **exit 1** (FAIL, 16041ms).
   With `pyright-langserver` absent from PATH the script falls back to
   `npx -y pyright`, which runs the pyright CLI (not the LSP server).
   No framed `textDocument/publishDiagnostics` response arrives within
-  the 15-second wait window. Identical shape to reports dated
-  2026-04-18T20:29:02Z, 2026-04-18T20:58:44Z, 2026-04-18T21:09:41Z and
-  2026-04-18T21:20:27Z; HEAD (`898032f`, the WO-0041 merge commit) did
-  not address it.
+  the 15-second wait window. Identical shape to the five previous
+  phase-1 integration reports (2026-04-18T20:29:02Z, 20:58:44Z,
+  21:09:41Z, 21:20:27Z, and 21:51:59Z); HEAD (`3e7fb80`, the post-
+  WO-0041 harness-gate log refresh) did not address it.
 
 Because one gate script fails, the overall verdict is **FAIL**.
 
@@ -52,7 +52,7 @@ become relevant only in Phase 3+ per
 
 | Service             | Source / Image                                                            | Up time | Healthy | Notes                                                                                                                                       |
 |---------------------|---------------------------------------------------------------------------|---------|---------|---------------------------------------------------------------------------------------------------------------------------------------------|
-| ucil-daemon (local) | `cargo build -p ucil-daemon --bin ucil-daemon` (incremental cache warm)   | <2s     | yes     | Binary builds and answers MCP `initialize` + `tools/list` over stdio; 22 tools with CEQP params on all.                                     |
+| ucil-daemon (local) | `cargo build -p ucil-daemon --bin ucil-daemon` (incremental cache warm)   | <1s     | yes     | Binary builds and answers MCP `initialize` + `tools/list` over stdio; 22 tools with CEQP params on all.                                     |
 | Serena (uvx)        | `uvx --from git+https://github.com/oraios/serena@v1.0.0 serena-mcp-server` | ~3s     | yes     | MCP handshake OK; 20 tools advertised including `find_symbol`, `find_referencing_symbols`, `get_symbols_overview`.                         |
 | pyright-langserver  | `npx -y pyright` fallback (no `pyright-langserver` on PATH)               | ~16s    | no      | Process starts; never emits a framed `textDocument/publishDiagnostics` response to the LSP `didOpen` probe within the 15s wait (see §Failures). |
 
@@ -60,9 +60,9 @@ become relevant only in Phase 3+ per
 
 | Suite                                    | Passed | Failed | Skipped | Duration | Exit |
 |------------------------------------------|--------|--------|---------|----------|------|
-| scripts/verify/e2e-mcp-smoke.sh          | 1      | 0      | 0       | 1807ms   | 0    |
-| scripts/verify/serena-live.sh            | 1      | 0      | 0       | 3223ms   | 0    |
-| scripts/verify/diagnostics-bridge.sh     | 0      | 1      | 0       | 16038ms  | 1    |
+| scripts/verify/e2e-mcp-smoke.sh          | 1      | 0      | 0       | 314ms    | 0    |
+| scripts/verify/serena-live.sh            | 1      | 0      | 0       | 3222ms   | 0    |
+| scripts/verify/diagnostics-bridge.sh     | 0      | 1      | 0       | 16041ms  | 1    |
 | cargo nextest integration (deferred)     | —      | —      | —       | —        | —    |
 | pnpm adapters integration (deferred)     | —      | —      | —       | —        | —    |
 | pytest integration (deferred)            | —      | —      | —       | —        | —    |
@@ -76,7 +76,7 @@ shadowing the gate's own invocation.
 
 ## Passes
 
-### 1. `scripts/verify/e2e-mcp-smoke.sh` — exit 0 (1807ms)
+### 1. `scripts/verify/e2e-mcp-smoke.sh` — exit 0 (314ms)
 
 ```
 [e2e-mcp-smoke] building ucil-daemon...
@@ -91,7 +91,7 @@ params (`reason`, `current_task`, `files_in_context`, `token_budget`).
 
 Full logs: `phase-1-integration-logs/e2e-mcp-smoke.{stdout,stderr,rc,dur}`.
 
-### 2. `scripts/verify/serena-live.sh` — exit 0 (3223ms)
+### 2. `scripts/verify/serena-live.sh` — exit 0 (3222ms)
 
 ```
 [serena-live] spawning Serena via uvx (pinned v1.0.0)...
@@ -107,7 +107,7 @@ Full logs: `phase-1-integration-logs/serena-live.{stdout,stderr,rc,dur}`.
 
 ## Failures
 
-### 1. `scripts/verify/diagnostics-bridge.sh` — exit 1 (16038ms)
+### 1. `scripts/verify/diagnostics-bridge.sh` — exit 1 (16041ms)
 
 `pyright-langserver` is not installed on PATH, so the script takes its
 declared fallback `PYRIGHT=(npx -y pyright)`. The LSP probe sends
@@ -133,7 +133,7 @@ as a separate bin. `npx -y pyright-langserver --stdio` would be the
 LSP-capable invocation. Observation only — no source change
 performed, per the integration-tester's read-only charter.)
 
-This matches the failure recorded in the four previous phase-1
+This matches the failure recorded in the five previous phase-1
 integration reports; nothing between those runs and this one
 addressed it. The immediate environmental options to close the gap
 are:
