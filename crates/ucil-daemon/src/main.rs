@@ -9,8 +9,11 @@
 //! the `_meta.not_yet_implemented` stub envelope.
 
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
+use ucil_core::KnowledgeGraph;
+use ucil_daemon::executor::IngestPipeline;
 
 /// Extensions fed to `IngestPipeline::ingest_file` for the one-shot
 /// `--repo` bootstrap.  Mirrors `ucil_treesitter`'s language coverage
@@ -152,19 +155,49 @@ async fn main() -> Result<()> {
                 .map(std::path::PathBuf::from)
                 .filter(|p| p.is_dir());
 
-            if let Some(repo) = repo_dir.as_deref() {
+            // `_tmp` is bound to the match arm so the SQLite file +
+            // WAL + lock survive for the full `serve` loop.
+            let (server, _tmp) = if let Some(repo) = repo_dir.as_deref() {
+                let tmp = tempfile::TempDir::new()
+                    .context("ucil-daemon mcp --stdio: failed to create temp KG dir")?;
+                let kg_path = tmp.path().join("knowledge.db");
+                let mut kg = KnowledgeGraph::open(&kg_path)
+                    .context("ucil-daemon mcp --stdio: failed to open KnowledgeGraph")?;
+                let mut pipeline = IngestPipeline::new();
                 let files = walk_supported_source_files(repo);
+                let mut ingested: usize = 0;
+                for file in &files {
+                    match pipeline.ingest_file(&mut kg, file) {
+                        Ok(_) => ingested += 1,
+                        Err(e) => {
+                            tracing::warn!(
+                                file = %file.display(),
+                                error = %e,
+                                "ingest_file failed — skipping",
+                            );
+                        }
+                    }
+                }
                 tracing::info!(
                     repo = %repo.display(),
-                    file_count = files.len(),
-                    "--repo supplied (KG bootstrap will land in a follow-up commit)",
+                    discovered = files.len(),
+                    ingested,
+                    "ucil-daemon mcp --stdio bootstrap complete",
                 );
-            }
+                let kg_arc = Arc::new(Mutex::new(kg));
+                (
+                    ucil_daemon::server::McpServer::with_knowledge_graph(kg_arc),
+                    Some(tmp),
+                )
+            } else {
+                (ucil_daemon::server::McpServer::new(), None)
+            };
 
-            ucil_daemon::server::McpServer::new()
+            server
                 .serve(tokio::io::stdin(), tokio::io::stdout())
                 .await
                 .context("ucil-daemon mcp --stdio: serve loop terminated with error")?;
+            drop(_tmp);
             Ok(())
         }
         _ => {
