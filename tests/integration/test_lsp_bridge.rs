@@ -581,9 +581,9 @@ async fn test_typescript_project_diagnostics_and_calls() {
 }
 
 /// P1-W5-F08 — `mixed-project` fixture: three diagnostics (one per
-/// language) land as three `quality_issues` rows pointing at the
-/// fixture's Rust, Python, and TypeScript sources.  A single
-/// incoming-call dispatch against the `.rs` symbol asserts the
+/// language) land as three `quality_issues` rows referencing
+/// `tests/fixtures/mixed-project/src/{main.rs,main.py,index.ts}`.  A
+/// single incoming-call dispatch against the `.rs` symbol asserts the
 /// relation endpoint path ends with `main.rs` (the mixed-project rust
 /// half).
 #[tokio::test]
