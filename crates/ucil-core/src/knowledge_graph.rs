@@ -48,6 +48,7 @@
 use std::{io, path::Path, path::PathBuf};
 
 use rusqlite::{Connection, Transaction, TransactionBehavior};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 // ── Errors ────────────────────────────────────────────────────────────────────
@@ -93,6 +94,184 @@ pub enum KnowledgeGraphError {
         /// The value the pragma read-back returned.
         actual: String,
     },
+
+    /// A caller-supplied timestamp could not be parsed / round-tripped
+    /// through the bi-temporal layer's RFC-3339 contract.  Reserved for
+    /// future helpers; the CRUD helpers landed in WO-0024 never surface
+    /// this variant directly because they take pre-formatted
+    /// `DateTime<Utc>` values or `Option<String>`-typed RFC-3339 text.
+    #[error("invalid timestamp: {0}")]
+    InvalidTimestamp(String),
+}
+
+// ── Domain types ──────────────────────────────────────────────────────────────
+
+/// A row in the §12.1 `entities` table — the unit of identity in the
+/// knowledge graph.
+///
+/// Fields mirror `INIT_SQL`'s `entities` declaration verbatim so a round
+/// trip through [`KnowledgeGraph::upsert_entity`] ↔
+/// [`KnowledgeGraph::get_entity_by_qualified_name`] preserves every
+/// user-supplied column.  `id` is `None` before insert and `Some(rowid)`
+/// after; the three `t_*` TEXT columns are RFC-3339 strings (via
+/// [`chrono::DateTime::to_rfc3339`]) so `SQLite`'s string-comparison-based
+/// range queries in [`KnowledgeGraph::get_entity_as_of`] stay
+/// lexicographically correct — mixing RFC-3339 with the bare-space
+/// `datetime('now')` format on the *same* range-queried column is a
+/// silent-bug trap (WO-0024 RCA §Non-negotiable invariant 5).
+///
+/// See master-plan §12.1 lines 1130-1145 for the schema; §12.2 for the
+/// bi-temporal `t_valid_from` / `t_valid_to` semantics.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Entity {
+    /// `entities.id` — `None` until inserted; `Some(rowid)` after
+    /// [`KnowledgeGraph::upsert_entity`] returns on either the insert
+    /// or `ON CONFLICT DO UPDATE` branch.
+    pub id: Option<i64>,
+    /// `entities.kind` — `"function"`, `"class"`, `"module"`, `"file"`,
+    /// etc.  Free-form text; no enum constraint at the schema level.
+    pub kind: String,
+    /// `entities.name` — the unqualified symbol / file name.
+    pub name: String,
+    /// `entities.qualified_name` — fully-qualified identifier
+    /// (`module::path::Symbol`) when known.  Nullable because some
+    /// `entities.kind` values (e.g. `"file"`) don't have a qualified
+    /// name.  Participates in the `UNIQUE(qualified_name, file_path,
+    /// t_valid_from)` constraint at `INIT_SQL` line 125.
+    pub qualified_name: Option<String>,
+    /// `entities.file_path` — source-file path relative to the project
+    /// root.  Required (NOT NULL at the schema level).
+    pub file_path: String,
+    /// `entities.start_line` — 1-based inclusive start line.
+    pub start_line: Option<i64>,
+    /// `entities.end_line` — 1-based inclusive end line.
+    pub end_line: Option<i64>,
+    /// `entities.signature` — function/method signature or type
+    /// declaration when `kind` is a callable.
+    pub signature: Option<String>,
+    /// `entities.doc_comment` — attached rustdoc / `TSDoc` / docstring
+    /// when extraction is available.
+    pub doc_comment: Option<String>,
+    /// `entities.language` — ISO language tag or language-family name
+    /// (`"rust"`, `"python"`, `"typescript"`, ...).
+    pub language: Option<String>,
+    /// `entities.t_valid_from` — RFC-3339 timestamp (via
+    /// [`chrono::DateTime::to_rfc3339`]) of when the entity's facts
+    /// started being true in reality.  Nullable for facts with unknown
+    /// valid-time lower bound.
+    pub t_valid_from: Option<String>,
+    /// `entities.t_valid_to` — RFC-3339 timestamp of when the entity's
+    /// facts stopped being true.  `None` means "still valid".
+    pub t_valid_to: Option<String>,
+    /// `entities.importance` — 0.0..=1.0 fusion-layer hint; the schema
+    /// default is `0.5`.
+    pub importance: f64,
+    /// `entities.source_tool` — tool that produced the record
+    /// (`"tree-sitter"`, `"lsp"`, `"manual"`, ...).
+    pub source_tool: Option<String>,
+    /// `entities.source_hash` — content hash of the source span used at
+    /// extraction time, for staleness detection.
+    pub source_hash: Option<String>,
+}
+
+/// A row in the §12.1 `relations` table — a typed directed edge between
+/// two [`Entity`] rows.
+///
+/// `relations` has NO `UNIQUE` constraint in §12.1 — every call to
+/// [`KnowledgeGraph::upsert_relation`] appends a fresh row.  Callers
+/// that need dedup semantics must query first.
+///
+/// See master-plan §12.1 lines 1147-1156 for the schema.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Relation {
+    /// `relations.id` — `None` until inserted; `Some(rowid)` after
+    /// [`KnowledgeGraph::upsert_relation`] returns.
+    pub id: Option<i64>,
+    /// `relations.source_id` — the `entities.id` of the source vertex.
+    pub source_id: i64,
+    /// `relations.target_id` — the `entities.id` of the target vertex.
+    pub target_id: i64,
+    /// `relations.kind` — `"calls"`, `"imports"`, `"implements"`,
+    /// `"inherits"`, etc.  Free-form text; no enum constraint.
+    pub kind: String,
+    /// `relations.weight` — 0.0..=1.0 edge strength; the schema default
+    /// is `1.0`.
+    pub weight: f64,
+    /// `relations.t_valid_from` — RFC-3339 lower bound of validity, same
+    /// convention as [`Entity::t_valid_from`].
+    pub t_valid_from: Option<String>,
+    /// `relations.t_valid_to` — RFC-3339 upper bound of validity.
+    pub t_valid_to: Option<String>,
+    /// `relations.source_tool` — tool that produced the edge.
+    pub source_tool: Option<String>,
+    /// `relations.source_evidence` — free-form snippet / path / line
+    /// range documenting where the edge was inferred from.
+    pub source_evidence: Option<String>,
+    /// `relations.confidence` — 0.0..=1.0 fusion-layer hint; the schema
+    /// default is `0.8`.
+    pub confidence: f64,
+}
+
+/// A hot-tier observation staged for the merge-consolidator.
+///
+/// Written through [`KnowledgeGraph::stage_hot_observation`] so the
+/// insert goes through the `BEGIN IMMEDIATE` chokepoint
+/// (master-plan §11 line 1117) — the hot-staging tier is the most
+/// write-contended path in the UCIL pipeline and single-writer
+/// contention is the #1 source of `SQLITE_BUSY`.
+///
+/// Corresponds to the `hot_observations` row at `INIT_SQL` lines
+/// 190-198.  `created_at` and `promoted_to_warm` are managed by the
+/// schema default / consolidator and are not part of the writer
+/// contract.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HotObservation {
+    /// `hot_observations.raw_text` — the observation body; required.
+    pub raw_text: String,
+    /// `hot_observations.session_id` — id of the session that produced
+    /// the observation; optional for tool-side or offline batches.
+    pub session_id: Option<String>,
+    /// `hot_observations.related_file` — file path the observation
+    /// concerns, when known.
+    pub related_file: Option<String>,
+    /// `hot_observations.related_symbol` — symbol name the observation
+    /// concerns, when known.
+    pub related_symbol: Option<String>,
+}
+
+/// Checkpoint mode for [`KnowledgeGraph::checkpoint_wal`] — wraps
+/// `SQLite`'s `PRAGMA wal_checkpoint(<MODE>)`.
+///
+/// The Phase 1 Week 4 F08 hot-staging feature triggers a periodic
+/// checkpoint to bound WAL size under high insert pressure from the
+/// hot-tier writers; `Truncate` is the aggressive mode the scheduled
+/// sweep uses, `Passive` is the best-effort mode other call-sites use.
+///
+/// See the `SQLite` docs for `wal_checkpoint` for the full semantics of
+/// the four modes (`PASSIVE` / `FULL` / `RESTART` / `TRUNCATE`); UCIL
+/// only exposes the two relevant to the hot-staging sweep.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WalCheckpointMode {
+    /// `PASSIVE` — checkpoints as many frames as possible without
+    /// blocking any readers or writers; never returns `SQLITE_BUSY`.
+    /// The default mode for ad-hoc checkpoints.
+    Passive,
+    /// `TRUNCATE` — implies `RESTART` + truncates the WAL to zero
+    /// bytes; the aggressive mode the scheduled sweep uses to keep the
+    /// WAL file bounded.
+    Truncate,
+}
+
+impl WalCheckpointMode {
+    /// The string token `SQLite` expects inside
+    /// `PRAGMA wal_checkpoint(<MODE>)`.
+    #[must_use]
+    pub const fn as_sql(self) -> &'static str {
+        match self {
+            Self::Passive => "PASSIVE",
+            Self::Truncate => "TRUNCATE",
+        }
+    }
 }
 
 // ── Init DDL ──────────────────────────────────────────────────────────────────
