@@ -1,32 +1,31 @@
 # Phase 1 Integration Report
 
-**Tester session**: itg-06f04ce4-27a5-4b8a-bf22-707b1767e406
-**Verified at**: 2026-04-18T20:58:44Z
+**Tester session**: itg-f2b7a03b-6825-431b-beb3-c71720327bf5
+**Verified at**: 2026-04-18T21:09:41Z
 **Phase**: 1 (Week 1, per `ucil-build/progress.json`)
-**HEAD commit**: 7737d92b3076d60b0d71dc4da7cfe379c91a0ab3
+**HEAD commit**: f15578b9efb10f928334d3d78d87cedab34c0633
 **Verdict**: FAIL
 
 ## Summary
 
 Phase-1 gate requires three live smoke scripts (no mocks of Serena, LSP,
-or the UCIL daemon). Two of the three pass in this run; one still fails:
+or the UCIL daemon). Two of the three pass in this run; one still fails —
+the same shape as the two previous integration reports:
 
 - `scripts/verify/e2e-mcp-smoke.sh` — **exit 0** (PASS). Daemon binary
-  builds; `ucil-daemon mcp --stdio` returns `initialize` and
-  `tools/list`; all 22 frozen MCP tools are advertised with the four
-  CEQP universal params on every tool. This closes the regression
-  recorded in the prior integration report (2026-04-18T20:29:02Z),
-  delivered by WO-0040 (`merge: WO-0040 ucil-daemon-mcp-stdio-subcommand`,
-  commit `7737d92`).
+  builds from the warm cargo cache; `ucil-daemon mcp --stdio` returns
+  `initialize` and `tools/list`; all 22 frozen MCP tools are advertised
+  with the four CEQP universal params on every tool.
 - `scripts/verify/serena-live.sh` — **exit 0** (PASS). Serena v1.0.0
-  spawned via `uvx` and advertised 20 tools including the three required
-  for G1 structural (`find_symbol`, `find_referencing_symbols`,
+  spawned via `uvx` in ~3 s and advertised 20 tools including the three
+  required for G1 structural (`find_symbol`, `find_referencing_symbols`,
   `get_symbols_overview`).
-- `scripts/verify/diagnostics-bridge.sh` — **exit 1** (FAIL). pyright via
-  the `npx -y pyright` fallback path still emits no framed
+- `scripts/verify/diagnostics-bridge.sh` — **exit 1** (FAIL, 16 s).
+  pyright via the `npx -y pyright` fallback still emits no framed
   `textDocument/publishDiagnostics` response to the LSP `didOpen` probe
-  within the 15-second wait window. This is the same failure shape as
-  the previous integration report — nothing in this pass closed it.
+  within the 15-second wait window. Identical failure shape to reports
+  dated 2026-04-18T20:29:02Z and 2026-04-18T20:58:44Z; nothing in
+  HEAD (`f15578b`) addressed it.
 
 Because one gate script fails, the overall verdict is **FAIL**.
 
@@ -47,7 +46,7 @@ become relevant only in Phase 3+ per `.claude/agents/integration-tester.md`.
 
 | Service              | Source / Image                                                               | Up time | Healthy | Notes                                                                                                                                        |
 |----------------------|------------------------------------------------------------------------------|---------|---------|----------------------------------------------------------------------------------------------------------------------------------------------|
-| ucil-daemon (local)  | `cargo build -p ucil-daemon --bin ucil-daemon` (incremental cache warm)      | ~1s     | yes     | Binary builds and answers MCP `initialize` + `tools/list` over stdio; 22 tools with CEQP params on all.                                      |
+| ucil-daemon (local)  | `cargo build -p ucil-daemon --bin ucil-daemon` (incremental cache warm)      | <1s     | yes     | Binary builds and answers MCP `initialize` + `tools/list` over stdio; 22 tools with CEQP params on all.                                      |
 | Serena (uvx)         | `uvx --from git+https://github.com/oraios/serena@v1.0.0 serena-mcp-server`   | ~3s     | yes     | MCP handshake OK; 20 tools advertised including `find_symbol`, `find_referencing_symbols`, `get_symbols_overview`.                           |
 | pyright-langserver   | `npx -y pyright` fallback (no `pyright-langserver` on PATH)                  | ~16s    | no      | Process starts; never emits a framed `textDocument/publishDiagnostics` response to the LSP `didOpen` probe within the 15s wait (see §Failures). |
 
@@ -55,7 +54,7 @@ become relevant only in Phase 3+ per `.claude/agents/integration-tester.md`.
 
 | Suite                                    | Passed | Failed | Skipped | Duration | Exit |
 |------------------------------------------|--------|--------|---------|----------|------|
-| scripts/verify/e2e-mcp-smoke.sh          | 1      | 0      | 0       | 1s       | 0    |
+| scripts/verify/e2e-mcp-smoke.sh          | 1      | 0      | 0       | 0s       | 0    |
 | scripts/verify/serena-live.sh            | 1      | 0      | 0       | 3s       | 0    |
 | scripts/verify/diagnostics-bridge.sh     | 0      | 1      | 0       | 16s      | 1    |
 | cargo nextest integration (deferred)     | —      | —      | —       | —        | —    |
@@ -71,18 +70,18 @@ shadowing the gate's own invocation.
 
 ## Passes
 
-### 1. `scripts/verify/e2e-mcp-smoke.sh` — exit 0 (1s)
+### 1. `scripts/verify/e2e-mcp-smoke.sh` — exit 0 (<1s)
 
 ```
 [e2e-mcp-smoke] building ucil-daemon...
 [e2e-mcp-smoke] OK — 22 tools registered, CEQP params on all, daemon spoke MCP cleanly.
 ```
 
-Daemon binary built on the incremental cargo cache (~1 s), answered
-both `initialize` and `tools/list` over `ucil-daemon mcp --stdio`; the
-22 frozen tool names from master-plan §3 are all present and every
-tool advertises the four CEQP universal params (`reason`,
-`current_task`, `files_in_context`, `token_budget`).
+Daemon binary served from the incremental cargo cache (effectively no
+rebuild); answered both `initialize` and `tools/list` over
+`ucil-daemon mcp --stdio`; the 22 frozen tool names from master-plan §3
+are all present and every tool advertises the four CEQP universal
+params (`reason`, `current_task`, `files_in_context`, `token_budget`).
 
 Full logs: `phase-1-integration-logs/e2e-mcp-smoke.{stdout,stderr,rc,dur}`.
 
@@ -124,9 +123,10 @@ server; it is shipped by the same npm package but as a separate bin.
 `npx -y pyright-langserver --stdio` is the LSP-capable invocation.
 Observation only — no source change performed.)
 
-This matches the failure recorded at 2026-04-18T20:29:02Z in the
-previous report; nothing between the two runs addressed it. The
-immediate environmental options to close the gap are:
+This matches the failure recorded at 2026-04-18T20:29:02Z and
+2026-04-18T20:58:44Z in the previous reports; nothing between those
+runs and this one addressed it. The immediate environmental options
+to close the gap are:
 
 - install `pyright` globally on the host (`npm i -g pyright` places
   both `pyright` and `pyright-langserver` on PATH), **or**
