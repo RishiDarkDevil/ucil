@@ -41,6 +41,11 @@ pub mod session_ttl;
 pub mod storage;
 pub mod watcher;
 
+// Crate-private test utilities (process-wide PATH guard). Compiled
+// only under `#[cfg(test)]` so the release binary stays clean.
+#[cfg(test)]
+mod test_support;
+
 #[rustfmt::skip]
 pub use lifecycle::{Checkpoint, CheckpointError, Lifecycle, PidFile, PidFileError, ShutdownReason};
 pub use plugin_manager::{

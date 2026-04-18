@@ -430,6 +430,13 @@ fn parse_worktree_porcelain(output: &str) -> Vec<WorktreeInfo> {
 #[cfg(test)]
 #[tokio::test]
 async fn test_session_state_tracking() {
+    // Hold the crate-wide PATH guard for the duration of the test: we
+    // spawn `git` via `tokio::process::Command::new("git")`, which
+    // performs a PATH lookup at spawn time. The `watcher` module's
+    // `PATH`-mutating tests acquire the same guard in
+    // `crate::test_support::PathRestoreGuard` — holding it here
+    // prevents their blank-PATH window from racing with our git spawn.
+    let _env = crate::test_support::env_guard();
     let repo = std::env::current_dir().expect("current dir");
     let sm = SessionManager::new();
     let id = sm
@@ -502,6 +509,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_session_returns_fresh_uuid_each_call() {
+        let _env = crate::test_support::env_guard();
         let repo = std::env::current_dir().expect("current dir");
         let sm = SessionManager::new();
         let id1 = sm.create_session(&repo).await.expect("first session");
@@ -514,6 +522,7 @@ mod tests {
 
     #[tokio::test]
     async fn detect_branch_returns_non_empty_inside_git_repo() {
+        let _env = crate::test_support::env_guard();
         let repo = std::env::current_dir().expect("current dir");
         let branch = SessionManager::detect_branch(&repo)
             .await
@@ -523,6 +532,7 @@ mod tests {
 
     #[tokio::test]
     async fn detect_branch_errors_outside_git_repo() {
+        let _env = crate::test_support::env_guard();
         // tempfile::TempDir creates a unique directory under /tmp, which is
         // NOT inside any git repository on a standard Linux system.
         let tmp = tempfile::TempDir::new().expect("temp dir");
@@ -535,6 +545,7 @@ mod tests {
 
     #[tokio::test]
     async fn discover_worktrees_returns_at_least_one() {
+        let _env = crate::test_support::env_guard();
         let repo = std::env::current_dir().expect("current dir");
         let worktrees = SessionManager::discover_worktrees(&repo)
             .await
@@ -554,6 +565,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_session_returns_some_after_create() {
+        let _env = crate::test_support::env_guard();
         let repo = std::env::current_dir().expect("current dir");
         let sm = SessionManager::new();
         let id = sm.create_session(&repo).await.expect("create");

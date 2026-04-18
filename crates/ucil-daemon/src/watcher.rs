@@ -1066,59 +1066,19 @@ async fn test_watcher_shutdown_is_clean() {
 //
 // Watchman detection + backend selection tests. Kept at module root per
 // DEC-0005 so the frozen F03 selector `watcher::test_watchman_detection`
-// resolves without a `tests::` prefix. The `PATH`-manipulating tests
-// serialise through a module-level mutex because `std::env::set_var`
-// / `remove_var` mutate a process-global; multi-thread nextest
-// execution could otherwise corrupt a concurrent test's environment.
-// See the `RestorePath` guard below for the save/restore pattern.
+// resolves without a `tests::` prefix.
+//
+// The `PATH`-manipulating tests serialise through the crate-scoped
+// `test_support::ENV_GUARD` so they cannot interleave with each other
+// *or* with other modules' tests that spawn subprocesses via PATH
+// lookup (e.g. `session_manager::tests::*` spawning `git` via
+// `tokio::process::Command::new("git")`). Under `cargo test` all
+// `#[test]`s in this crate share one process, so a module-local mutex
+// would fence watcher-vs-watcher only and still lose to concurrent
+// `git` spawns during the blank-PATH window.
 
 #[cfg(test)]
-static ENV_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-/// RAII guard that captures the current `PATH` on construction and
-/// restores it on drop. The guard *also* holds a lock on
-/// [`ENV_GUARD`] so two `PATH`-mutating tests never interleave their
-/// `set_var` / `remove_var` calls. Lock is acquired before any
-/// mutation; released only after `PATH` has been restored to its
-/// original value (or cleared if it was unset).
-///
-/// Using `MutexGuard<'static, ()>` with `Mutex::lock().unwrap()` —
-/// poisoning would surface as a panic, which is acceptable here
-/// because a poisoned env-guard means a previous test panicked while
-/// holding the lock and any surviving `PATH` state is untrusted.
-#[cfg(test)]
-struct RestorePath {
-    original: Option<std::ffi::OsString>,
-    _lock: std::sync::MutexGuard<'static, ()>,
-}
-
-#[cfg(test)]
-impl RestorePath {
-    fn new() -> Self {
-        // `Mutex::lock().unwrap()` panics on poison — intentional: a
-        // poisoned guard means the prior holder panicked while mutating
-        // PATH and the current state is untrusted.
-        let lock = ENV_GUARD
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let original = std::env::var_os("PATH");
-        Self {
-            original,
-            _lock: lock,
-        }
-    }
-}
-
-#[cfg(test)]
-impl Drop for RestorePath {
-    fn drop(&mut self) {
-        if let Some(value) = &self.original {
-            std::env::set_var("PATH", value);
-        } else {
-            std::env::remove_var("PATH");
-        }
-    }
-}
+use crate::test_support::PathRestoreGuard as RestorePath;
 
 /// Create a fake executable `watchman` shim at `<dir>/watchman` with
 /// mode `0o755`. File contents are an empty-shebang shell script; the
