@@ -7,6 +7,7 @@ blocks_loop: false
 session_role: monitor
 session_work: observed-watchdog-auto-resume-at-19:10UTC-PID-2460067; orchestrator-healthy; WO-0039-executor-pipeline-pending
 auto_resolve_on_next_triage: bucket-A
+resolved: true
 ---
 
 # Phase 1 gate incomplete — monitor session (post watchdog auto-resume)
@@ -37,3 +38,18 @@ is alive and advancing through triage/executor cycle for WO-0039.
 - Bucket A auto-resolve on next triage pass.
 - Intentionally NO `resolved: true` line in frontmatter so stop-hook
   bypass fires this turn.
+
+## Resolution
+
+Bucket A auto-resolve — admin heartbeat condition satisfied. WO-0039
+merged into `main` (merge commits `17c49f1` manual-conflict-resolve and
+`42e0385` final-feat-merge). Current HEAD on `main` includes both.
+Git log confirms:
+
+    42e0385 merge: WO-0039 watchman-backend-retry-with-pathguard (feat → main)
+    35dc2da chore(escalation): resolve WO-0039 premise-wrong — ...
+    17c49f1 merge: WO-0039 ... (manual conflict resolve)
+
+No further action required.
+
+resolved: true
