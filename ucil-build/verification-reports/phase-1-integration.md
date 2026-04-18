@@ -1,31 +1,32 @@
 # Phase 1 Integration Report
 
-**Tester session**: itg-f2b7a03b-6825-431b-beb3-c71720327bf5
-**Verified at**: 2026-04-18T21:09:41Z
+**Tester session**: itg-fa4d7cfe-9f44-4ee4-88b5-e3db051b4b37
+**Verified at**: 2026-04-18T21:20:27Z
 **Phase**: 1 (Week 1, per `ucil-build/progress.json`)
-**HEAD commit**: f15578b9efb10f928334d3d78d87cedab34c0633
+**HEAD commit**: 9ec3fd1f3a613d0f8c830fdf8393e191112cf5b2
 **Verdict**: FAIL
 
 ## Summary
 
 Phase-1 gate requires three live smoke scripts (no mocks of Serena, LSP,
 or the UCIL daemon). Two of the three pass in this run; one still fails —
-the same shape as the two previous integration reports:
+identical failure shape to every previous phase-1 integration report:
 
-- `scripts/verify/e2e-mcp-smoke.sh` — **exit 0** (PASS). Daemon binary
-  builds from the warm cargo cache; `ucil-daemon mcp --stdio` returns
-  `initialize` and `tools/list`; all 22 frozen MCP tools are advertised
-  with the four CEQP universal params on every tool.
-- `scripts/verify/serena-live.sh` — **exit 0** (PASS). Serena v1.0.0
-  spawned via `uvx` in ~3 s and advertised 20 tools including the three
+- `scripts/verify/e2e-mcp-smoke.sh` — **exit 0** (PASS, <1s). Daemon
+  binary serves from the warm cargo cache; `ucil-daemon mcp --stdio`
+  answers `initialize` and `tools/list`; all 22 frozen MCP tools are
+  advertised with the four CEQP universal params on every tool.
+- `scripts/verify/serena-live.sh` — **exit 0** (PASS, 3s). Serena
+  v1.0.0 spawned via `uvx` and advertised 20 tools including the three
   required for G1 structural (`find_symbol`, `find_referencing_symbols`,
   `get_symbols_overview`).
-- `scripts/verify/diagnostics-bridge.sh` — **exit 1** (FAIL, 16 s).
-  pyright via the `npx -y pyright` fallback still emits no framed
+- `scripts/verify/diagnostics-bridge.sh` — **exit 1** (FAIL, 16s).
+  pyright via the `npx -y pyright` fallback again emits no framed
   `textDocument/publishDiagnostics` response to the LSP `didOpen` probe
-  within the 15-second wait window. Identical failure shape to reports
-  dated 2026-04-18T20:29:02Z and 2026-04-18T20:58:44Z; nothing in
-  HEAD (`f15578b`) addressed it.
+  within the 15-second wait window. Identical shape to reports dated
+  2026-04-18T20:29:02Z, 2026-04-18T20:58:44Z, and 2026-04-18T21:09:41Z;
+  nothing in HEAD (`9ec3fd1`, a triage admin/benign commit) addressed
+  it.
 
 Because one gate script fails, the overall verdict is **FAIL**.
 
@@ -54,7 +55,7 @@ become relevant only in Phase 3+ per `.claude/agents/integration-tester.md`.
 
 | Suite                                    | Passed | Failed | Skipped | Duration | Exit |
 |------------------------------------------|--------|--------|---------|----------|------|
-| scripts/verify/e2e-mcp-smoke.sh          | 1      | 0      | 0       | 0s       | 0    |
+| scripts/verify/e2e-mcp-smoke.sh          | 1      | 0      | 0       | <1s      | 0    |
 | scripts/verify/serena-live.sh            | 1      | 0      | 0       | 3s       | 0    |
 | scripts/verify/diagnostics-bridge.sh     | 0      | 1      | 0       | 16s      | 1    |
 | cargo nextest integration (deferred)     | —      | —      | —       | —        | —    |
@@ -103,7 +104,7 @@ Full logs: `phase-1-integration-logs/serena-live.{stdout,stderr,rc,dur}`.
 pyright is not installed as `pyright-langserver` on PATH, so the script
 takes the declared fallback `PYRIGHT=(npx -y pyright)`. The LSP probe
 sends `initialize` → `initialized` → `textDocument/didOpen` of a file
-with a deliberate type error and waits 15 s for a framed
+with a deliberate type error and waits 15s for a framed
 `textDocument/publishDiagnostics` reply. No such reply arrives; the
 Python framed-message extractor yields an empty `out.jsonl` and the
 script fails at the "no publishDiagnostics with a non-empty diagnostic
@@ -117,16 +118,15 @@ Log tail (stderr):
 ```
 
 (The follow-up "messages received" line is blank because `out.jsonl` is
-empty — pyright invoked via `npx -y pyright` runs the CLI entrypoint,
-which is not an LSP server. The `pyright-langserver` binary is the LSP
-server; it is shipped by the same npm package but as a separate bin.
-`npx -y pyright-langserver --stdio` is the LSP-capable invocation.
+empty — `npx -y pyright` runs the pyright CLI entrypoint, which is not
+an LSP server. The `pyright-langserver` binary is the LSP server; it is
+shipped by the same npm package but as a separate bin. `npx -y
+pyright-langserver --stdio` would be the LSP-capable invocation.
 Observation only — no source change performed.)
 
-This matches the failure recorded at 2026-04-18T20:29:02Z and
-2026-04-18T20:58:44Z in the previous reports; nothing between those
-runs and this one addressed it. The immediate environmental options
-to close the gap are:
+This matches the failure recorded in the three previous phase-1
+integration reports; nothing between those runs and this one addressed
+it. The immediate environmental options to close the gap are:
 
 - install `pyright` globally on the host (`npm i -g pyright` places
   both `pyright` and `pyright-langserver` on PATH), **or**
