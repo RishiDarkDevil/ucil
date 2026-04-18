@@ -1,7 +1,12 @@
 //! `ucil-daemon` library root — re-exports for integration tests.
 //!
-//! All daemon logic lives in sub-modules (`server`, `watcher`, `plugin_manager`, etc.).
-//! This file only declares modules and re-exports.
+//! All daemon logic lives in sub-modules (`lifecycle`, `plugin_manager`,
+//! `server`, `session_manager`, …).  This file only declares modules
+//! and re-exports.
+//!
+//! The `lifecycle` module (introduced in WO-0021 for P1-W3-F01) owns
+//! the daemon's PID-file guard and `SIGTERM` / `SIGHUP` driven shutdown
+//! — see [`lifecycle`] for details.
 
 #![deny(warnings)]
 #![warn(clippy::all, clippy::pedantic, clippy::nursery)]
