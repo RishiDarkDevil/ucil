@@ -1116,7 +1116,7 @@ fn create_watchman_shim(dir: &Path) -> PathBuf {
 fn test_watchman_detection() {
     let _guard = RestorePath::new();
     let empty = tempfile::TempDir::new().expect("create empty tempdir");
-    std::env::set_var("PATH", empty.path());
+    std::env::set_var("PATH", empty.path()); // under PathRestoreGuard
     assert!(
         detect_watchman().is_none(),
         "watchman should not be found on an empty PATH"
@@ -1124,7 +1124,7 @@ fn test_watchman_detection() {
 
     let shim_dir = tempfile::TempDir::new().expect("create shim tempdir");
     let shim_path = create_watchman_shim(shim_dir.path());
-    std::env::set_var("PATH", shim_dir.path());
+    std::env::set_var("PATH", shim_dir.path()); // under PathRestoreGuard
 
     let capability = detect_watchman().expect("watchman should be detected via fake shim");
 
@@ -1171,7 +1171,7 @@ fn test_count_files_capped_stops_early() {
 fn test_auto_select_backend_returns_notify_when_watchman_absent() {
     let _guard = RestorePath::new();
     let empty = tempfile::TempDir::new().expect("create empty tempdir");
-    std::env::set_var("PATH", empty.path());
+    std::env::set_var("PATH", empty.path()); // under PathRestoreGuard
 
     let root = tempfile::TempDir::new().expect("create root tempdir");
     assert_eq!(
@@ -1192,7 +1192,7 @@ fn test_auto_select_backend_returns_watchman_when_available_and_above_threshold(
 
     let shim_dir = tempfile::TempDir::new().expect("create shim tempdir");
     let _shim = create_watchman_shim(shim_dir.path());
-    std::env::set_var("PATH", shim_dir.path());
+    std::env::set_var("PATH", shim_dir.path()); // under PathRestoreGuard
 
     assert_eq!(
         auto_select_backend(root.path(), 10),
@@ -1212,7 +1212,7 @@ fn test_auto_select_backend_returns_notify_when_below_threshold() {
 
     let shim_dir = tempfile::TempDir::new().expect("create shim tempdir");
     let _shim = create_watchman_shim(shim_dir.path());
-    std::env::set_var("PATH", shim_dir.path());
+    std::env::set_var("PATH", shim_dir.path()); // under PathRestoreGuard
 
     assert_eq!(
         auto_select_backend(root.path(), 10),
