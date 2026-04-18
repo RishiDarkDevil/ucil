@@ -905,10 +905,10 @@
         "P1-W5-F01",
         "P1-W4-F05"
       ],
-      "passes": false,
-      "last_verified_ts": null,
-      "last_verified_by": null,
-      "last_verified_commit": null,
+      "passes": true,
+      "last_verified_ts": "2026-04-18T17:49:27Z",
+      "last_verified_by": "verifier-3692c7e0-2961-4a2c-a3a5-cf5416a729d0",
+      "last_verified_commit": "4a5d7211a73524d7615fee0c2d042fb5bc31ea37",
       "attempts": 0,
       "blocked_reason": null
     },
