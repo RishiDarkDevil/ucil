@@ -8,6 +8,7 @@ members = [
     "crates/ucil-lsp-diagnostics",
     "crates/ucil-agents",
     "crates/ucil-embeddings",
+    "tests/integration",
 ]
 
 [workspace.package]
