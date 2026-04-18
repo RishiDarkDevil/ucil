@@ -82,6 +82,54 @@ impl Language {
             Self::Json => tree_sitter_json::LANGUAGE.into(),
         }
     }
+
+    /// Map a filename extension (without the leading `.`) to the
+    /// [`Language`] variant whose tree-sitter grammar handles it.
+    ///
+    /// Consumers downstream of [`crate::Parser`] (for example the
+    /// `understand_code` MCP tool handler introduced by WO-0036 and
+    /// feature `P1-W4-F09`) need to pick a grammar from the caller's
+    /// target-file path alone.  This helper centralises the mapping so
+    /// every call site (handler, warm-tier sweep, phase-2 fusion
+    /// layer) agrees on which extension routes to which grammar.
+    ///
+    /// Matching is case-insensitive — `"RS"`, `"Rs"`, and `"rs"` all map
+    /// to [`Self::Rust`].  Unknown extensions return `None`; callers
+    /// decide whether that is an error or a skip condition.
+    ///
+    /// References:
+    ///   * master-plan §18 Phase 1 Week 2 line 1744 (multi-language
+    ///     parser: `≥10 languages`).
+    ///   * feature `P1-W4-F09` (`understand_code` — extension → language
+    ///     is the first step of file-mode dispatch).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use ucil_treesitter::Language;
+    ///
+    /// assert_eq!(Language::from_extension("rs"), Some(Language::Rust));
+    /// assert_eq!(Language::from_extension("PY"), Some(Language::Python));
+    /// assert_eq!(Language::from_extension("tsx"), Some(Language::TypeScript));
+    /// assert_eq!(Language::from_extension("unknown"), None);
+    /// ```
+    #[must_use]
+    pub fn from_extension(ext: &str) -> Option<Self> {
+        match ext.to_ascii_lowercase().as_str() {
+            "rs" => Some(Self::Rust),
+            "py" | "pyi" => Some(Self::Python),
+            "ts" | "tsx" | "mts" | "cts" => Some(Self::TypeScript),
+            "js" | "jsx" | "mjs" | "cjs" => Some(Self::JavaScript),
+            "go" => Some(Self::Go),
+            "java" => Some(Self::Java),
+            "c" | "h" => Some(Self::C),
+            "cpp" | "cc" | "cxx" | "hpp" | "hh" | "hxx" => Some(Self::Cpp),
+            "rb" => Some(Self::Ruby),
+            "sh" | "bash" => Some(Self::Bash),
+            "json" => Some(Self::Json),
+            _ => None,
+        }
+    }
 }
 
 /// All languages supported by this build of `ucil-treesitter`.
@@ -235,5 +283,50 @@ mod tests {
                 "language {lang:?} produced unexpected LanguageLoad error"
             );
         }
+    }
+
+    #[test]
+    fn from_extension_maps_canonical_extensions() {
+        assert_eq!(Language::from_extension("rs"), Some(Language::Rust));
+        assert_eq!(Language::from_extension("py"), Some(Language::Python));
+        assert_eq!(Language::from_extension("ts"), Some(Language::TypeScript));
+        assert_eq!(Language::from_extension("tsx"), Some(Language::TypeScript));
+        assert_eq!(Language::from_extension("js"), Some(Language::JavaScript));
+        assert_eq!(Language::from_extension("jsx"), Some(Language::JavaScript));
+        assert_eq!(Language::from_extension("go"), Some(Language::Go));
+        assert_eq!(Language::from_extension("java"), Some(Language::Java));
+        assert_eq!(Language::from_extension("c"), Some(Language::C));
+        assert_eq!(Language::from_extension("h"), Some(Language::C));
+        assert_eq!(Language::from_extension("cpp"), Some(Language::Cpp));
+        assert_eq!(Language::from_extension("hpp"), Some(Language::Cpp));
+        assert_eq!(Language::from_extension("rb"), Some(Language::Ruby));
+        assert_eq!(Language::from_extension("sh"), Some(Language::Bash));
+        assert_eq!(Language::from_extension("bash"), Some(Language::Bash));
+        assert_eq!(Language::from_extension("json"), Some(Language::Json));
+    }
+
+    #[test]
+    fn from_extension_is_case_insensitive() {
+        assert_eq!(Language::from_extension("RS"), Some(Language::Rust));
+        assert_eq!(Language::from_extension("Py"), Some(Language::Python));
+        assert_eq!(Language::from_extension("JSX"), Some(Language::JavaScript));
+    }
+
+    #[test]
+    fn from_extension_returns_none_for_unknown() {
+        assert_eq!(Language::from_extension(""), None);
+        assert_eq!(Language::from_extension("txt"), None);
+        assert_eq!(Language::from_extension("md"), None);
+        assert_eq!(Language::from_extension("yaml"), None);
+        assert_eq!(Language::from_extension("xyz"), None);
+    }
+
+    #[test]
+    fn from_extension_does_not_panic_on_leading_dot() {
+        // Helper does not strip the leading `.` — callers must.  This
+        // test simply proves the call does not panic for that input and
+        // returns None, so a future caller that forgets to strip sees a
+        // graceful None instead of a crash.
+        assert_eq!(Language::from_extension(".rs"), None);
     }
 }
