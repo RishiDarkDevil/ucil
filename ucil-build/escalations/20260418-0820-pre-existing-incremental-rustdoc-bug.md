@@ -6,6 +6,7 @@ blocks_loop: false
 requires_planner_action: true
 related_work_order: WO-0024
 related_features: [P1-W4-F02, P1-W4-F08]
+resolved: true
 ---
 # Escalation: Pre-existing `cargo doc` failure in `crates/ucil-core/src/incremental.rs` blocks WO-0024 gate
 
@@ -145,3 +146,25 @@ approval of the micro-WO's scope.
 
 (No `resolved: true` yet — awaiting triage/planner action to emit the
 fix-WO and re-run WO-0024 gate.)
+
+---
+
+## Resolution
+
+Resolved 2026-04-18 by triage cap-rescue pass — converted to **WO-0025
+(fix-incremental-rustdoc-ambiguity)** at
+`ucil-build/work-orders/0025-fix-incremental-rustdoc-ambiguity.json`.
+
+The escalation satisfied every Bucket-D criterion (narrow bug-fix in
+UCIL source, ≤ 8 lines / 1 file, both related features `attempts = 0`,
+concrete fix suggested by rustdoc itself). WO-0025 carries empty
+`feature_ids` per Bucket-D spec; acceptance gate re-runs the `cargo doc`
+check plus regression guards on the existing 5 incremental:: tests.
+
+After WO-0025 merges, the orchestrator's next iteration should re-verify
+WO-0024 (verifier_attempts counter is in-memory per DEC-0007 / triage
+rubric; a new verifier session will start clean). Criterion 5 will go
+green, all other 17 checks remain green, and P1-W4-F02 + P1-W4-F08 will
+flip to passes=true.
+
+Bucket D — converted to WO-0025. See that work-order for the fix.
