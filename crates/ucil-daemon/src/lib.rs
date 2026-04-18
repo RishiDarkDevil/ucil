@@ -121,5 +121,7 @@ pub use session_ttl::{compute_expires_at, is_expired};
 pub use startup::{ProgressiveStartup, ReadyHandle, StartupError, STARTUP_DEADLINE};
 pub use storage::{StorageError, StorageLayout};
 pub use watcher::{
-    EventSource, FileEvent, FileEventKind, FileWatcher, WatcherError, DEBOUNCE_WINDOW,
+    auto_select_backend, count_files_capped, detect_watchman, EventSource, FileEvent,
+    FileEventKind, FileWatcher, WatcherBackend, WatcherError, WatchmanCapability, DEBOUNCE_WINDOW,
+    POLL_WATCHER_INTERVAL, WATCHMAN_AUTO_SELECT_THRESHOLD,
 };

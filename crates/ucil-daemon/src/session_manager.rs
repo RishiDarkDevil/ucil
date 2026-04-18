@@ -429,6 +429,13 @@ fn parse_worktree_porcelain(output: &str) -> Vec<WorktreeInfo> {
 // segment. See DEC-0005 and the WO-0007 rejection history.
 #[cfg(test)]
 #[tokio::test]
+// DEC-0011: the `env_guard()` MutexGuard is held across the `git` spawn
+// awaits on purpose — that is what fences concurrent PATH mutators.
+// `#[tokio::test]` runs on a single-threaded runtime, so the
+// non-`Send` guard cannot cross thread boundaries; the
+// deadlock-mitigation `clippy::await_holding_lock` guards against does
+// not apply here.
+#[allow(clippy::await_holding_lock)]
 async fn test_session_state_tracking() {
     // DEC-0011: fence PATH mutations in watcher tests
     let _g = crate::test_support::env_guard();
@@ -503,6 +510,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // DEC-0011 — see `test_session_state_tracking`.
     async fn create_session_returns_fresh_uuid_each_call() {
         // DEC-0011: fence PATH mutations in watcher tests
         let _g = crate::test_support::env_guard();
@@ -517,6 +525,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // DEC-0011 — see `test_session_state_tracking`.
     async fn detect_branch_returns_non_empty_inside_git_repo() {
         // DEC-0011: fence PATH mutations in watcher tests
         let _g = crate::test_support::env_guard();
@@ -528,6 +537,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // DEC-0011 — see `test_session_state_tracking`.
     async fn detect_branch_errors_outside_git_repo() {
         // DEC-0011: fence PATH mutations in watcher tests
         let _g = crate::test_support::env_guard();
@@ -542,6 +552,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // DEC-0011 — see `test_session_state_tracking`.
     async fn discover_worktrees_returns_at_least_one() {
         // DEC-0011: fence PATH mutations in watcher tests
         let _g = crate::test_support::env_guard();
@@ -563,6 +574,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // DEC-0011 — see `test_session_state_tracking`.
     async fn get_session_returns_some_after_create() {
         // DEC-0011: fence PATH mutations in watcher tests
         let _g = crate::test_support::env_guard();
