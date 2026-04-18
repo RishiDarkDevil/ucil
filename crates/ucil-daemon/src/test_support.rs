@@ -13,13 +13,23 @@
 //! `remove_var` mutate that one shared process env. A `watcher` test
 //! that blanks `PATH` can therefore race with a `session_manager`
 //! test whose `tokio::process::Command::new("git")` performs a PATH
-//! lookup at spawn time. The test_support module gives both sides a
+//! lookup at spawn time. The `test_support` module gives both sides a
 //! single rendezvous mutex.
 //!
 //! Cargo `nextest`, by contrast, spawns one process per test function
 //! so the env-var mutation is per-test-process isolated there — the
 //! bug WO-0027 tripped over was only visible under `cargo test` /
 //! `cargo llvm-cov`. See DEC-0011 for the full decision record.
+
+// The three items below use `pub(crate)` deliberately — DEC-0011 and the
+// WO-0039 acceptance-criteria grep assertions require literal
+// `pub(crate) static ENV_GUARD`, `pub(crate) fn env_guard`, and
+// `pub(crate) struct PathRestoreGuard`. The module itself is private
+// (`#[cfg(test)] mod test_support;` in `lib.rs`), so clippy's
+// nursery `redundant_pub_crate` lint would otherwise suggest reducing
+// to plain `pub`; silence it locally to preserve the spec-mandated
+// syntax.
+#![allow(clippy::redundant_pub_crate)]
 
 #[cfg(test)]
 use std::sync::{Mutex, MutexGuard, PoisonError};
