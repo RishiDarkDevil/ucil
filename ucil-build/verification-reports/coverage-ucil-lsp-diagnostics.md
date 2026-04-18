@@ -3,11 +3,12 @@
 - **Verdict**: FAIL
 - **Min line coverage**: 85%
 - **Min branch coverage**: 75%
-- **Generated**: 2026-04-18T22:27:58Z
+- **Generated**: 2026-04-18T22:49:26Z
 
 `cargo llvm-cov report` failed after profraw prune. Tail of log:
 
 ```
+warning: /home/rishidarkdevil/Desktop/ucil/target/ucil-2976536-296019887438194485_24.profraw: invalid instrumentation profile data (file header is corrupt)
 warning: /home/rishidarkdevil/Desktop/ucil/target/ucil-2669591-4475060405275049803_23.profraw: invalid instrumentation profile data (file header is corrupt)
 warning: /home/rishidarkdevil/Desktop/ucil/target/ucil-2929084-3356260871592694048_28.profraw: invalid instrumentation profile data (file header is corrupt)
 warning: /home/rishidarkdevil/Desktop/ucil/target/ucil-2773341-4475060405275049803_29.profraw: invalid instrumentation profile data (file header is corrupt)

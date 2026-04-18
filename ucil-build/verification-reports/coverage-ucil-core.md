@@ -3,7 +3,7 @@
 - **Verdict**: FAIL
 - **Min line coverage**: 85%
 - **Min branch coverage**: 75%
-- **Generated**: 2026-04-18T22:27:48Z
+- **Generated**: 2026-04-18T22:49:16Z
 
 `cargo llvm-cov report` failed after profraw prune. Tail of log:
 
