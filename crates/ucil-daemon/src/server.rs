@@ -1661,3 +1661,382 @@ fn test_find_definition_tool_missing_name_param() {
         "JSON-RPC error response must not also carry `result`: {response}"
     );
 }
+
+// ── get_conventions acceptance tests (P1-W4-F10) ─────────────────────────
+//
+// Per DEC-0005, these live at module root so the frozen acceptance
+// selector `server::test_get_conventions_tool` resolves to
+// `ucil_daemon::server::test_get_conventions_tool` for
+// `cargo nextest run -p ucil-daemon server::test_get_conventions_tool`
+// without an intermediate `tests::` segment.
+
+/// Build an `McpServer::with_knowledge_graph`-backed server populated
+/// with two real `conventions` rows inserted directly through
+/// [`KnowledgeGraph::insert_convention`] (one `category='naming'`,
+/// one `category='error_handling'`).
+///
+/// Returns `(server, kg_arc, tmp_dir)` so the caller can assert the
+/// response envelope without worrying about the tempdir being dropped.
+#[cfg(test)]
+fn build_get_conventions_fixture() -> (
+    McpServer,
+    Arc<Mutex<ucil_core::KnowledgeGraph>>,
+    tempfile::TempDir,
+) {
+    use ucil_core::{Convention, KnowledgeGraph};
+
+    let tmp = tempfile::TempDir::new().expect("tempdir must be creatable");
+    let kg_path = tmp.path().join("knowledge.db");
+    let mut kg = KnowledgeGraph::open(&kg_path).expect("KnowledgeGraph::open must succeed");
+
+    let naming = Convention {
+        id: None,
+        category: "naming".to_owned(),
+        pattern: "snake_case for functions".to_owned(),
+        examples: Some("fn parse_file() {}".to_owned()),
+        counter_examples: Some("fn ParseFile() {}".to_owned()),
+        confidence: 0.9,
+        evidence_count: 42,
+        t_ingested_at: String::new(),
+        last_verified: None,
+        scope: "project".to_owned(),
+    };
+    let error_handling = Convention {
+        id: None,
+        category: "error_handling".to_owned(),
+        pattern: "thiserror on all library errors".to_owned(),
+        examples: None,
+        counter_examples: None,
+        confidence: 0.8,
+        evidence_count: 17,
+        t_ingested_at: String::new(),
+        last_verified: None,
+        scope: "project".to_owned(),
+    };
+    kg.insert_convention(&naming)
+        .expect("naming insert must succeed");
+    kg.insert_convention(&error_handling)
+        .expect("error_handling insert must succeed");
+
+    let kg_arc = Arc::new(Mutex::new(kg));
+    let server = McpServer::with_knowledge_graph(Arc::clone(&kg_arc));
+    (server, kg_arc, tmp)
+}
+
+/// Frozen acceptance selector for feature `P1-W4-F10` — see
+/// `ucil-build/feature-list.json` entry for
+/// `-p ucil-daemon server::test_get_conventions_tool`.
+///
+/// Exercises the full `tools/call` dispatch for `get_conventions`
+/// against a real `KnowledgeGraph::open` + `insert_convention`
+/// populated database.  Asserts both an unfiltered and a
+/// category-filtered call:
+///
+/// 1. Unfiltered (empty `arguments`) — `_meta.count == 2`,
+///    `_meta.category == null`, `_meta.conventions` has two entries
+///    in id-asc order with correct `category`/`pattern` round-tripped.
+/// 2. `arguments.category == "naming"` — `_meta.count == 1`,
+///    `_meta.category == "naming"`, `_meta.conventions[0].pattern ==
+///    "snake_case for functions"`.
+/// 3. Both responses carry `isError == false`,
+///    `_meta.tool == "get_conventions"`, `_meta.source == "kg"`, and
+///    the phase-1 stub marker `_meta.not_yet_implemented` is
+///    **absent** — proving the handler escaped the stub path.
+//
+// `too_many_lines` allowed because the test drives TWO complete
+// request/response round-trips (unfiltered + filtered) plus the
+// assertions for each — mirrors the `test_all_22_tools_registered`
+// shape that already carries the same allow.
+#[cfg(test)]
+#[test]
+#[allow(clippy::too_many_lines)]
+fn test_get_conventions_tool() {
+    let (server, _kg, _tmp) = build_get_conventions_fixture();
+
+    // ── Unfiltered call ─────────────────────────────────────────
+    let request_all = json!({
+        "jsonrpc": JSONRPC_VERSION,
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": "get_conventions",
+            "arguments": {}
+        }
+    })
+    .to_string();
+    let response_all = server.handle_line(&request_all);
+
+    assert_eq!(
+        response_all.get("jsonrpc").and_then(Value::as_str),
+        Some(JSONRPC_VERSION),
+        "response must carry jsonrpc == \"2.0\": {response_all}"
+    );
+    assert_eq!(
+        response_all.get("id").and_then(Value::as_i64),
+        Some(1),
+        "response id must echo request id: {response_all}"
+    );
+    assert!(
+        response_all.get("error").is_none(),
+        "unfiltered response must not carry an error envelope: {response_all}"
+    );
+
+    let meta_all = response_all
+        .pointer("/result/_meta")
+        .expect("unfiltered response must carry result._meta");
+    assert_eq!(
+        meta_all.get("tool").and_then(Value::as_str),
+        Some("get_conventions"),
+        "_meta.tool must be \"get_conventions\": {response_all}"
+    );
+    assert_eq!(
+        meta_all.get("source").and_then(Value::as_str),
+        Some("kg"),
+        "_meta.source must be \"kg\": {response_all}"
+    );
+    assert_eq!(
+        meta_all.get("count").and_then(Value::as_i64),
+        Some(2),
+        "_meta.count must be 2 (two inserted rows): {response_all}"
+    );
+    assert!(
+        meta_all.get("category").is_some_and(Value::is_null),
+        "_meta.category must be null when unfiltered: {response_all}"
+    );
+    let conventions_all = meta_all
+        .get("conventions")
+        .and_then(Value::as_array)
+        .expect("_meta.conventions must be a JSON array");
+    assert_eq!(
+        conventions_all.len(),
+        2,
+        "two inserted rows must come back: {conventions_all:?}"
+    );
+    assert_eq!(
+        conventions_all[0].get("category").and_then(Value::as_str),
+        Some("naming"),
+        "first row category must be naming: {conventions_all:?}"
+    );
+    assert_eq!(
+        conventions_all[0].get("pattern").and_then(Value::as_str),
+        Some("snake_case for functions"),
+        "first row pattern round-tripped: {conventions_all:?}"
+    );
+    assert_eq!(
+        conventions_all[1].get("category").and_then(Value::as_str),
+        Some("error_handling"),
+        "second row category must be error_handling: {conventions_all:?}"
+    );
+    assert_eq!(
+        conventions_all[1].get("pattern").and_then(Value::as_str),
+        Some("thiserror on all library errors"),
+        "second row pattern round-tripped: {conventions_all:?}"
+    );
+
+    assert_eq!(
+        response_all
+            .pointer("/result/isError")
+            .and_then(Value::as_bool),
+        Some(false),
+        "result.isError must be false on the happy path: {response_all}"
+    );
+    assert!(
+        response_all
+            .pointer("/result/_meta/not_yet_implemented")
+            .is_none(),
+        "result._meta.not_yet_implemented must be ABSENT — the handler \
+         must have escaped the phase-1 stub path: {response_all}"
+    );
+
+    // ── Filtered call (category = "naming") ─────────────────────
+    let request_naming = json!({
+        "jsonrpc": JSONRPC_VERSION,
+        "id": 2,
+        "method": "tools/call",
+        "params": {
+            "name": "get_conventions",
+            "arguments": { "category": "naming" }
+        }
+    })
+    .to_string();
+    let response_naming = server.handle_line(&request_naming);
+
+    assert!(
+        response_naming.get("error").is_none(),
+        "filtered response must not carry an error envelope: {response_naming}"
+    );
+    let meta_naming = response_naming
+        .pointer("/result/_meta")
+        .expect("filtered response must carry result._meta");
+    assert_eq!(
+        meta_naming.get("count").and_then(Value::as_i64),
+        Some(1),
+        "_meta.count must be 1 when filtered to naming: {response_naming}"
+    );
+    assert_eq!(
+        meta_naming.get("category").and_then(Value::as_str),
+        Some("naming"),
+        "_meta.category must echo the filter: {response_naming}"
+    );
+    let conventions_naming = meta_naming
+        .get("conventions")
+        .and_then(Value::as_array)
+        .expect("_meta.conventions must be a JSON array (filtered)");
+    assert_eq!(
+        conventions_naming.len(),
+        1,
+        "only the naming row matches: {conventions_naming:?}"
+    );
+    assert_eq!(
+        conventions_naming[0].get("pattern").and_then(Value::as_str),
+        Some("snake_case for functions"),
+        "filtered pattern must match naming row: {conventions_naming:?}"
+    );
+    assert_eq!(
+        response_naming
+            .pointer("/result/isError")
+            .and_then(Value::as_bool),
+        Some(false),
+        "result.isError must be false on the filtered happy path: {response_naming}"
+    );
+}
+
+/// Empty-table path: a `get_conventions` call against a KG with zero
+/// conventions must return `_meta.count == 0`,
+/// `_meta.conventions == []`, `isError == false`, and a
+/// human-readable "no conventions yet" text — the master-plan §3.2
+/// row-7 "empty list if none yet extracted" contract.
+#[cfg(test)]
+#[test]
+fn test_get_conventions_tool_empty() {
+    use ucil_core::KnowledgeGraph;
+
+    let tmp = tempfile::TempDir::new().expect("tempdir must be creatable");
+    let kg = KnowledgeGraph::open(&tmp.path().join("knowledge.db"))
+        .expect("KnowledgeGraph::open must succeed");
+    let kg_arc = Arc::new(Mutex::new(kg));
+    let server = McpServer::with_knowledge_graph(Arc::clone(&kg_arc));
+
+    let request = json!({
+        "jsonrpc": JSONRPC_VERSION,
+        "id": 3,
+        "method": "tools/call",
+        "params": {
+            "name": "get_conventions",
+            "arguments": {}
+        }
+    })
+    .to_string();
+    let response = server.handle_line(&request);
+
+    assert!(
+        response.get("error").is_none(),
+        "empty-table call must not return JSON-RPC error: {response}"
+    );
+    let meta = response
+        .pointer("/result/_meta")
+        .expect("empty-table response must carry result._meta");
+    assert_eq!(
+        meta.get("count").and_then(Value::as_i64),
+        Some(0),
+        "_meta.count must be 0 for empty table: {response}"
+    );
+    let conventions = meta
+        .get("conventions")
+        .and_then(Value::as_array)
+        .expect("_meta.conventions must be a JSON array even when empty");
+    assert!(
+        conventions.is_empty(),
+        "_meta.conventions must be an empty array for empty table: {conventions:?}"
+    );
+    assert_eq!(
+        response.pointer("/result/isError").and_then(Value::as_bool),
+        Some(false),
+        "result.isError must be false on empty-table path: {response}"
+    );
+    let text = response
+        .pointer("/result/content/0/text")
+        .and_then(Value::as_str)
+        .expect("content[0].text must be a string");
+    assert!(
+        text.contains("no conventions yet"),
+        "empty-table text should say \"no conventions yet\": got {text:?}"
+    );
+}
+
+/// Stub-path regression: a `get_conventions` call on a server built
+/// via `McpServer::new()` (no KG attached) must still return the
+/// phase-1 `_meta.not_yet_implemented: true` stub envelope —
+/// preserving invariant #9 from `ucil-build/phase-log/01-phase-1/
+/// CLAUDE.md` for the "no KG" deployment shape.
+#[cfg(test)]
+#[test]
+fn test_get_conventions_tool_no_kg_returns_stub() {
+    let server = McpServer::new();
+
+    let request = json!({
+        "jsonrpc": JSONRPC_VERSION,
+        "id": 4,
+        "method": "tools/call",
+        "params": {
+            "name": "get_conventions",
+            "arguments": {}
+        }
+    })
+    .to_string();
+    let response = server.handle_line(&request);
+
+    assert!(
+        response.get("error").is_none(),
+        "stub path must not return JSON-RPC error: {response}"
+    );
+    assert_eq!(
+        response
+            .pointer("/result/_meta/not_yet_implemented")
+            .and_then(Value::as_bool),
+        Some(true),
+        "no-KG call must return _meta.not_yet_implemented == true \
+         (phase-1 invariant #9): {response}"
+    );
+    assert_eq!(
+        response
+            .pointer("/result/_meta/tool")
+            .and_then(Value::as_str),
+        Some("get_conventions"),
+        "stub envelope must echo tool name: {response}"
+    );
+}
+
+/// Negative path: a `get_conventions` call whose `arguments.category`
+/// is a non-string JSON value (e.g. number) must return a JSON-RPC
+/// error envelope with `code == -32602` (Invalid params).
+#[cfg(test)]
+#[test]
+fn test_get_conventions_tool_non_string_category() {
+    let (server, _kg, _tmp) = build_get_conventions_fixture();
+
+    let request = json!({
+        "jsonrpc": JSONRPC_VERSION,
+        "id": 5,
+        "method": "tools/call",
+        "params": {
+            "name": "get_conventions",
+            "arguments": { "category": 123 }
+        }
+    })
+    .to_string();
+    let response = server.handle_line(&request);
+
+    let error = response
+        .get("error")
+        .expect("non-string category must produce JSON-RPC error envelope");
+    assert_eq!(
+        error.get("code").and_then(Value::as_i64),
+        Some(-32602),
+        "invalid-param error code must be -32602 (Invalid params): {response}"
+    );
+    assert!(
+        response.get("result").is_none(),
+        "JSON-RPC error response must not also carry `result`: {response}"
+    );
+}
