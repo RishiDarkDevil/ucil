@@ -89,6 +89,15 @@ pub(crate) mod text_search;
 pub mod understand_code;
 pub mod watcher;
 
+// Crate-private test utilities (process-wide PATH guard). Compiled
+// only under `#[cfg(test)]` so the release binary stays clean. See
+// DEC-0011 for the rationale — `watcher::tests` mutate `PATH` via
+// `std::env::set_var` while `session_manager::tests` spawn `git` via
+// `tokio::process::Command`, and both classes serialise through the
+// `test_support::ENV_GUARD` mutex to avoid the coverage-gate race.
+#[rustfmt::skip]
+#[cfg(test)] mod test_support;
+
 #[rustfmt::skip]
 pub use executor::{enrich_find_definition, Caller, EnrichedFindDefinition, ExecutorError, HoverDoc, HoverFetchError, HoverSource, IngestPipeline, SerenaHoverClient, SOURCE_TOOL, TREE_SITTER_VALID_FROM};
 #[rustfmt::skip]
