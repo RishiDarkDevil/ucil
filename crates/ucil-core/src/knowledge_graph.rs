@@ -248,15 +248,15 @@ pub struct HotObservation {
 /// parsed `parse_file` without the `ucil_treesitter::parser::`
 /// prefix) can still reach the definition row.  The columns projected
 /// are the subset from the §12.1 `entities` schema that every
-/// downstream pipeline step needs (file_path, start_line, signature,
-/// doc_comment), plus a derived `parent_module` computed at read-time
-/// from `qualified_name` — NOT a stored column, so no schema
-/// migration is required.
+/// downstream pipeline step needs (`file_path`, `start_line`,
+/// `signature`, `doc_comment`), plus a derived `parent_module`
+/// computed at read-time from `qualified_name` — NOT a stored column,
+/// so no schema migration is required.
 ///
 /// See master-plan §12.1 lines 1130-1145 for the source `entities`
 /// columns, and master-plan §18 Phase 1 Week 4 line 1749 ("Implement
-/// knowledge_graph.rs: CRUD, bi-temporal queries, symbol resolution")
-/// for the scope this projection satisfies.
+/// `knowledge_graph.rs`: CRUD, bi-temporal queries, symbol
+/// resolution") for the scope this projection satisfies.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SymbolResolution {
     /// `entities.file_path` of the resolved row — absolute or
@@ -947,6 +947,90 @@ impl KnowledgeGraph {
         Ok(row_result.map(Some).or_else(absent_to_none)?)
     }
 
+    // ── Symbol resolution (P1-W4-F03) ────────────────────────────────
+    //
+    // Name-based read layer over the frozen F02 CRUD surface.  Callers
+    // who know only a bare symbol name — e.g. a tree-sitter extractor
+    // that parsed `parse_file` without the crate-qualified path — reach
+    // the owning `entities` row here.  The SQL matches three cases at
+    // once:
+    //
+    //   1. exact `name = ?1`                         (bare symbol)
+    //   2. exact `qualified_name = ?1`               (full path)
+    //   3. `qualified_name LIKE '%::' || ?1`         (terminal segment)
+    //
+    // Tie-breaking picks the most recently ingested row — `ORDER BY
+    // t_ingested_at DESC LIMIT 1`, mirroring
+    // `get_entity_by_qualified_name` so callers get consistent
+    // newest-wins semantics across the F02/F03 read surface.
+    // `parent_module` is DERIVED at read-time by splitting
+    // `qualified_name` on the final `::`; storing it would require a
+    // schema migration (out of scope per master-plan §12.1 freeze).
+
+    /// Resolve a bare symbol `name` (optionally scoped to a file) to
+    /// the most recently-ingested matching [`SymbolResolution`].
+    ///
+    /// Matches across three shapes at once: an exact
+    /// `entities.name = ?1` hit, an exact `entities.qualified_name =
+    /// ?1` hit, or a terminal-segment hit against
+    /// `qualified_name LIKE '%::' || ?1` (so passing `"parse"` reaches
+    /// `ucil_treesitter::parser::parse` without the caller having to
+    /// know the qualified prefix).  When `file_scope` is `Some(path)`
+    /// the lookup is additionally narrowed to rows whose `file_path`
+    /// equals `path`.  On ties, the row with the greatest
+    /// `t_ingested_at` wins — matching
+    /// [`KnowledgeGraph::get_entity_by_qualified_name`]'s newest-row
+    /// contract.
+    ///
+    /// `parent_module` on the returned [`SymbolResolution`] is derived
+    /// from the row's `qualified_name`: for `"foo::bar::baz"` it is
+    /// `Some("foo::bar")`; for a `qualified_name` that is `NULL` or
+    /// contains no `::` separator it is `None`.  No schema column is
+    /// added — derivation happens in Rust per master-plan §12.1
+    /// freeze + §18 Phase 1 Week 4 line 1749 (symbol resolution
+    /// scope).
+    ///
+    /// Read-only — no transaction wrapper, consistent with
+    /// [`KnowledgeGraph::get_entity_by_qualified_name`] and
+    /// [`KnowledgeGraph::list_entities_by_file`].
+    ///
+    /// # Errors
+    ///
+    /// * [`KnowledgeGraphError::Sqlite`] — statement prepare, bind, or
+    ///   row-fetch failure.  Returns `Ok(None)` (not an error) when no
+    ///   row matches.
+    #[tracing::instrument(
+        level = "debug",
+        skip(self),
+        fields(name = %name, scoped = file_scope.is_some()),
+        name = "ucil.core.kg.resolve_symbol",
+    )]
+    pub fn resolve_symbol(
+        &self,
+        name: &str,
+        file_scope: Option<&str>,
+    ) -> Result<Option<SymbolResolution>, KnowledgeGraphError> {
+        let sql = if file_scope.is_some() {
+            "SELECT file_path, start_line, signature, doc_comment, qualified_name \
+             FROM entities \
+             WHERE (name = ?1 OR qualified_name = ?1 OR qualified_name LIKE '%::' || ?1) \
+               AND file_path = ?2 \
+             ORDER BY t_ingested_at DESC LIMIT 1"
+        } else {
+            "SELECT file_path, start_line, signature, doc_comment, qualified_name \
+             FROM entities \
+             WHERE (name = ?1 OR qualified_name = ?1 OR qualified_name LIKE '%::' || ?1) \
+             ORDER BY t_ingested_at DESC LIMIT 1"
+        };
+        let mut stmt = self.conn.prepare(sql)?;
+        let row_result = if let Some(path) = file_scope {
+            stmt.query_row(rusqlite::params![name, path], resolution_from_row)
+        } else {
+            stmt.query_row(rusqlite::params![name], resolution_from_row)
+        };
+        Ok(row_result.map(Some).or_else(absent_to_none)?)
+    }
+
     // ── Hot-staging writers (P1-W4-F08) ─────────────────────────────
     //
     // Routes every hot-tier insert through `execute_in_transaction`
@@ -1177,6 +1261,32 @@ fn relation_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Relation> {
         source_tool: row.get::<_, Option<String>>(7)?,
         source_evidence: row.get::<_, Option<String>>(8)?,
         confidence: row.get::<_, f64>(9)?,
+    })
+}
+
+/// Read a [`SymbolResolution`] row from a `SELECT file_path,
+/// start_line, signature, doc_comment, qualified_name` statement
+/// (exact column order).
+///
+/// `parent_module` is derived from `qualified_name` by splitting on
+/// the final `::`: `"foo::bar::baz"` → `Some("foo::bar")`; a
+/// `qualified_name` that is `NULL` or lacks a `::` separator yields
+/// `None`.
+fn resolution_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SymbolResolution> {
+    let file_path = row.get::<_, String>(0)?;
+    let start_line = row.get::<_, Option<i64>>(1)?;
+    let signature = row.get::<_, Option<String>>(2)?;
+    let doc_comment = row.get::<_, Option<String>>(3)?;
+    let qualified_name = row.get::<_, Option<String>>(4)?;
+    let parent_module = qualified_name
+        .as_deref()
+        .and_then(|qn| qn.rsplit_once("::").map(|(head, _tail)| head.to_owned()));
+    Ok(SymbolResolution {
+        file_path,
+        start_line,
+        signature,
+        doc_comment,
+        parent_module,
     })
 }
 
