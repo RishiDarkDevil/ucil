@@ -7,6 +7,7 @@ blocks_loop: false
 session_role: monitor
 session_work: user-authorized-direct-harness-fix-2b6c066; observed-WO-0026-3rd-verifier-PASS-378ecfb-and-merge-29b1e0e; P1-W3-F02-flipped-to-passes-true
 auto_resolve_on_next_triage: bucket-A
+resolved: true
 ---
 
 # Phase 1 gate incomplete — monitor session (post WO-0026 PASS + harness fix)
@@ -55,3 +56,13 @@ crates should not see the same regression.
 - Bucket A auto-resolve on next triage pass.
 - Left unresolved in frontmatter for stop-hook bypass.
 - Gate-incomplete expected.
+
+## Resolution
+
+Bucket A auto-resolve by triage (cap-rescue pass). All three cited
+commits confirmed on `main`: WO-0026 harness fix `2b6c066`, verifier
+flip `378ecfb` (P1-W3-F02 → passes=true), and merge `29b1e0e`. The
+`auto_resolve_on_next_triage: bucket-A` tag in frontmatter matches the
+rubric; `blocks_loop: false` and severity `low`. Gate-incomplete is the
+normal mid-phase state (35/234 features, 14 phase-1 features remain) —
+nothing actionable here. Closing.
