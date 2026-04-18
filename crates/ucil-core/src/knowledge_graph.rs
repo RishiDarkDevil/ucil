@@ -298,6 +298,73 @@ pub struct SymbolResolution {
     pub parent_module: Option<String>,
 }
 
+/// A row in the §12.1 `conventions` table — a cold-tier record of a
+/// project-specific coding convention the team has committed to.
+///
+/// Fields mirror the `INIT_SQL` `conventions` declaration verbatim so a
+/// round trip through [`KnowledgeGraph::insert_convention`] ↔
+/// [`KnowledgeGraph::list_conventions`] preserves every user-supplied
+/// column.  `id` is `None` before insert and `Some(rowid)` after.
+/// `t_ingested_at` is managed by the schema default
+/// (`DEFAULT (datetime('now'))`) so inserters never supply it — the
+/// `insert_convention` helper omits the column from its INSERT list,
+/// and the read back value returned through `list_conventions` is the
+/// string `SQLite` wrote.
+///
+/// The `category` column is unconstrained TEXT at the schema level but
+/// master-plan §12.1 lines 1172-1182 enumerate the expected values:
+/// `"naming"`, `"structure"`, `"error_handling"`, `"testing"`,
+/// `"style"`, `"security"`.  The `get_conventions` tool filter
+/// (`P1-W4-F10`) passes the caller-supplied string through to
+/// `WHERE category = ?1` verbatim; unknown categories yield an empty
+/// result set.
+///
+/// See master-plan §12.1 lines 1172-1182 for the schema and
+/// `get_conventions` in master-plan §3.2 row 7 for the consumer.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Convention {
+    /// `conventions.id` — `None` until inserted; `Some(rowid)` after
+    /// [`KnowledgeGraph::insert_convention`] returns.
+    pub id: Option<i64>,
+    /// `conventions.category` — one of the six enum values at
+    /// master-plan §12.1 lines 1172-1182
+    /// (`"naming"` / `"structure"` / `"error_handling"` / `"testing"` /
+    /// `"style"` / `"security"`).  Free-form text at the schema level;
+    /// the filter on [`KnowledgeGraph::list_conventions`] is a literal
+    /// `WHERE category = ?1` so callers are expected to pass one of
+    /// the master-plan values verbatim.
+    pub category: String,
+    /// `conventions.pattern` — the convention description / rule text
+    /// the convention-learner layer will match against source spans.
+    /// Required (NOT NULL at the schema level).
+    pub pattern: String,
+    /// `conventions.examples` — free-form text block (typically a
+    /// newline-delimited list) of code fragments that **conform** to
+    /// the convention.  Nullable because early-ingested signals may
+    /// only know the pattern.
+    pub examples: Option<String>,
+    /// `conventions.counter_examples` — free-form text block of code
+    /// fragments that **violate** the convention.
+    pub counter_examples: Option<String>,
+    /// `conventions.confidence` — 0.0..=1.0 fusion-layer hint; the
+    /// schema default is `0.5`.
+    pub confidence: f64,
+    /// `conventions.evidence_count` — count of source spans that
+    /// produced the convention.  The schema default is `1` (a single
+    /// observation).
+    pub evidence_count: i64,
+    /// `conventions.t_ingested_at` — RFC-3339-ish timestamp written by
+    /// the schema default `DEFAULT (datetime('now'))`.  Inserters
+    /// leave this unset and read back the schema-managed value.
+    pub t_ingested_at: String,
+    /// `conventions.last_verified` — free-form timestamp of the most
+    /// recent confirmation the convention still holds.  Nullable.
+    pub last_verified: Option<String>,
+    /// `conventions.scope` — `"project"` (default) or a coarser scope
+    /// (e.g. `"workspace"`, `"global"`) in a later phase's taxonomy.
+    pub scope: String,
+}
+
 /// Checkpoint mode for [`KnowledgeGraph::checkpoint_wal`] — wraps
 /// `SQLite`'s `PRAGMA wal_checkpoint(<MODE>)`.
 ///
@@ -1121,6 +1188,131 @@ impl KnowledgeGraph {
         Ok(row_result.map(Some).or_else(absent_to_none)?)
     }
 
+    // ── Conventions CRUD (P1-W4-F10 read path) ──────────────────────
+    //
+    // The `conventions` table is a cold-tier record of project-level
+    // coding conventions (master-plan §12.1 lines 1172-1182).  Writes
+    // flow through `insert_convention` which routes through
+    // `execute_in_transaction` (`BEGIN IMMEDIATE` per §11 line 1117);
+    // reads flow through `list_conventions` which is a direct
+    // `&self` statement with rowid ordering to match
+    // `list_relations_by_source` semantics.  The `get_conventions`
+    // MCP tool handler (`P1-W4-F10`) calls `list_conventions` with an
+    // optional caller-supplied `category` filter.
+
+    /// Insert a [`Convention`] row into the `conventions` table.
+    ///
+    /// `t_ingested_at` is populated by the schema default
+    /// (`DEFAULT (datetime('now'))`) so the writer omits it from the
+    /// INSERT list.  `last_verified` is inserted as NULL when
+    /// [`Convention::last_verified`] is `None`.  Returns the new
+    /// `conventions.id`.
+    ///
+    /// See master-plan §12.1 row `conventions` for the target schema
+    /// and §3.2 row 7 (`get_conventions`) for the downstream read
+    /// consumer.
+    ///
+    /// # Errors
+    ///
+    /// * [`KnowledgeGraphError::Sqlite`] — transaction open, statement
+    ///   prepare, bind, or `RETURNING id` fetch failed.
+    #[tracing::instrument(
+        level = "debug",
+        skip(self, convention),
+        fields(category = %convention.category, pattern_len = convention.pattern.len()),
+        name = "ucil.core.kg.insert_convention",
+    )]
+    pub fn insert_convention(
+        &mut self,
+        convention: &Convention,
+    ) -> Result<i64, KnowledgeGraphError> {
+        self.execute_in_transaction(|tx| {
+            let mut stmt = tx.prepare(
+                "INSERT INTO conventions (\
+                    category, pattern, examples, counter_examples, \
+                    confidence, evidence_count, last_verified, scope\
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
+                 RETURNING id;",
+            )?;
+            let id: i64 = stmt.query_row(
+                rusqlite::params![
+                    convention.category,
+                    convention.pattern,
+                    convention.examples,
+                    convention.counter_examples,
+                    convention.confidence,
+                    convention.evidence_count,
+                    convention.last_verified,
+                    convention.scope,
+                ],
+                |row| row.get::<_, i64>(0),
+            )?;
+            Ok(id)
+        })
+    }
+
+    /// List every [`Convention`] row, optionally filtered by
+    /// `category`.
+    ///
+    /// When `category` is `Some(cat)`, the SQL filter is
+    /// `WHERE category = ?1` — an exact-match lookup against the
+    /// `idx_conventions_category` index (master-plan §12.1 line 1312).
+    /// When `category` is `None`, the filter is dropped and every row
+    /// is returned.  Rows are ordered by `id ASC` to match the
+    /// insertion-order semantics of the existing
+    /// [`KnowledgeGraph::list_relations_by_source`] helper.
+    ///
+    /// An empty result set (either the table is empty or no rows
+    /// match the supplied category) is returned as `Ok(vec![])` — NOT
+    /// an error — per the P1-W4-F10 "empty list if none yet extracted"
+    /// contract (master-plan §3.2 row 7).
+    ///
+    /// Read-only — no transaction wrapper, consistent with
+    /// [`KnowledgeGraph::list_relations_by_source`] and
+    /// [`KnowledgeGraph::list_relations_by_target`].
+    ///
+    /// # Errors
+    ///
+    /// * [`KnowledgeGraphError::Sqlite`] — statement prepare, bind, or
+    ///   iteration failure.
+    #[tracing::instrument(
+        level = "debug",
+        skip(self),
+        fields(category = category.unwrap_or("")),
+        name = "ucil.core.kg.list_conventions",
+    )]
+    pub fn list_conventions(
+        &self,
+        category: Option<&str>,
+    ) -> Result<Vec<Convention>, KnowledgeGraphError> {
+        let sql = if category.is_some() {
+            "SELECT id, category, pattern, examples, counter_examples, \
+                    confidence, evidence_count, t_ingested_at, last_verified, scope \
+             FROM conventions \
+             WHERE category = ?1 \
+             ORDER BY id ASC"
+        } else {
+            "SELECT id, category, pattern, examples, counter_examples, \
+                    confidence, evidence_count, t_ingested_at, last_verified, scope \
+             FROM conventions \
+             ORDER BY id ASC"
+        };
+        let mut stmt = self.conn.prepare(sql)?;
+        let mut out = Vec::new();
+        if let Some(cat) = category {
+            let rows = stmt.query_map(rusqlite::params![cat], convention_from_row)?;
+            for row in rows {
+                out.push(row?);
+            }
+        } else {
+            let rows = stmt.query_map([], convention_from_row)?;
+            for row in rows {
+                out.push(row?);
+            }
+        }
+        Ok(out)
+    }
+
     // ── Hot-staging writers (P1-W4-F08) ─────────────────────────────
     //
     // Routes every hot-tier insert through `execute_in_transaction`
@@ -1380,6 +1572,25 @@ fn resolution_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SymbolResolu
         signature,
         doc_comment,
         parent_module,
+    })
+}
+
+/// Read a [`Convention`] row from a `SELECT id, category, pattern,
+/// examples, counter_examples, confidence, evidence_count,
+/// t_ingested_at, last_verified, scope` statement (exact column
+/// order).
+fn convention_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Convention> {
+    Ok(Convention {
+        id: row.get::<_, Option<i64>>(0)?,
+        category: row.get::<_, String>(1)?,
+        pattern: row.get::<_, String>(2)?,
+        examples: row.get::<_, Option<String>>(3)?,
+        counter_examples: row.get::<_, Option<String>>(4)?,
+        confidence: row.get::<_, f64>(5)?,
+        evidence_count: row.get::<_, i64>(6)?,
+        t_ingested_at: row.get::<_, String>(7)?,
+        last_verified: row.get::<_, Option<String>>(8)?,
+        scope: row.get::<_, String>(9)?,
     })
 }
 
@@ -2495,5 +2706,170 @@ fn test_symbol_resolution() {
     assert_eq!(
         by_qname.parent_module,
         Some("ucil_treesitter::parser".to_owned()),
+    );
+}
+
+// ── Conventions CRUD tests (P1-W4-F10) ───────────────────────────────────────
+//
+// Module-root placement per DEC-0005.  Fixture helper mints two
+// canonical categories (`"naming"`, `"error_handling"`) that the
+// server-level acceptance test in `ucil-daemon` also uses so the two
+// layers are re-asserted on the same shape.
+
+#[cfg(test)]
+fn mk_convention(category: &str, pattern: &str) -> Convention {
+    Convention {
+        id: None,
+        category: category.to_owned(),
+        pattern: pattern.to_owned(),
+        examples: Some(format!("// example for {category}: {pattern}")),
+        counter_examples: None,
+        confidence: 0.75,
+        evidence_count: 3,
+        // `t_ingested_at` is set by the schema default; the pre-insert
+        // value is irrelevant for the INSERT (it is not bound) but the
+        // struct requires a value.
+        t_ingested_at: String::new(),
+        last_verified: None,
+        scope: "project".to_owned(),
+    }
+}
+
+/// `test_insert_and_list_conventions_all` — round-trip two rows of
+/// different categories through `insert_convention` + `list_conventions`
+/// and assert both come back in `id ASC` order with every user-supplied
+/// column preserved and the schema-default `t_ingested_at` populated.
+#[cfg(test)]
+#[test]
+fn test_insert_and_list_conventions_all() {
+    use tempfile::TempDir;
+
+    let tmp = TempDir::new().expect("tempdir must be creatable");
+    let mut kg = KnowledgeGraph::open(&tmp.path().join("kg.db"))
+        .expect("KnowledgeGraph::open must succeed on fresh tempfile");
+
+    let first = mk_convention("naming", "snake_case for functions");
+    let second = mk_convention("error_handling", "thiserror on all library errors");
+
+    let id1 = kg
+        .insert_convention(&first)
+        .expect("first insert must succeed");
+    let id2 = kg
+        .insert_convention(&second)
+        .expect("second insert must succeed");
+    assert!(
+        id2 > id1,
+        "second insert must produce a higher rowid: {id1} vs {id2}",
+    );
+
+    let listed = kg
+        .list_conventions(None)
+        .expect("list_conventions(None) must succeed");
+    assert_eq!(listed.len(), 2, "both rows returned: got {}", listed.len());
+    assert_eq!(listed[0].id, Some(id1), "first row id matches insert");
+    assert_eq!(listed[0].category, "naming");
+    assert_eq!(listed[0].pattern, "snake_case for functions");
+    assert_eq!(listed[0].examples, first.examples);
+    assert!(
+        (listed[0].confidence - first.confidence).abs() < 1e-9,
+        "confidence round-trips as f64",
+    );
+    assert_eq!(listed[0].evidence_count, first.evidence_count);
+    assert_eq!(listed[0].scope, first.scope);
+    assert!(
+        !listed[0].t_ingested_at.is_empty(),
+        "t_ingested_at must be populated by the schema default",
+    );
+
+    assert_eq!(listed[1].id, Some(id2), "second row id matches insert");
+    assert_eq!(listed[1].category, "error_handling");
+    assert_eq!(listed[1].pattern, "thiserror on all library errors");
+}
+
+/// `test_list_conventions_category_filter` — insert rows in two
+/// categories and assert `list_conventions(Some("naming"))` returns
+/// only the naming row.
+#[cfg(test)]
+#[test]
+fn test_list_conventions_category_filter() {
+    use tempfile::TempDir;
+
+    let tmp = TempDir::new().expect("tempdir must be creatable");
+    let mut kg =
+        KnowledgeGraph::open(&tmp.path().join("kg.db")).expect("KnowledgeGraph::open must succeed");
+
+    kg.insert_convention(&mk_convention("naming", "snake_case for functions"))
+        .expect("naming insert must succeed");
+    kg.insert_convention(&mk_convention(
+        "error_handling",
+        "thiserror on all library errors",
+    ))
+    .expect("error_handling insert must succeed");
+    kg.insert_convention(&mk_convention("naming", "PascalCase for types"))
+        .expect("second naming insert must succeed");
+
+    let naming = kg
+        .list_conventions(Some("naming"))
+        .expect("filtered list must succeed");
+    assert_eq!(
+        naming.len(),
+        2,
+        "both naming rows returned: got {}",
+        naming.len()
+    );
+    assert!(
+        naming.iter().all(|c| c.category == "naming"),
+        "every filtered row must carry category=\"naming\": {naming:?}",
+    );
+    let patterns: Vec<&str> = naming.iter().map(|c| c.pattern.as_str()).collect();
+    assert_eq!(
+        patterns,
+        vec!["snake_case for functions", "PascalCase for types"],
+        "rows returned in id ASC order",
+    );
+}
+
+/// `test_list_conventions_unknown_category_returns_empty` — passing a
+/// category that has no rows must yield `Ok(vec![])`, NOT `Err`.
+#[cfg(test)]
+#[test]
+fn test_list_conventions_unknown_category_returns_empty() {
+    use tempfile::TempDir;
+
+    let tmp = TempDir::new().expect("tempdir must be creatable");
+    let mut kg =
+        KnowledgeGraph::open(&tmp.path().join("kg.db")).expect("KnowledgeGraph::open must succeed");
+
+    kg.insert_convention(&mk_convention("naming", "snake_case for functions"))
+        .expect("naming insert must succeed");
+
+    let missing = kg
+        .list_conventions(Some("does_not_exist_yet"))
+        .expect("unknown-category list must succeed (not Err)");
+    assert!(
+        missing.is_empty(),
+        "unknown category yields empty vec: got {missing:?}",
+    );
+}
+
+/// `test_list_conventions_empty_table` — a freshly-opened KG with zero
+/// rows in `conventions` must return `Ok(vec![])` from
+/// `list_conventions(None)` — the "none yet extracted" contract from
+/// master-plan §3.2 row 7.
+#[cfg(test)]
+#[test]
+fn test_list_conventions_empty_table() {
+    use tempfile::TempDir;
+
+    let tmp = TempDir::new().expect("tempdir must be creatable");
+    let kg =
+        KnowledgeGraph::open(&tmp.path().join("kg.db")).expect("KnowledgeGraph::open must succeed");
+
+    let empty = kg
+        .list_conventions(None)
+        .expect("empty-table list must succeed (not Err)");
+    assert!(
+        empty.is_empty(),
+        "empty conventions table yields empty vec: got {empty:?}",
     );
 }
