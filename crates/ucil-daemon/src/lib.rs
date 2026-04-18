@@ -28,6 +28,18 @@
 //! arrive via `notify-debouncer-full` with a 100 ms debounce window,
 //! while `PostToolUse` hook invocations bypass the debouncer and emit
 //! a [`watcher::FileEvent`] immediately — see [`watcher::FileWatcher`].
+//!
+//! The `priority_queue` module (introduced in WO-0028 for `P1-W3-F08`)
+//! owns the recency-ordered `(Instant, PathBuf)` queue that backs the
+//! "recently-queried files first" invariant in master-plan §21.2 lines
+//! 2196-2204 — see [`priority_queue::PriorityIndexingQueue`].
+//!
+//! The `startup` module (introduced in WO-0028 for `P1-W3-F08`) owns the
+//! progressive-startup orchestrator described in master-plan §18 Phase 1
+//! Week 3 line 1745: it spawns the MCP server and exposes a
+//! [`startup::ReadyHandle`] that resolves once the server has emitted
+//! its first successful response, so callers can assert the 2 s
+//! startup budget end-to-end.
 
 #![deny(warnings)]
 #![warn(clippy::all, clippy::pedantic, clippy::nursery)]
@@ -35,9 +47,11 @@
 
 pub mod lifecycle;
 pub mod plugin_manager;
+pub mod priority_queue;
 pub mod server;
 pub mod session_manager;
 pub mod session_ttl;
+pub mod startup;
 pub mod storage;
 pub mod watcher;
 
@@ -50,6 +64,7 @@ pub use plugin_manager::{
 };
 // `health_check_with_timeout` is a method on `PluginManager`; it is reached via the
 // re-exported `PluginManager` above — no additional item-level re-export is needed.
+pub use priority_queue::{PriorityIndexingQueue, QueueEntry};
 pub use server::{
     ceqp_input_schema, ucil_tools, McpError, McpServer, ToolDescriptor, JSONRPC_VERSION,
     MCP_PROTOCOL_VERSION, READ_TIMEOUT_MS, TOOL_COUNT, WRITE_TIMEOUT_MS,
@@ -58,6 +73,7 @@ pub use session_manager::{
     CallRecord, SessionId, SessionInfo, SessionManager, WorktreeInfo, DEFAULT_TTL_SECS,
 };
 pub use session_ttl::{compute_expires_at, is_expired};
+pub use startup::{ProgressiveStartup, ReadyHandle, StartupError, STARTUP_DEADLINE};
 pub use storage::{StorageError, StorageLayout};
 pub use watcher::{
     EventSource, FileEvent, FileEventKind, FileWatcher, WatcherError, DEBOUNCE_WINDOW,
