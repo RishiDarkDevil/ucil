@@ -259,6 +259,22 @@ pub struct HotObservation {
 /// resolution") for the scope this projection satisfies.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SymbolResolution {
+    /// `entities.id` of the resolved row — the primary key the
+    /// `find_definition` handler (`P1-W4-F05`) feeds to
+    /// [`KnowledgeGraph::list_relations_by_target`] to enumerate
+    /// immediate callers.  Always `Some(rowid)` because the resolver
+    /// selects `id` explicitly and every persisted row has one; the
+    /// `Option` shape preserves column-symmetry with [`Entity::id`] so
+    /// callers that already handle the nullable case do not need a
+    /// special branch.
+    pub id: Option<i64>,
+    /// `entities.qualified_name` of the resolved row — fully-qualified
+    /// identifier (e.g. `"ucil_core::types::parse"`) when known.  The
+    /// handler uses this to disambiguate callers + callees in
+    /// response payloads that cross module boundaries.  `None` when
+    /// the underlying row has a `NULL` `qualified_name` (e.g.
+    /// `kind = "file"` entries per §12.1).
+    pub qualified_name: Option<String>,
     /// `entities.file_path` of the resolved row — absolute or
     /// project-relative source-file path.  Never `None` because the
     /// underlying column is `NOT NULL` at the schema level.
@@ -775,6 +791,40 @@ impl KnowledgeGraph {
         Ok(row_result.map(Some).or_else(absent_to_none)?)
     }
 
+    /// Look up a single [`Entity`] row by its primary-key `id`.
+    ///
+    /// Mirrors the read precedent of [`Self::get_entity_by_qualified_name`]
+    /// — read-only, no transaction, and `Ok(None)` (not an error) when no
+    /// row matches.  The `find_definition` MCP tool handler
+    /// (`P1-W4-F05`, master-plan §3.2 row 2 / §18 Phase 1 Week 4 line
+    /// 1751) uses this to project the source [`Entity`] of each caller
+    /// relation returned by [`Self::list_relations_by_target`] onto the
+    /// `{qualified_name, file_path, start_line}` payload a response needs.
+    ///
+    /// # Errors
+    ///
+    /// * [`KnowledgeGraphError::Sqlite`] — statement prepare, bind, or
+    ///   `query_row` failure.  Returns `Ok(None)` (not an error) when
+    ///   no row matches.
+    #[tracing::instrument(
+        level = "debug",
+        skip(self),
+        fields(id = id),
+        name = "ucil.core.kg.get_entity_by_id",
+    )]
+    pub fn get_entity_by_id(&self, id: i64) -> Result<Option<Entity>, KnowledgeGraphError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, kind, name, qualified_name, file_path, start_line, end_line, \
+                    signature, doc_comment, language, t_valid_from, t_valid_to, \
+                    importance, source_tool, source_hash \
+             FROM entities \
+             WHERE id = ?1 \
+             LIMIT 1",
+        )?;
+        let row_result = stmt.query_row(rusqlite::params![id], entity_from_row);
+        Ok(row_result.map(Some).or_else(absent_to_none)?)
+    }
+
     /// List all `entities` rows whose `file_path` matches, ordered by
     /// `start_line` ascending.
     ///
@@ -883,6 +933,46 @@ impl KnowledgeGraph {
              ORDER BY id ASC",
         )?;
         let rows = stmt.query_map(rusqlite::params![source_id], relation_from_row)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// List every [`Relation`] row with the given `target_id`.
+    ///
+    /// Mirrors [`Self::list_relations_by_source`] — read-only, no
+    /// transaction, rows returned in insertion order (`id ASC`).  The
+    /// `find_definition` MCP tool (`P1-W4-F05`) uses this to enumerate
+    /// **immediate callers** of a definition: every `calls`-kind
+    /// relation whose `target_id` is the definition's rowid is a caller
+    /// of that definition, per the inverted `calls`-edge semantics of
+    /// master-plan §12.1 rows.
+    ///
+    /// # Errors
+    ///
+    /// * [`KnowledgeGraphError::Sqlite`] — statement prepare, bind, or
+    ///   iteration failure.
+    #[tracing::instrument(
+        level = "debug",
+        skip(self),
+        fields(target_id = target_id),
+        name = "ucil.core.kg.list_relations_by_target",
+    )]
+    pub fn list_relations_by_target(
+        &self,
+        target_id: i64,
+    ) -> Result<Vec<Relation>, KnowledgeGraphError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, source_id, target_id, kind, weight, \
+                    t_valid_from, t_valid_to, \
+                    source_tool, source_evidence, confidence \
+             FROM relations \
+             WHERE target_id = ?1 \
+             ORDER BY id ASC",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![target_id], relation_from_row)?;
         let mut out = Vec::new();
         for row in rows {
             out.push(row?);
@@ -1011,13 +1101,13 @@ impl KnowledgeGraph {
         file_scope: Option<&str>,
     ) -> Result<Option<SymbolResolution>, KnowledgeGraphError> {
         let sql = if file_scope.is_some() {
-            "SELECT file_path, start_line, signature, doc_comment, qualified_name \
+            "SELECT id, file_path, start_line, signature, doc_comment, qualified_name \
              FROM entities \
              WHERE (name = ?1 OR qualified_name = ?1 OR qualified_name LIKE '%::' || ?1) \
                AND file_path = ?2 \
              ORDER BY t_ingested_at DESC LIMIT 1"
         } else {
-            "SELECT file_path, start_line, signature, doc_comment, qualified_name \
+            "SELECT id, file_path, start_line, signature, doc_comment, qualified_name \
              FROM entities \
              WHERE (name = ?1 OR qualified_name = ?1 OR qualified_name LIKE '%::' || ?1) \
              ORDER BY t_ingested_at DESC LIMIT 1"
@@ -1264,7 +1354,7 @@ fn relation_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Relation> {
     })
 }
 
-/// Read a [`SymbolResolution`] row from a `SELECT file_path,
+/// Read a [`SymbolResolution`] row from a `SELECT id, file_path,
 /// start_line, signature, doc_comment, qualified_name` statement
 /// (exact column order).
 ///
@@ -1273,15 +1363,18 @@ fn relation_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Relation> {
 /// `qualified_name` that is `NULL` or lacks a `::` separator yields
 /// `None`.
 fn resolution_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SymbolResolution> {
-    let file_path = row.get::<_, String>(0)?;
-    let start_line = row.get::<_, Option<i64>>(1)?;
-    let signature = row.get::<_, Option<String>>(2)?;
-    let doc_comment = row.get::<_, Option<String>>(3)?;
-    let qualified_name = row.get::<_, Option<String>>(4)?;
+    let id = row.get::<_, Option<i64>>(0)?;
+    let file_path = row.get::<_, String>(1)?;
+    let start_line = row.get::<_, Option<i64>>(2)?;
+    let signature = row.get::<_, Option<String>>(3)?;
+    let doc_comment = row.get::<_, Option<String>>(4)?;
+    let qualified_name = row.get::<_, Option<String>>(5)?;
     let parent_module = qualified_name
         .as_deref()
         .and_then(|qn| qn.rsplit_once("::").map(|(head, _tail)| head.to_owned()));
     Ok(SymbolResolution {
+        id,
+        qualified_name,
         file_path,
         start_line,
         signature,
@@ -1767,6 +1860,145 @@ fn test_upsert_relation_and_list() {
         .list_relations_by_source(9_999_999)
         .expect("empty list must be Ok");
     assert!(empty.is_empty(), "absent source_id yields empty vec");
+}
+
+/// `test_get_entity_by_id` — round-trip an `Entity` through `upsert_entity`,
+/// then fetch it back by rowid via `get_entity_by_id`.  Asserts every
+/// field survives and that a rowid with no matching row returns
+/// `Ok(None)` (not an error).
+#[cfg(test)]
+#[test]
+fn test_get_entity_by_id() {
+    use tempfile::TempDir;
+
+    let tmp = TempDir::new().expect("tempdir must be creatable");
+    let mut kg = KnowledgeGraph::open(&tmp.path().join("kg.db"))
+        .expect("KnowledgeGraph::open must succeed on fresh tempfile");
+
+    let entity = Entity {
+        id: None,
+        kind: "function".to_owned(),
+        name: "resolve".to_owned(),
+        qualified_name: Some("app::dns::resolve".to_owned()),
+        file_path: "src/app/dns.rs".to_owned(),
+        start_line: Some(17),
+        end_line: Some(33),
+        signature: Some("fn resolve(host: &str) -> Ip".to_owned()),
+        doc_comment: Some("Resolve a hostname.".to_owned()),
+        language: Some("rust".to_owned()),
+        t_valid_from: Some("2026-04-18T00:00:00+00:00".to_owned()),
+        t_valid_to: None,
+        importance: 0.5,
+        source_tool: Some("tree-sitter".to_owned()),
+        source_hash: None,
+    };
+    let id = kg.upsert_entity(&entity).expect("upsert must succeed");
+
+    let fetched = kg
+        .get_entity_by_id(id)
+        .expect("get_entity_by_id must succeed")
+        .expect("row must be present after upsert");
+
+    assert_eq!(fetched.id, Some(id));
+    assert_eq!(fetched.name, entity.name);
+    assert_eq!(fetched.qualified_name, entity.qualified_name);
+    assert_eq!(fetched.file_path, entity.file_path);
+    assert_eq!(fetched.start_line, entity.start_line);
+    assert_eq!(fetched.signature, entity.signature);
+    assert_eq!(fetched.doc_comment, entity.doc_comment);
+    assert_eq!(fetched.language, entity.language);
+    assert_eq!(fetched.source_tool, entity.source_tool);
+
+    // A rowid that was never inserted returns Ok(None), not an error.
+    let missing = kg
+        .get_entity_by_id(9_999_999)
+        .expect("missing rowid must be Ok(None)");
+    assert!(
+        missing.is_none(),
+        "absent rowid must yield None, got {missing:?}",
+    );
+}
+
+/// `test_list_relations_by_target` — insert two entities and two
+/// relations targeting the same `target_id` with different
+/// `source_id`/`kind`, assert `list_relations_by_target` returns both
+/// rows in insertion order and that an unknown target yields an empty
+/// vec.
+#[cfg(test)]
+#[test]
+fn test_list_relations_by_target() {
+    use tempfile::TempDir;
+
+    let tmp = TempDir::new().expect("tempdir must be creatable");
+    let mut kg =
+        KnowledgeGraph::open(&tmp.path().join("kg.db")).expect("KnowledgeGraph::open must succeed");
+
+    let make_entity = |name: &str, qname: &str| Entity {
+        id: None,
+        kind: "function".to_owned(),
+        name: name.to_owned(),
+        qualified_name: Some(qname.to_owned()),
+        file_path: "src/caller_map.rs".to_owned(),
+        start_line: Some(1),
+        end_line: Some(10),
+        signature: None,
+        doc_comment: None,
+        language: Some("rust".to_owned()),
+        t_valid_from: Some("2026-04-18T00:00:00+00:00".to_owned()),
+        t_valid_to: None,
+        importance: 0.5,
+        source_tool: None,
+        source_hash: None,
+    };
+    let caller_a = kg
+        .upsert_entity(&make_entity("caller_a", "graph::caller_a"))
+        .expect("caller_a upsert");
+    let caller_b = kg
+        .upsert_entity(&make_entity("caller_b", "graph::caller_b"))
+        .expect("caller_b upsert");
+    let target = kg
+        .upsert_entity(&make_entity("target", "graph::target"))
+        .expect("target upsert");
+
+    let make_relation = |src: i64, kind: &str| Relation {
+        id: None,
+        source_id: src,
+        target_id: target,
+        kind: kind.to_owned(),
+        weight: 0.5,
+        t_valid_from: Some("2026-04-18T00:00:00+00:00".to_owned()),
+        t_valid_to: None,
+        source_tool: Some("tree-sitter".to_owned()),
+        source_evidence: None,
+        confidence: 0.9,
+    };
+    let rel_a = kg
+        .upsert_relation(&make_relation(caller_a, "calls"))
+        .expect("rel_a upsert");
+    let rel_b = kg
+        .upsert_relation(&make_relation(caller_b, "references"))
+        .expect("rel_b upsert");
+
+    let listed = kg
+        .list_relations_by_target(target)
+        .expect("list_relations_by_target must succeed");
+    assert_eq!(listed.len(), 2, "both inbound edges returned");
+    assert_eq!(
+        listed[0].id,
+        Some(rel_a),
+        "first row is the earliest-inserted (id ASC)",
+    );
+    assert_eq!(listed[0].source_id, caller_a);
+    assert_eq!(listed[0].kind, "calls");
+    assert_eq!(listed[1].id, Some(rel_b));
+    assert_eq!(listed[1].source_id, caller_b);
+    assert_eq!(listed[1].kind, "references");
+
+    // target with no inbound edges returns empty vec.
+    let empty = kg
+        .list_relations_by_target(9_999_999)
+        .expect("empty list must be Ok");
+    assert!(empty.is_empty(), "absent target_id yields empty vec");
 }
 
 /// `test_bi_temporal_as_of` — insert three rows for the same

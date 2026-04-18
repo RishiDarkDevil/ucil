@@ -508,7 +508,7 @@ use tempfile::TempDir;
 /// Both shapes are probed so the test passes under every invocation the
 /// master workflow uses.
 #[cfg(test)]
-fn rust_project_fixture() -> PathBuf {
+pub(crate) fn rust_project_fixture() -> PathBuf {
     let candidates = [
         PathBuf::from("tests/fixtures/rust-project"),
         PathBuf::from("../../tests/fixtures/rust-project"),

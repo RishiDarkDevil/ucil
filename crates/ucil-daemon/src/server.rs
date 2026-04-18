@@ -38,7 +38,10 @@
 // `plugin_manager` and `session_manager`.
 #![allow(clippy::module_name_repetitions)]
 
-use std::time::Duration;
+use std::{
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use serde_json::{json, Value};
 use thiserror::Error;
@@ -46,6 +49,7 @@ use tokio::{
     io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader},
     time::timeout,
 };
+use ucil_core::KnowledgeGraph;
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -310,6 +314,14 @@ pub struct McpServer {
     /// Advertised tool catalog.  Populated by
     /// [`McpServer::new`] from [`ucil_tools`].
     pub tools: Vec<ToolDescriptor>,
+    /// Optional handle onto the bi-temporal knowledge graph populated by
+    /// the `P1-W4-F04` tree-sitter → KG ingest pipeline.  When present,
+    /// `tools/call` dispatches the `find_definition` tool
+    /// (`P1-W4-F05`, master-plan §3.2 row 2) to a real handler that
+    /// pulls definition + callers from the graph; when absent, the tool
+    /// falls through to the `_meta.not_yet_implemented: true` stub path
+    /// every other tool still uses (phase-1 invariant #9).
+    pub kg: Option<Arc<Mutex<KnowledgeGraph>>>,
 }
 
 impl Default for McpServer {
@@ -320,10 +332,41 @@ impl Default for McpServer {
 
 impl McpServer {
     /// Construct a server whose catalog is the Phase-1 22-tool set.
+    ///
+    /// The returned server carries no knowledge-graph handle, so every
+    /// `tools/call` — including `find_definition` — falls through to the
+    /// `_meta.not_yet_implemented: true` stub response required by
+    /// phase-1 invariant #9.  This keeps the WO-0010 acceptance
+    /// selector `server::test_all_22_tools_registered` wire-compatible
+    /// and is the shape every pre-`P1-W4-F05` call-site expects.
     #[must_use]
     pub fn new() -> Self {
         Self {
             tools: ucil_tools(),
+            kg: None,
+        }
+    }
+
+    /// Construct a server that routes `find_definition` (`P1-W4-F05`)
+    /// to the real `handle_find_definition` handler backed by the
+    /// supplied knowledge graph.
+    ///
+    /// The handle is `Arc<Mutex<_>>` so the caller can keep a second
+    /// reference (e.g. the ingest pipeline) and mutate the graph
+    /// concurrently; the handler takes the lock for the duration of a
+    /// single read and releases it before encoding the response.  Every
+    /// tool **other** than `find_definition` still falls through to the
+    /// stub path — the 22-tool catalog is unchanged and phase-1
+    /// invariant #9 is preserved for the remaining 21 tools.
+    ///
+    /// See master-plan §3.2 row 2 (`find_definition` — go-to-definition
+    /// with full context) and §18 Phase 1 Week 4 line 1751 ("Implement
+    /// first working tool: `find_definition`").
+    #[must_use]
+    pub fn with_knowledge_graph(kg: Arc<Mutex<KnowledgeGraph>>) -> Self {
+        Self {
+            tools: ucil_tools(),
+            kg: Some(kg),
         }
     }
 
@@ -445,6 +488,17 @@ impl McpServer {
             return jsonrpc_error(id, -32602, &format!("Unknown tool: {name}"));
         }
 
+        // Route `find_definition` (P1-W4-F05) to its real handler when
+        // a KG handle is attached; every other tool — and
+        // `find_definition` when no KG is attached — falls through to
+        // the stub path so phase-1 invariant #9 is preserved for the
+        // remaining 21 tools of the §3.2 catalog.
+        if name == "find_definition" {
+            if let Some(kg) = self.kg.as_ref() {
+                return Self::handle_find_definition(id, params, kg);
+            }
+        }
+
         // Phase-1 invariant #9: every tool handler is a stub that
         // returns `_meta.not_yet_implemented: true`.  Downstream phases
         // will swap this stub for real dispatch into the group fusion
@@ -469,6 +523,242 @@ impl McpServer {
             }
         })
     }
+
+    /// Handle the `find_definition` MCP tool (`P1-W4-F05`,
+    /// master-plan §3.2 row 2 / §18 Phase 1 Week 4 line 1751).
+    ///
+    /// Extracts `arguments.name` (required, string) and
+    /// `arguments.file_path` (optional, string) from `params`, queries
+    /// the knowledge graph, and returns an MCP `tools/call` envelope
+    /// whose `result._meta` carries the structured payload:
+    ///
+    /// * `tool`: `"find_definition"`.
+    /// * `source`: `"tree-sitter+kg"` — advertises the data lineage so
+    ///   downstream G1/G2 fusion layers can merge results from other
+    ///   source tools (Serena, LSP) without clobbering the KG path.
+    /// * `found`: `true` when resolution succeeded, `false` otherwise.
+    /// * `file_path`, `start_line`, `signature`, `doc_comment`,
+    ///   `parent_module`: the resolved definition projection (present
+    ///   only when `found`).
+    /// * `callers`: array of `{qualified_name, file_path, start_line}`
+    ///   for every immediate caller (i.e. every `calls`-kind edge whose
+    ///   `target_id` is the definition's rowid).  Empty vec when the
+    ///   definition has no known callers yet.
+    ///
+    /// The not-found shape returns `isError: false` with
+    /// `_meta.found == false` so Claude Code and other MCP hosts render
+    /// a graceful "no definition found" response rather than a
+    /// JSON-RPC error envelope — matches master-plan §3.2 UX contract.
+    ///
+    /// Missing or non-string `arguments.name` → JSON-RPC error `-32602`
+    /// (invalid params), the standard code for malformed parameters.
+    fn handle_find_definition(
+        id: &Value,
+        params: &Value,
+        kg: &Arc<Mutex<KnowledgeGraph>>,
+    ) -> Value {
+        let args = params
+            .get("arguments")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        let Some(name) = args.get("name").and_then(Value::as_str) else {
+            return jsonrpc_error(
+                id,
+                -32602,
+                "find_definition: `arguments.name` is required and must be a string",
+            );
+        };
+        let file_scope = args.get("file_path").and_then(Value::as_str);
+
+        match read_find_definition(kg, name, file_scope) {
+            Ok(FindDefinitionPayload::Found {
+                resolution,
+                callers,
+            }) => found_response(id, name, &resolution, &callers),
+            Ok(FindDefinitionPayload::NotFound) => not_found_response(id, name),
+            Err(e) => jsonrpc_error(id, e.code, &e.message),
+        }
+    }
+}
+
+/// Internal error shape for the `find_definition` read pipeline —
+/// threads a `(code, message)` pair out of the KG-locked section so the
+/// outer handler can build the JSON-RPC error envelope with the mutex
+/// guard already released.
+#[derive(Debug)]
+struct FindDefinitionReadError {
+    code: i64,
+    message: String,
+}
+
+/// Internal payload shape produced by
+/// [`McpServer::handle_find_definition`] — threads the KG read results
+/// out of the mutex-guarded block so the response encoding happens with
+/// the lock released.
+#[derive(Debug)]
+enum FindDefinitionPayload {
+    /// Definition resolved — carries the [`ucil_core::SymbolResolution`]
+    /// projection plus the projected caller list (already JSON-shaped).
+    Found {
+        /// The resolved symbol's [`ucil_core::SymbolResolution`]
+        /// projection from [`KnowledgeGraph::resolve_symbol`].
+        resolution: ucil_core::SymbolResolution,
+        /// Projected caller list, one JSON object per `calls`-kind
+        /// inbound edge: `{qualified_name, file_path, start_line}`.
+        callers: Vec<Value>,
+    },
+    /// Resolver returned `Ok(None)` for the requested `(name,
+    /// file_scope)` pair.
+    NotFound,
+}
+
+/// Execute the knowledge-graph reads that back `find_definition`:
+/// acquire the lock, resolve the symbol, enumerate `calls`-kind
+/// inbound edges, and project each caller onto its
+/// `{qualified_name, file_path, start_line}` shape.
+///
+/// Kept out of the `McpServer` impl so `handle_find_definition` stays
+/// under the `clippy::too_many_lines` threshold; the outer method
+/// owns the argument parsing and JSON envelope construction.
+fn read_find_definition(
+    kg: &Arc<Mutex<KnowledgeGraph>>,
+    name: &str,
+    file_scope: Option<&str>,
+) -> Result<FindDefinitionPayload, FindDefinitionReadError> {
+    let guard = kg.lock().map_err(|poisoned| {
+        tracing::error!("knowledge graph mutex is poisoned: {poisoned}");
+        FindDefinitionReadError {
+            code: -32603,
+            message: "find_definition: internal error (knowledge graph mutex poisoned)".to_owned(),
+        }
+    })?;
+    match guard.resolve_symbol(name, file_scope) {
+        Ok(Some(resolution)) => {
+            let entity_id = resolution.id.unwrap_or_default();
+            let caller_rows = guard.list_relations_by_target(entity_id).map_err(|e| {
+                tracing::error!("list_relations_by_target failed: {e}");
+                FindDefinitionReadError {
+                    code: -32603,
+                    message: format!("find_definition: callers lookup failed: {e}"),
+                }
+            })?;
+            let callers = project_callers(&guard, &caller_rows)?;
+            drop(guard);
+            Ok(FindDefinitionPayload::Found {
+                resolution,
+                callers,
+            })
+        }
+        Ok(None) => {
+            drop(guard);
+            Ok(FindDefinitionPayload::NotFound)
+        }
+        Err(e) => {
+            tracing::error!("resolve_symbol failed: {e}");
+            Err(FindDefinitionReadError {
+                code: -32603,
+                message: format!("find_definition: resolve failed: {e}"),
+            })
+        }
+    }
+}
+
+/// Project `calls`-kind inbound relations onto their caller entity's
+/// `{qualified_name, file_path, start_line}` JSON shape.
+///
+/// Dangling foreign keys (source row deleted between queries) are
+/// logged and skipped — the caller list is best-effort because the
+/// §12.1 `relations` table has no cascading delete.
+fn project_callers(
+    guard: &std::sync::MutexGuard<'_, KnowledgeGraph>,
+    caller_rows: &[ucil_core::Relation],
+) -> Result<Vec<Value>, FindDefinitionReadError> {
+    let mut callers: Vec<Value> = Vec::new();
+    for rel in caller_rows.iter().filter(|r| r.kind == "calls") {
+        match guard.get_entity_by_id(rel.source_id) {
+            Ok(Some(caller)) => {
+                callers.push(json!({
+                    "qualified_name": caller.qualified_name,
+                    "file_path": caller.file_path,
+                    "start_line": caller.start_line,
+                }));
+            }
+            Ok(None) => {
+                tracing::warn!(
+                    source_id = rel.source_id,
+                    "find_definition: caller source row missing (dangling fk)",
+                );
+            }
+            Err(e) => {
+                tracing::error!("get_entity_by_id failed: {e}");
+                return Err(FindDefinitionReadError {
+                    code: -32603,
+                    message: format!("find_definition: caller projection failed: {e}"),
+                });
+            }
+        }
+    }
+    Ok(callers)
+}
+
+/// Build the JSON-RPC response envelope for a resolved definition.
+fn found_response(
+    id: &Value,
+    name: &str,
+    resolution: &ucil_core::SymbolResolution,
+    callers: &[Value],
+) -> Value {
+    let text = format!(
+        "`{name}` defined in {} at line {}",
+        resolution.file_path,
+        resolution
+            .start_line
+            .map_or_else(|| "?".to_owned(), |l| l.to_string()),
+    );
+    json!({
+        "jsonrpc": JSONRPC_VERSION,
+        "id": id.clone(),
+        "result": {
+            "_meta": {
+                "tool": "find_definition",
+                "source": "tree-sitter+kg",
+                "found": true,
+                "file_path": resolution.file_path,
+                "start_line": resolution.start_line,
+                "signature": resolution.signature,
+                "doc_comment": resolution.doc_comment,
+                "parent_module": resolution.parent_module,
+                "qualified_name": resolution.qualified_name,
+                "callers": callers.to_vec(),
+            },
+            "content": [
+                { "type": "text", "text": text }
+            ],
+            "isError": false
+        }
+    })
+}
+
+/// Build the JSON-RPC response envelope for an unresolved symbol.
+fn not_found_response(id: &Value, name: &str) -> Value {
+    json!({
+        "jsonrpc": JSONRPC_VERSION,
+        "id": id.clone(),
+        "result": {
+            "_meta": {
+                "tool": "find_definition",
+                "source": "tree-sitter+kg",
+                "found": false,
+            },
+            "content": [
+                {
+                    "type": "text",
+                    "text": format!("no definition found for `{name}`"),
+                }
+            ],
+            "isError": false
+        }
+    })
 }
 
 /// Build a JSON-RPC 2.0 error envelope.
@@ -885,4 +1175,317 @@ async fn test_progressive_startup() {
         .expect("server task must finish within 3 s of EOF")
         .expect("server task must not panic");
     serve_result.expect("server loop must return Ok after clean EOF");
+}
+
+// ── find_definition acceptance tests (P1-W4-F05) ─────────────────────────
+//
+// Per DEC-0005, these live at module root (NOT under `mod tests { … }`)
+// so the frozen acceptance selector `server::test_find_definition_tool`
+// resolves to `ucil_daemon::server::test_find_definition_tool` for
+// `cargo nextest run -p ucil-daemon server::test_find_definition_tool`
+// without an intermediate `tests::` segment.
+
+/// Build an `McpServer::with_knowledge_graph`-backed server populated
+/// by running the real tree-sitter → KG pipeline on the fixture
+/// `tests/fixtures/rust-project/src/util.rs`, then upsert a synthetic
+/// `calls`-kind relation whose target is the fixture's `evaluate`
+/// function so the happy-path response carries a non-empty callers
+/// list.
+///
+/// Returns `(server, kg_arc, tmp_dir, fixture_file_str, evaluate_id,
+/// caller_qualified_name)` so the caller can assert the response
+/// envelope against known-good values.
+#[cfg(test)]
+#[allow(clippy::type_complexity)]
+fn build_find_definition_fixture() -> (
+    McpServer,
+    Arc<Mutex<ucil_core::KnowledgeGraph>>,
+    tempfile::TempDir,
+    String,
+    i64,
+    String,
+) {
+    use ucil_core::{Entity, KnowledgeGraph, Relation};
+
+    use crate::executor::{
+        rust_project_fixture, IngestPipeline, SOURCE_TOOL, TREE_SITTER_VALID_FROM,
+    };
+
+    let tmp = tempfile::TempDir::new().expect("tempdir must be creatable");
+    let kg_path = tmp.path().join("knowledge.db");
+    let mut kg = KnowledgeGraph::open(&kg_path).expect("KnowledgeGraph::open must succeed");
+
+    // Ingest the fixture so the KG holds a real `evaluate` symbol row.
+    let fixture = rust_project_fixture();
+    let util_rs = fixture.join("src/util.rs");
+    assert!(util_rs.is_file(), "fixture {util_rs:?} must exist");
+    let mut pipeline = IngestPipeline::new();
+    let inserted = pipeline
+        .ingest_file(&mut kg, &util_rs)
+        .expect("ingest_file must succeed");
+    assert!(
+        inserted > 0,
+        "fixture ingest must produce ≥1 symbol (got {inserted})"
+    );
+
+    let file_path_str = util_rs.display().to_string();
+
+    // Locate the `evaluate` row id (function kind at line 128 in the
+    // fixture — the ingest pipeline upserts one row per extracted
+    // symbol).
+    let evaluate_id: i64 = {
+        let rows = kg
+            .list_entities_by_file(&file_path_str)
+            .expect("list_entities_by_file must succeed");
+        rows.iter()
+            .find(|e| e.name == "evaluate" && e.kind == "function")
+            .and_then(|e| e.id)
+            .expect("fixture must contain an `evaluate` function row")
+    };
+
+    // Upsert a synthetic caller entity and `calls` relation targeting
+    // `evaluate` so the happy-path response has a non-empty callers
+    // list — this is the "immediate callers" field from the P1-W4-F05
+    // description.
+    let caller_qualified_name = "tests::synthetic::caller_of_evaluate@1:1".to_owned();
+    let caller = Entity {
+        id: None,
+        kind: "function".to_owned(),
+        name: "caller_of_evaluate".to_owned(),
+        qualified_name: Some(caller_qualified_name.clone()),
+        file_path: "tests/synthetic.rs".to_owned(),
+        start_line: Some(1),
+        end_line: Some(3),
+        signature: Some("fn caller_of_evaluate()".to_owned()),
+        doc_comment: None,
+        language: Some("rust".to_owned()),
+        t_valid_from: Some(TREE_SITTER_VALID_FROM.to_owned()),
+        t_valid_to: None,
+        importance: 0.5,
+        source_tool: Some(SOURCE_TOOL.to_owned()),
+        source_hash: Some("synthetic".to_owned()),
+    };
+    let caller_id = kg
+        .upsert_entity(&caller)
+        .expect("synthetic caller upsert must succeed");
+    let relation = Relation {
+        id: None,
+        source_id: caller_id,
+        target_id: evaluate_id,
+        kind: "calls".to_owned(),
+        weight: 1.0,
+        t_valid_from: Some(TREE_SITTER_VALID_FROM.to_owned()),
+        t_valid_to: None,
+        source_tool: Some(SOURCE_TOOL.to_owned()),
+        source_evidence: Some("synthetic test edge".to_owned()),
+        confidence: 1.0,
+    };
+    kg.upsert_relation(&relation)
+        .expect("synthetic calls relation upsert must succeed");
+
+    let kg_arc = Arc::new(Mutex::new(kg));
+    let server = McpServer::with_knowledge_graph(Arc::clone(&kg_arc));
+    (
+        server,
+        kg_arc,
+        tmp,
+        file_path_str,
+        evaluate_id,
+        caller_qualified_name,
+    )
+}
+
+/// Frozen acceptance selector for feature `P1-W4-F05` — see
+/// `ucil-build/feature-list.json` entry for
+/// `-p ucil-daemon server::test_find_definition_tool`.
+///
+/// Exercises the full `tools/call` dispatch for `find_definition`
+/// against a real tree-sitter → KG pipeline-populated database, with
+/// a synthetic `calls` edge in place so the response's callers list
+/// is non-empty.  Asserts:
+///
+/// 1. The JSON-RPC envelope is well-formed (`jsonrpc == "2.0"`,
+///    matching `id`, no `error` field).
+/// 2. `result._meta.found == true`.
+/// 3. `result._meta.tool == "find_definition"` and
+///    `result._meta.source == "tree-sitter+kg"`.
+/// 4. `result._meta.file_path` matches the ingested fixture path.
+/// 5. `result._meta.start_line` is Some positive integer (tree-sitter
+///    reports 1-based line numbers).
+/// 6. `result._meta.callers` contains an entry whose `qualified_name`
+///    matches the synthetic caller seeded in the fixture helper.
+/// 7. `result.isError == false`.
+/// 8. The phase-1 stub marker `_meta.not_yet_implemented` is
+///    **absent** — proving the handler escaped the stub path.
+#[cfg(test)]
+#[test]
+fn test_find_definition_tool() {
+    let (server, _kg, _tmp, file_path_str, _evaluate_id, caller_qualified_name) =
+        build_find_definition_fixture();
+
+    let request = json!({
+        "jsonrpc": JSONRPC_VERSION,
+        "id": 42,
+        "method": "tools/call",
+        "params": {
+            "name": "find_definition",
+            "arguments": { "name": "evaluate", "reason": "acceptance test" }
+        }
+    })
+    .to_string();
+    let response = server.handle_line(&request);
+
+    assert_eq!(
+        response.get("jsonrpc").and_then(Value::as_str),
+        Some(JSONRPC_VERSION),
+        "response must carry jsonrpc == \"2.0\": {response}"
+    );
+    assert_eq!(
+        response.get("id").and_then(Value::as_i64),
+        Some(42),
+        "response id must echo request id: {response}"
+    );
+    assert!(
+        response.get("error").is_none(),
+        "response must not carry an error envelope: {response}"
+    );
+
+    let meta = response
+        .pointer("/result/_meta")
+        .expect("response must carry result._meta");
+    assert_eq!(
+        meta.get("found").and_then(Value::as_bool),
+        Some(true),
+        "_meta.found must be true for a resolved symbol: {response}"
+    );
+    assert_eq!(
+        meta.get("tool").and_then(Value::as_str),
+        Some("find_definition"),
+        "_meta.tool must be \"find_definition\": {response}"
+    );
+    assert_eq!(
+        meta.get("source").and_then(Value::as_str),
+        Some("tree-sitter+kg"),
+        "_meta.source must be \"tree-sitter+kg\": {response}"
+    );
+    assert_eq!(
+        meta.get("file_path").and_then(Value::as_str),
+        Some(file_path_str.as_str()),
+        "_meta.file_path must match the ingested fixture path: {response}"
+    );
+    let start_line = meta
+        .get("start_line")
+        .and_then(Value::as_i64)
+        .expect("_meta.start_line must be a positive integer");
+    assert!(
+        start_line > 0,
+        "_meta.start_line must be 1-based positive: got {start_line}"
+    );
+
+    let callers = meta
+        .get("callers")
+        .and_then(Value::as_array)
+        .expect("_meta.callers must be a JSON array");
+    assert!(
+        callers.iter().any(|c| {
+            c.get("qualified_name").and_then(Value::as_str) == Some(caller_qualified_name.as_str())
+        }),
+        "_meta.callers must contain synthetic caller {caller_qualified_name:?}: got {callers:?}"
+    );
+
+    assert_eq!(
+        response.pointer("/result/isError").and_then(Value::as_bool),
+        Some(false),
+        "result.isError must be false on the happy path: {response}"
+    );
+    assert!(
+        response
+            .pointer("/result/_meta/not_yet_implemented")
+            .is_none(),
+        "result._meta.not_yet_implemented must be ABSENT — the handler \
+         must have escaped the phase-1 stub path: {response}"
+    );
+}
+
+/// Negative path: a `find_definition` call for a symbol absent from
+/// the knowledge graph must return a well-formed JSON-RPC response
+/// envelope with `_meta.found == false` and `isError == false` — NOT
+/// a JSON-RPC error, because "symbol not found" is a successful
+/// lookup that returned zero rows.
+#[cfg(test)]
+#[test]
+fn test_find_definition_tool_unknown_symbol() {
+    let (server, _kg, _tmp, _file_path, _id, _caller) = build_find_definition_fixture();
+
+    let request = json!({
+        "jsonrpc": JSONRPC_VERSION,
+        "id": 7,
+        "method": "tools/call",
+        "params": {
+            "name": "find_definition",
+            "arguments": { "name": "this_symbol_does_not_exist_anywhere" }
+        }
+    })
+    .to_string();
+    let response = server.handle_line(&request);
+
+    assert!(
+        response.get("error").is_none(),
+        "unknown-symbol path must not return JSON-RPC error: {response}"
+    );
+    assert_eq!(
+        response
+            .pointer("/result/_meta/found")
+            .and_then(Value::as_bool),
+        Some(false),
+        "_meta.found must be false for unresolved symbol: {response}"
+    );
+    assert_eq!(
+        response.pointer("/result/isError").and_then(Value::as_bool),
+        Some(false),
+        "result.isError must be false (this is a well-formed zero-row \
+         result, not an error): {response}"
+    );
+}
+
+/// Negative path: a `find_definition` call missing the required
+/// `name` argument must return a JSON-RPC error envelope with
+/// `code == -32602` (Invalid params).
+#[cfg(test)]
+#[test]
+fn test_find_definition_tool_missing_name_param() {
+    let (server, _kg, _tmp, _file_path, _id, _caller) = build_find_definition_fixture();
+
+    let request = json!({
+        "jsonrpc": JSONRPC_VERSION,
+        "id": 99,
+        "method": "tools/call",
+        "params": {
+            "name": "find_definition",
+            "arguments": {}
+        }
+    })
+    .to_string();
+    let response = server.handle_line(&request);
+
+    let error = response
+        .get("error")
+        .expect("missing `name` arg must produce JSON-RPC error envelope");
+    assert_eq!(
+        error.get("code").and_then(Value::as_i64),
+        Some(-32602),
+        "missing param error code must be -32602 (Invalid params): {response}"
+    );
+    let message = error
+        .get("message")
+        .and_then(Value::as_str)
+        .expect("error envelope must carry a string message");
+    assert!(
+        message.contains("name"),
+        "error message should reference missing `name` argument: {message:?}"
+    );
+    assert!(
+        response.get("result").is_none(),
+        "JSON-RPC error response must not also carry `result`: {response}"
+    );
 }

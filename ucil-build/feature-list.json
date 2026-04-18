@@ -749,10 +749,10 @@
         "P1-W4-F04",
         "P1-W3-F07"
       ],
-      "passes": false,
-      "last_verified_ts": null,
-      "last_verified_by": null,
-      "last_verified_commit": null,
+      "passes": true,
+      "last_verified_ts": "2026-04-18T14:55:47Z",
+      "last_verified_by": "verifier-9422e28c-64e9-4bc0-a26d-cea7533de34b",
+      "last_verified_commit": "d0df074f248977ed093f8f6c5390f42ecc688e87",
       "attempts": 0,
       "blocked_reason": null
     },
