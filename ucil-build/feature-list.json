@@ -726,10 +726,10 @@
         "P1-W4-F02",
         "P1-W2-F02"
       ],
-      "passes": false,
-      "last_verified_ts": null,
-      "last_verified_by": null,
-      "last_verified_commit": null,
+      "passes": true,
+      "last_verified_ts": "2026-04-18T14:17:56Z",
+      "last_verified_by": "verifier-4fbbeaf3-10a5-4470-ba65-c9782b77b83e",
+      "last_verified_commit": "ebb046dc05948a821dda9207f220d942d10fe97a",
       "attempts": 0,
       "blocked_reason": null
     },

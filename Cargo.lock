@@ -2075,6 +2075,7 @@ dependencies = [
  "anyhow",
  "notify",
  "notify-debouncer-full",
+ "rusqlite",
  "serde",
  "serde_json",
  "tempfile",
@@ -2084,6 +2085,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "ucil-core",
+ "ucil-treesitter",
  "uuid",
 ]
 

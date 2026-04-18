@@ -30,7 +30,14 @@ toml.workspace = true
 uuid.workspace = true
 notify = { workspace = true }
 notify-debouncer-full = { workspace = true }
+# `rusqlite` is needed so the `executor` pipeline (P1-W4-F04) can build
+# `rusqlite::params!` bindings inside the `KnowledgeGraph::execute_in_transaction`
+# closure — the closure signature is `FnOnce(&Transaction) -> Result<_, rusqlite::Error>`.
+rusqlite = { workspace = true }
 ucil-core = { path = "../ucil-core" }
+# `ucil-treesitter` drives the tree-sitter → knowledge-graph executor
+# pipeline (P1-W4-F04, master-plan §18 Phase 1 Week 4 line 1759).
+ucil-treesitter = { path = "../ucil-treesitter" }
 
 [dev-dependencies]
 tempfile.workspace = true
