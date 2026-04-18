@@ -509,7 +509,7 @@ impl Default for IngestPipeline {
 //    (logged at `warn!`) so a Serena outage never breaks the G1 response
 //    — the master-plan §13.4 diagnostics-bridge best-effort contract
 //    applies to hover fusion too.
-// 3. [`fake_serena_hover_client::ScriptedFakeSerenaHoverClient`] — the
+// 3. `fake_serena_hover_client::ScriptedFakeSerenaHoverClient` — the
 //    hand-written scripted fake that drives the fusion function under
 //    test.  It is NOT a mock of Serena's MCP wire format (forbidden per
 //    root `CLAUDE.md`) — it implements UCIL's own [`SerenaHoverClient`]
@@ -517,7 +517,7 @@ impl Default for IngestPipeline {
 //    `ucil-lsp-diagnostics::{call_hierarchy,quality_pipeline}::
 //    fake_serena_client`.
 //
-// Wiring into [`crate::server::McpServer::handle_find_definition`] is
+// Wiring into `server::McpServer::handle_find_definition` is
 // deliberately out of scope for this WO — see the work-order's
 // `scope_out` field for the reasoning (the P1-W4-F05 frozen acceptance
 // selector asserts on the current `_meta` JSON shape and an ADR-gated
@@ -617,7 +617,7 @@ pub enum HoverFetchError {
 /// implementation (landing in a follow-up WO) converts the trait's
 /// arguments into a Serena `tools/call` request and its response back
 /// into a [`HoverDoc`].  The test suite drives [`enrich_find_definition`]
-/// through [`fake_serena_hover_client::ScriptedFakeSerenaHoverClient`],
+/// through `fake_serena_hover_client::ScriptedFakeSerenaHoverClient`,
 /// a hand-written scripted fake implementing this exact trait — see the
 /// sibling `SerenaClient` in `ucil-lsp-diagnostics` for the precedent
 /// (WO-0015, already live and verifier-passed).
@@ -656,11 +656,11 @@ pub trait SerenaHoverClient: Send + Sync {
 /// caller of the resolved definition.
 ///
 /// Mirrors the JSON shape `{qualified_name, file_path, start_line}`
-/// that [`crate::server::project_callers`] emits onto the MCP
+/// that `server::project_callers` emits onto the MCP
 /// `_meta.callers` array (see `server.rs`).  Promoted to a typed struct
 /// here so [`enrich_find_definition`] stays testable without round-
 /// tripping through `serde_json::Value`.  The live-wiring WO that
-/// threads this into [`crate::server::McpServer::handle_find_definition`]
+/// threads this into `server::McpServer::handle_find_definition`
 /// will either convert from this typed form back to `Value` at the
 /// envelope boundary or push the typed form all the way through — the
 /// choice is scoped to that WO's ADR.

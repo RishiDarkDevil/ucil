@@ -2177,6 +2177,7 @@ name = "ucil-daemon"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "grep-matcher",
  "grep-regex",
  "grep-searcher",
