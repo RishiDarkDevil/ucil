@@ -7,6 +7,7 @@ blocks_loop: false
 session_role: monitor
 session_work: observed-orchestrator-self-exited-post-planner-WO-0039-emission; resumed-again-PID-2454693; triage-auto-resolved-prior-heartbeat; executor-pipeline-for-WO-0039-active
 auto_resolve_on_next_triage: bucket-A
+resolved: true
 ---
 
 # Phase 1 gate incomplete — monitor session (post-resume, WO-0039 emitted)
@@ -50,3 +51,21 @@ for WO requiring fresh-session executor spawn. Manually re-resumed at
 - Bucket A auto-resolve on next triage pass.
 - Intentionally NO `resolved: true` line in frontmatter so stop-hook
   bypass fires this turn.
+
+## Resolution
+
+Auto-resolved by triage pass-1 on 2026-04-19. Verified conditions still
+match HEAD:
+
+- Branch `main` at `85f0847` (heartbeat committed); planner commit
+  `95c8e61` (WO-0039 + DEC-0011) present in log.
+- Work-order `0039-watchman-backend-retry-with-pathguard.json` on disk.
+- Tree clean, 0 unpushed commits.
+- Phase-1 feature count: 33/34 passing (47/48 combined with phase-0).
+  One feature remains — P1-W3-F03 — with WO-0039 in flight.
+- Drift counter for phase 1 at 3 (below halt threshold of ≥4).
+
+Admin heartbeat; no material action required. `blocks_loop: false` and
+self-labelled `auto_resolve_on_next_triage: bucket-A`.
+
+resolved: true
