@@ -1188,6 +1188,131 @@ impl KnowledgeGraph {
         Ok(row_result.map(Some).or_else(absent_to_none)?)
     }
 
+    // ── Conventions CRUD (P1-W4-F10 read path) ──────────────────────
+    //
+    // The `conventions` table is a cold-tier record of project-level
+    // coding conventions (master-plan §12.1 lines 1172-1182).  Writes
+    // flow through `insert_convention` which routes through
+    // `execute_in_transaction` (`BEGIN IMMEDIATE` per §11 line 1117);
+    // reads flow through `list_conventions` which is a direct
+    // `&self` statement with rowid ordering to match
+    // `list_relations_by_source` semantics.  The `get_conventions`
+    // MCP tool handler (`P1-W4-F10`) calls `list_conventions` with an
+    // optional caller-supplied `category` filter.
+
+    /// Insert a [`Convention`] row into the `conventions` table.
+    ///
+    /// `t_ingested_at` is populated by the schema default
+    /// (`DEFAULT (datetime('now'))`) so the writer omits it from the
+    /// INSERT list.  `last_verified` is inserted as NULL when
+    /// [`Convention::last_verified`] is `None`.  Returns the new
+    /// `conventions.id`.
+    ///
+    /// See master-plan §12.1 row `conventions` for the target schema
+    /// and §3.2 row 7 (`get_conventions`) for the downstream read
+    /// consumer.
+    ///
+    /// # Errors
+    ///
+    /// * [`KnowledgeGraphError::Sqlite`] — transaction open, statement
+    ///   prepare, bind, or `RETURNING id` fetch failed.
+    #[tracing::instrument(
+        level = "debug",
+        skip(self, convention),
+        fields(category = %convention.category, pattern_len = convention.pattern.len()),
+        name = "ucil.core.kg.insert_convention",
+    )]
+    pub fn insert_convention(
+        &mut self,
+        convention: &Convention,
+    ) -> Result<i64, KnowledgeGraphError> {
+        self.execute_in_transaction(|tx| {
+            let mut stmt = tx.prepare(
+                "INSERT INTO conventions (\
+                    category, pattern, examples, counter_examples, \
+                    confidence, evidence_count, last_verified, scope\
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
+                 RETURNING id;",
+            )?;
+            let id: i64 = stmt.query_row(
+                rusqlite::params![
+                    convention.category,
+                    convention.pattern,
+                    convention.examples,
+                    convention.counter_examples,
+                    convention.confidence,
+                    convention.evidence_count,
+                    convention.last_verified,
+                    convention.scope,
+                ],
+                |row| row.get::<_, i64>(0),
+            )?;
+            Ok(id)
+        })
+    }
+
+    /// List every [`Convention`] row, optionally filtered by
+    /// `category`.
+    ///
+    /// When `category` is `Some(cat)`, the SQL filter is
+    /// `WHERE category = ?1` — an exact-match lookup against the
+    /// `idx_conventions_category` index (master-plan §12.1 line 1312).
+    /// When `category` is `None`, the filter is dropped and every row
+    /// is returned.  Rows are ordered by `id ASC` to match the
+    /// insertion-order semantics of the existing
+    /// [`KnowledgeGraph::list_relations_by_source`] helper.
+    ///
+    /// An empty result set (either the table is empty or no rows
+    /// match the supplied category) is returned as `Ok(vec![])` — NOT
+    /// an error — per the P1-W4-F10 "empty list if none yet extracted"
+    /// contract (master-plan §3.2 row 7).
+    ///
+    /// Read-only — no transaction wrapper, consistent with
+    /// [`KnowledgeGraph::list_relations_by_source`] and
+    /// [`KnowledgeGraph::list_relations_by_target`].
+    ///
+    /// # Errors
+    ///
+    /// * [`KnowledgeGraphError::Sqlite`] — statement prepare, bind, or
+    ///   iteration failure.
+    #[tracing::instrument(
+        level = "debug",
+        skip(self),
+        fields(category = category.unwrap_or("")),
+        name = "ucil.core.kg.list_conventions",
+    )]
+    pub fn list_conventions(
+        &self,
+        category: Option<&str>,
+    ) -> Result<Vec<Convention>, KnowledgeGraphError> {
+        let sql = if category.is_some() {
+            "SELECT id, category, pattern, examples, counter_examples, \
+                    confidence, evidence_count, t_ingested_at, last_verified, scope \
+             FROM conventions \
+             WHERE category = ?1 \
+             ORDER BY id ASC"
+        } else {
+            "SELECT id, category, pattern, examples, counter_examples, \
+                    confidence, evidence_count, t_ingested_at, last_verified, scope \
+             FROM conventions \
+             ORDER BY id ASC"
+        };
+        let mut stmt = self.conn.prepare(sql)?;
+        let mut out = Vec::new();
+        if let Some(cat) = category {
+            let rows = stmt.query_map(rusqlite::params![cat], convention_from_row)?;
+            for row in rows {
+                out.push(row?);
+            }
+        } else {
+            let rows = stmt.query_map([], convention_from_row)?;
+            for row in rows {
+                out.push(row?);
+            }
+        }
+        Ok(out)
+    }
+
     // ── Hot-staging writers (P1-W4-F08) ─────────────────────────────
     //
     // Routes every hot-tier insert through `execute_in_transaction`
@@ -1447,6 +1572,25 @@ fn resolution_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SymbolResolu
         signature,
         doc_comment,
         parent_module,
+    })
+}
+
+/// Read a [`Convention`] row from a `SELECT id, category, pattern,
+/// examples, counter_examples, confidence, evidence_count,
+/// t_ingested_at, last_verified, scope` statement (exact column
+/// order).
+fn convention_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Convention> {
+    Ok(Convention {
+        id: row.get::<_, Option<i64>>(0)?,
+        category: row.get::<_, String>(1)?,
+        pattern: row.get::<_, String>(2)?,
+        examples: row.get::<_, Option<String>>(3)?,
+        counter_examples: row.get::<_, Option<String>>(4)?,
+        confidence: row.get::<_, f64>(5)?,
+        evidence_count: row.get::<_, i64>(6)?,
+        t_ingested_at: row.get::<_, String>(7)?,
+        last_verified: row.get::<_, Option<String>>(8)?,
+        scope: row.get::<_, String>(9)?,
     })
 }
 
