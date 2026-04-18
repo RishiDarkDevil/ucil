@@ -7,6 +7,7 @@ blocks_loop: false
 session_role: monitor
 session_work: watched-full-WO-0023-cycle; triage-pass1-auto-resolved-both-heartbeats-1222+1315; post-merge-inter-iter-quiet
 auto_resolve_on_next_triage: bucket-A
+resolved: true
 ---
 
 # Phase 1 gate incomplete — monitor session (post triage-pass1)
@@ -23,3 +24,12 @@ P1-W3-F02, F03, F08, W4-F02/03/04/05/08/09/10, W5-F02/07/08/09.
 - Bucket A auto-resolve on next triage pass.
 - Left unresolved in frontmatter for stop-hook bypass.
 - Gate-incomplete expected.
+
+## Resolution
+
+Resolved 2026-04-18 by triage cap-rescue pass. Author explicitly flagged
+`auto_resolve_on_next_triage: bucket-A` and `blocks_loop: false`. Content
+is a monitor heartbeat — 34/234 features passing, phase 1 in-flight, mid-
+phase gate-incomplete is the expected state. No material action required.
+Current state: HEAD at 19168ce, 34 features passing (20 phase-1), loop
+healthy. Bucket A — admin, auto-resolved.
