@@ -1,7 +1,7 @@
 # Effectiveness Report — Phase 1
 
-Run at: 2026-04-18T20:30:45Z
-Commit: 316109ee3bdb5491fd0f9845991aab816a1b4779
+Run at: 2026-04-19T02:30:00Z
+Commit: 8d8fc0cfd0af879b33227d6946e56f58ec99180b
 Evaluator: effectiveness-evaluator (fresh session)
 
 ## Summary
@@ -15,11 +15,43 @@ Evaluator: effectiveness-evaluator (fresh session)
 | Scenarios WIN | 0 |
 | Scenarios FAIL | 0 |
 
-**Gate verdict: PASS (vacuous)** — one scenario is tagged for phase 1 and the
-single eligible scenario auto-skipped because its `requires_tools` are not yet
-operational. See §"Gate contract" below for why vacuous-pass is the
-letter-of-the-contract outcome, and §"Advisory" for why the spirit of the
-contract is not yet served by Phase 1 shippables.
+**Gate verdict: PASS (vacuous)** — one scenario is tagged for phase 1
+(`nav-rust-symbol`), and it auto-skips because its `requires_tools`
+(`find_definition`, `find_references`) are not operationally reachable from an
+external `claude -p` run at this commit. The gate contract (see §"Gate
+contract") permits this as a vacuous pass. The §"Advisory" section documents
+what would make the pass *substantive* rather than vacuous.
+
+## Progress since the previous report (`effectiveness-phase-1.md` @ `316109e`)
+
+1. **WO-0040 merged** (`070204a`, `5418513`, `7737d92`). `ucil-daemon mcp
+   --stdio` is now a wired subcommand: `main.rs` dispatches on the first
+   positional arg, routes `"mcp"` to `McpServer::new().serve(stdin, stdout)`,
+   and routes tracing to `stderr` so `stdout` stays pristine for the JSON-RPC
+   frames. The stdio handshake **works**:
+
+   ```
+   printf '%s\n%s\n' \
+     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{...}}' \
+     '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
+     | timeout 15 ./target/debug/ucil-daemon mcp --stdio
+   ```
+   → two valid JSON-RPC responses; `tools/list` enumerates the full 22-tool
+   catalog from master-plan §3.2.
+
+2. **Nothing else relevant changed** for the effectiveness gate. Specifically,
+   the two blockers that held back an actual scenario run last time are still
+   in force:
+
+   - `mcpServers.ucil` is still absent from `.claude/settings.json` (6
+     servers registered, none named `ucil` or `ucil-mcp`).
+   - The stdio MCP server is constructed via `McpServer::new()` with no KG
+     handle attached. The `handle_tools_call` dispatcher at
+     `crates/ucil-daemon/src/server.rs:515-571` routes `find_definition`,
+     `get_conventions`, `search_code`, `understand_code` to their real
+     handlers **only when `self.kg.is_some()`**; otherwise it falls through
+     to the `_meta.not_yet_implemented: true` stub envelope (phase-1
+     invariant #9). `find_references` is not even in the KG-routed allow-list.
 
 ## Scenario discovery
 
@@ -29,127 +61,173 @@ contains `1`:
 | Scenario file | phases | fixture | requires_tools |
 |---|---|---|---|
 | `nav-rust-symbol.yaml` | `[1,2,3,4,5,6,7,8]` | `rust-project` | `find_definition`, `find_references` |
-| `refactor-rename-python.yaml` | `[2,3,4,5,6,7,8]` | — | — (phase 2+, not applicable) |
-| `add-feature-ts.yaml` | `[3,4,5,6,7,8]` | — | — (phase 3+, not applicable) |
-| `arch-query.yaml` | `[3,4,5,6,7,8]` | — | — (phase 3+, not applicable) |
+| `refactor-rename-python.yaml` | `[2,3,4,5,6,7,8]` | — | phase 2+, not applicable |
+| `add-feature-ts.yaml` | `[3,4,5,6,7,8]` | — | phase 3+, not applicable |
+| `arch-query.yaml` | `[3,4,5,6,7,8]` | — | phase 3+, not applicable |
 
 Only `nav-rust-symbol` is eligible for Phase 1.
 
 ## Tool-availability probe (per `.claude/agents/effectiveness-evaluator.md`)
 
-The evaluator contract §"Tool-availability checks" requires a live `tools/list`
-probe against `ucil-mcp` over stdio before any scenario can be run.
-
 ### Probe 1 — `ucil-mcp` binary
 
 ```
-command -v ucil-mcp                  → MISSING (exit 1)
-test -x ./target/debug/ucil-mcp      → MISSING
-test -x ./target/release/ucil-mcp    → MISSING
+command -v ucil-mcp                → MISSING
+test -x ./target/debug/ucil-mcp    → MISSING
+test -x ./target/release/ucil-mcp  → MISSING
 ```
 
-No `ucil-mcp` binary exists at the current commit. `crates/*/Cargo.toml` has
-no `[[bin]] name = "ucil-mcp"` entry — only `ucil-daemon`, `mock-mcp-plugin`,
-and `ucil` (CLI).
+No `ucil-mcp` binary exists. Per WO-0040 the equivalent entry point is now
+`ucil-daemon mcp --stdio`, which the evaluator contract §"Tool-availability
+checks" explicitly permits.
 
 ### Probe 2 — stdio handshake via `ucil-daemon mcp --stdio`
 
-Per `scripts/verify/e2e-mcp-smoke.sh` (the canonical probe shape), the
-fallback entry point is `ucil-daemon mcp --stdio`. Running it with a real
-`initialize` + `tools/list` payload:
-
 ```
 printf '%s\n%s\n' \
-  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":...}' \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize", ...}' \
   '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
-  | timeout 10 ./target/debug/ucil-daemon mcp --stdio
-
-exit_code:      0
-stdout bytes:   0      ← no JSON-RPC responses produced
-stderr bytes:   0
+  | timeout 15 ./target/debug/ucil-daemon mcp --stdio
 ```
 
-The daemon exits cleanly but emits zero bytes — confirming `main.rs` is still
-the Phase-0 skeleton that calls `tracing_subscriber::fmt::init()` and returns.
-`McpServer::serve(stdin, stdout)` exists in `crates/ucil-daemon/src/server.rs`
-but has not been wired into a subcommand.
-
-The most recent `e2e-mcp-smoke` integration log
-(`ucil-build/verification-reports/phase-1-integration-logs/e2e-mcp-smoke.log`)
-reports the same failure with the same actionable remediation hint embedded.
-
-### Probe 3 — host registration in `.claude/settings.json`
-
+Response frame 1 (`initialize`) — valid:
 ```
-grep -cE '"ucil(-mcp)?":' .claude/settings.json  → 0
+{"id":1,"jsonrpc":"2.0","result":{"capabilities":{"tools":{"listChanged":false}},
+ "protocolVersion":"2024-11-05","serverInfo":{"name":"ucil-daemon","version":"0.1.0"}}}
 ```
 
-No `ucil` or `ucil-mcp` entry under `mcpServers`. Six MCP servers are
-registered (filesystem, github, context7, memory, sequential-thinking,
-serena) but none expose UCIL's tool surface. A spawned `claude -p` session —
-which is how the evaluator drives a scenario — has no path to call
-`find_definition` or `find_references` even at the process level.
+Response frame 2 (`tools/list`) — valid; enumerates 22 tools including
+`find_definition` and `find_references`.
 
-### Probe 4 — in-process feature availability (for completeness)
+**Both required tools are registered.** The registration check passes.
+
+### Probe 3 — `tools/call` responsiveness check
+
+The evaluator must confirm tools are not merely registered but actually answer
+the scenario's question. Direct probe of both required tools:
+
+```
+printf '%s\n%s\n%s\n' \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize", ...}' \
+  '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"find_definition","arguments":{"symbol":"main","reason":"test"}}}' \
+  '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"find_references","arguments":{"symbol":"main","reason":"test"}}}' \
+  | timeout 15 ./target/debug/ucil-daemon mcp --stdio
+```
+
+`find_definition` response:
+```json
+{"id":2,"jsonrpc":"2.0","result":{
+  "_meta":{"not_yet_implemented":true,"tool":"find_definition"},
+  "content":[{"text":"tool `find_definition` is registered but its handler is not yet implemented (Phase 1 stub)","type":"text"}],
+  "isError":false}}
+```
+
+`find_references` response:
+```json
+{"id":3,"jsonrpc":"2.0","result":{
+  "_meta":{"not_yet_implemented":true,"tool":"find_references"},
+  "content":[{"text":"tool `find_references` is registered but its handler is not yet implemented (Phase 1 stub)","type":"text"}],
+  "isError":false}}
+```
+
+**Both return the Phase-1 stub envelope (`_meta.not_yet_implemented: true`).**
+
+Root cause: `main.rs:17` constructs the server via `McpServer::new()` with no
+KG handle. `handle_tools_call` at `server.rs:527-546` only dispatches to real
+handlers when `self.kg.is_some()`. Since the daemon has no KG init path from
+the stdio entry point (and no CLI flag to point it at a project), every call
+falls through to the stub.
+
+### Probe 4 — host-level MCP registration
+
+```
+grep -cE '"ucil(-mcp)?":'  .claude/settings.json → 0
+```
+
+No `ucil` entry under `mcpServers` in `.claude/settings.json`. Six MCP
+servers are registered (filesystem, github, context7, memory,
+sequential-thinking, serena); none expose UCIL's tool surface. A spawned
+`claude -p` session — which is how the evaluator drives a scenario — has no
+path to call `find_definition` or `find_references` by name even at the
+process level, independent of the stub issue above.
+
+### Probe 5 — in-process feature status
 
 Per `ucil-build/feature-list.json`:
 
 | Tool | Feature ID | passes | last_verified_by |
 |---|---|---|---|
-| `find_definition` | `P1-W4-F05` | ✅ true | verifier-9422e28c-… |
+| `find_definition` | `P1-W4-F05` | ✅ true | `verifier-9422e28c-…` |
 | `find_references` | `P2-W7-F05` | ❌ false | null (Phase 2) |
 
-`find_definition` has a real handler (`handle_find_definition` in
-`server.rs:601+`) that dispatches against an in-memory KG. `find_references`
-is not yet implemented — the `tools/call` dispatcher falls through to the
-Phase-1 stub envelope with `_meta.not_yet_implemented: true` per the invariant
-codified in `server.rs:548-570`.
+`find_definition` has a real handler (`handle_find_definition` at
+`server.rs:601+`). It works when invoked in-process with a KG attached — the
+crate's own integration tests exercise it. It does **not** answer over the
+stdio entry point at this commit because `McpServer::new()` does not attach
+a KG.
+
+`find_references` is a Phase-2 feature; `passes: false`, no implementation
+body. Even with a KG attached, it would fall through to the stub because it
+is not in the KG-routed allow-list at `server.rs:527-546`.
 
 ### Conclusion
 
-Both tools required by `nav-rust-symbol` are currently **not operational**
-from the perspective of an external agent run via `claude -p`:
+Both required tools are **registered but non-responsive** over the only
+external interface available to the evaluator (`claude -p` spawning a child
+session that calls UCIL via MCP):
 
-- `find_definition` works in-process but has no stdio entry point and is not
-  registered as an MCP server in `.claude/settings.json`.
-- `find_references` is a Phase-2 feature (`P2-W7-F05`) with `passes: false`
-  and no implementation body beyond the stub.
+1. `find_definition` — registered, has a real in-process handler, but
+   returns the Phase-1 stub when called over stdio because the daemon has no
+   KG attached and no registration in `mcpServers`.
+2. `find_references` — registered, still Phase-2 (no implementation),
+   returns the Phase-1 stub unconditionally.
+
+The scenario's task ("find every function that performs HTTP retry with
+exponential backoff … list every place it is CALLED FROM") cannot be
+answered by stub responses. Per evaluator contract §"Tool-availability
+checks" — *"If any is missing, `skipped_tool_not_ready`"* — this scenario is
+`skipped_tool_not_ready`.
 
 ## Per-scenario verdict
 
 ### `nav-rust-symbol`
 
 - **Status: `skipped_tool_not_ready`**
-- **Reason:**
-  1. `ucil-mcp` binary does not exist; no alternate stdio-MCP entry point is
-     wired into `ucil-daemon`, so neither tool is externally reachable.
-  2. Even if stdio were wired, `find_references` is a Phase-2 feature
-     (`P2-W7-F05`, `passes: false`) and would return the Phase-1 stub
-     envelope, which cannot be used to answer the scenario's "every place it
-     is CALLED FROM" question.
+- **Reason (in rank order of blocking severity):**
+  1. The stdio MCP server starts with no KG attached; both required tools
+     therefore return `_meta.not_yet_implemented: true` stubs and cannot
+     answer the scenario question.
+  2. `find_references` (`P2-W7-F05`) has no real handler at any phase yet;
+     it's Phase-2 scope.
+  3. `mcpServers.ucil` is absent from `.claude/settings.json`, so a spawned
+     `claude -p` child would not be able to address UCIL tools by name even
+     if (1) and (2) were resolved.
 - **Required work to unblock at Phase 1:**
-  - Land the stdio subcommand — `ucil-daemon mcp --stdio` must invoke
-    `McpServer::serve(tokio::io::stdin(), tokio::io::stdout())` and exit
-    cleanly on EOF. The wiring is ~10 lines as documented in
-    `scripts/verify/e2e-mcp-smoke.sh:57`.
-  - Register UCIL under `mcpServers.ucil` in `.claude/settings.json` so that
+  - Add a KG-init path from the stdio entry point (either a `--project
+    <path>` flag on `ucil-daemon mcp --stdio` or lazy init on first
+    `find_definition` call) so the real handler actually runs over stdio.
+  - Register UCIL under `mcpServers.ucil` in `.claude/settings.json` so
     evaluator-spawned `claude -p` children can call UCIL tools by name.
-  - Either pull `P2-W7-F05` forward into Phase 1 (requires ADR + planner
-    approval per CLAUDE.md rules) OR split the scenario so only
-    `find_definition` is exercised at Phase 1 (requires a new scenario; the
-    current `nav-rust-symbol` explicitly depends on `find_references`).
-- **Fixture:** `tests/fixtures/rust-project/` — present; not copied to
-  tempdirs because no run was attempted. `/tmp/ucil-eval-*` cleaned up per
-  contract §"Exit cleanly".
-- **Acceptance checks:** not run (no UCIL and no baseline output produced;
-  running baseline alone without a UCIL companion would violate contract
-  §"Hard rules": *"If you omit the baseline, fail the run as
-  baseline-missing"* — and the companion UCIL run is unrunnable).
+  - Either pull `P2-W7-F05` (`find_references`) forward into Phase 1
+    (requires ADR + planner approval per CLAUDE.md rules) or author a new
+    phase-1-only scenario that only depends on `find_definition` +
+    `search_code`, which both have real handlers today. The existing
+    `nav-rust-symbol` explicitly depends on `find_references` per its yaml
+    (`requires_tools: [find_definition, find_references]`) and cannot be
+    split without editing it — and scenarios are not editable to make a
+    gate pass (contract §"Hard rules").
+- **Fixture:** `tests/fixtures/rust-project/` — present; **not copied** to
+  tempdirs because no run was attempted. `/tmp/ucil-eval-*` not created.
+- **Acceptance checks:** not run (no UCIL output to check; running baseline
+  alone would violate contract §"Hard rules" — *"If you omit the baseline,
+  fail the run as baseline-missing"* — and the companion UCIL run is
+  unrunnable).
 - **Judge session:** not spawned (no outputs to judge).
 
 ## Gate contract
 
-Per `scripts/verify/effectiveness-gate.sh`:
+Per `scripts/verify/effectiveness-gate.sh` and the evaluator contract in
+`.claude/agents/effectiveness-evaluator.md`:
 
 > Exits 0 iff:
 >   - At least one scenario tagged for this phase exists
@@ -158,53 +236,63 @@ Per `scripts/verify/effectiveness-gate.sh`:
 Applied here:
 
 - 1 scenario tagged for phase 1 ✅
-- 0 non-skipped scenarios → "every non-skipped PASS/WIN" is vacuously true ✅
+- 1 scenario skipped (`skipped_tool_not_ready`) — permissible per contract
+- 0 non-skipped scenarios → "every non-skipped PASS/WIN" vacuously true ✅
 
 **Gate verdict: PASS.**
 
 ## Advisory (non-gating)
 
 A phase-1 gate that passes with zero runnable effectiveness scenarios is a
-**weak signal**. The spirit of the effectiveness gate — *prove UCIL helps an
-agent solve real tasks better than grep+Read* — is not demonstrated by this
-report. Concrete paths to substance (none block this gate; all downstream
-work-orders):
+**weak signal**. The spirit of the gate — prove UCIL helps an agent solve
+real tasks better than grep+Read — is not yet demonstrated at Phase 1.
+WO-0040 landed the stdio skeleton, which is real progress; however the
+stub-only dispatch means the external surface still delivers no UCIL value.
 
-1. **Wire the stdio MCP subcommand.** `crates/ucil-daemon/src/main.rs` is
-   still the Phase-0 skeleton; `McpServer::serve()` already exists in the
-   same crate. A match on `args.nth(1)` routing `"mcp"` to
-   `McpServer::serve(stdin, stdout)` is the minimum wiring that lets
-   `e2e-mcp-smoke` pass AND gives the evaluator a real stdio endpoint.
+Concrete paths to a substantive pass (none blocks this gate; each is a
+candidate work-order):
 
-2. **Register UCIL in the host settings.** Add an `mcpServers.ucil` entry in
-   `.claude/settings.json` (command = the daemon binary + `mcp --stdio`) so
-   spawned `claude -p` children can address UCIL tools by name during
-   evaluator runs.
+1. **Attach a KG from the stdio entry point.** `main.rs:17` builds
+   `McpServer::new()` and calls `serve()` immediately. A `--project
+   <path>` CLI flag that triggers `McpServer::with_project(path)` (a new
+   constructor that loads the tag cache and KG) would make the
+   already-`passes:true` `find_definition` responsive over stdio without
+   changing any invariant. Without this, `P1-W4-F05` is green-at-the-unit
+   level but dark at the integration level.
 
-3. **Add a phase-1-only scenario that exercises `find_definition` +
-   `search_code`.** Both have real Phase-1 implementations. A scenario of the
-   shape "given a symbol, produce its definition file:line and a structured
-   search of its usages" would let the Phase-1 gate produce a **real**
+2. **Register UCIL in the host settings.** One `mcpServers.ucil` entry in
+   `.claude/settings.json` (command = `./target/debug/ucil-daemon mcp
+   --stdio`) is the last wire required for evaluator-spawned `claude -p`
+   children to see UCIL as a named server.
+
+3. **Author a phase-1-only scenario exercising only the Phase-1 tools.**
+   `find_definition`, `get_conventions`, `search_code`, `understand_code`
+   are all KG-routable today. A scenario of the shape "given a symbol, emit
+   its definition file:line plus a structured usages search and a
+   conventions summary" would let the phase-1 gate produce a **real**
    UCIL-vs-baseline delta rather than a vacuous pass. The existing
-   `nav-rust-symbol` stays phase-2+-only because `find_references` is a hard
-   requirement for "every place it is CALLED FROM".
+   `nav-rust-symbol` stays phase-2+ because `find_references` is a hard
+   dependency for its "every place it is CALLED FROM" requirement.
 
-Previous report (`effectiveness-phase-1.md` @ commit d02cd0c) flagged the
-same three items; none have landed since (no stdio wiring in
-`crates/ucil-daemon/src/main.rs`, no `mcpServers.ucil` in
-`.claude/settings.json`, no new phase-1-only scenario). All remain advisory
-— the gate contract does not require them at Phase 1.
+All three items were advisory in the previous report (`316109e`); none
+landed between `316109e` and `8d8fc0c` apart from the stdio wiring itself
+(WO-0040). The evaluator does not block the gate on them — they are carried
+as planner input.
 
 ## Environment notes (for reproducibility)
 
 - Repo root: `/home/rishidarkdevil/Desktop/ucil`
 - Branch: `main`
-- HEAD: `316109ee3bdb5491fd0f9845991aab816a1b4779`
-- `target/debug/ucil-daemon` was already built (used by previous
-  integration run); no rebuild forced by this evaluator pass.
-- `/tmp/ucil-eval-nav-rust-symbol/{ucil,baseline}` tempdirs were *not*
-  created this run (no runnable scenario).
-- No judge sessions were spawned.
+- HEAD: `8d8fc0cfd0af879b33227d6946e56f58ec99180b`
+- `target/debug/ucil-daemon` was present (built by earlier work-orders); no
+  rebuild forced by this evaluator pass.
+- `/tmp/ucil-eval-*` tempdirs were **not** created (no runnable scenario).
+  `ls /tmp/ucil-eval-* → No such file or directory` confirmed at end of
+  run.
+- No judge sessions spawned.
+- No fixture files modified (contract §"Hard rules").
+- No source files modified (contract §"Hard rules").
+- No scenario files modified (contract §"Hard rules").
 
 ## Exit code
 
