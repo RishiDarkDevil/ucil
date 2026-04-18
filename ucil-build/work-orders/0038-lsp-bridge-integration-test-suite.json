@@ -55,7 +55,7 @@
     "Every existing test in every other crate continues to pass (workspace-wide nextest green)."
   ],
   "acceptance_criteria": [
-    "cd $REPO_ROOT && cargo nextest run --test test_lsp_bridge --no-fail-fast 2>&1 | tee /tmp/nextest-WO-0038.log && grep -E 'tests run: ([5-9]|[1-9][0-9]+).*[0-9]+ passed' /tmp/nextest-WO-0038.log > /dev/null",
+    "cd $REPO_ROOT && cargo nextest run --test test_lsp_bridge --no-fail-fast 2>&1 | tee /tmp/nextest-WO-0038.log && grep -E 'tests run: ([5-9]|[1-9][0-9]+) passed' /tmp/nextest-WO-0038.log > /dev/null",
     "cd $REPO_ROOT && cargo test --test test_lsp_bridge --no-fail-fast 2>&1 | tee /tmp/cargotest-WO-0038.log && ! grep -E '^test result: (FAILED|failed)' /tmp/cargotest-WO-0038.log",
     "cd $REPO_ROOT && cargo clippy --workspace --all-targets -- -D warnings 2>&1 | tee /tmp/clippy-WO-0038.log && ! grep -q '^error' /tmp/clippy-WO-0038.log",
     "cd $REPO_ROOT && cargo doc --workspace --no-deps 2>&1 | tee /tmp/doc-WO-0038.log && ! grep -qE '^(error|warning: unresolved)' /tmp/doc-WO-0038.log",
