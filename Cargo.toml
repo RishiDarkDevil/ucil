@@ -91,6 +91,12 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "serd
 # Recursive filesystem walker for plugin discovery (Phase 1 Week 5)
 walkdir = "2"
 
+# Cross-platform executable lookup on the `PATH`. Used by
+# `ucil-daemon::watcher::detect_watchman` (WO-0039 / P1-W3-F03) — master-plan
+# §2 line 138 specifies watchman as an optional upgrade for repos >50K files.
+# `which` 7.x is the current line, used by cargo and rust-analyzer.
+which = "7"
+
 # LSP community types (LSP 3.17 wire structs) — used by
 # `ucil-lsp-diagnostics::diagnostics` for `Diagnostic`,
 # `CallHierarchyItem`, `CallHierarchyIncomingCall`,
