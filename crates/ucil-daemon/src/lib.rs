@@ -73,6 +73,7 @@ pub mod session_ttl;
 pub mod startup;
 pub mod storage;
 pub(crate) mod text_search;
+pub mod understand_code;
 pub mod watcher;
 
 pub use executor::{ExecutorError, IngestPipeline, SOURCE_TOOL, TREE_SITTER_VALID_FROM};

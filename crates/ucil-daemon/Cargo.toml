@@ -45,6 +45,14 @@ ignore.workspace = true
 grep-searcher.workspace = true
 grep-regex.workspace = true
 grep-matcher.workspace = true
+# `tree-sitter` + `streaming-iterator` back the `understand_code` MCP
+# tool's `count_imports` helper (`P1-W4-F09`, WO-0036).  The helper
+# compiles language-specific `Query` strings against the parse tree
+# emitted by `ucil_treesitter::Parser`; `streaming-iterator` is needed
+# because tree-sitter 0.25's `QueryMatches` yields captures via
+# `StreamingIterator`, not `Iterator`.
+tree-sitter.workspace = true
+streaming-iterator.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

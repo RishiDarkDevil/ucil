@@ -539,6 +539,11 @@ impl McpServer {
                 return Self::handle_search_code(id, params, kg);
             }
         }
+        if name == "understand_code" {
+            if let Some(kg) = self.kg.as_ref() {
+                return crate::understand_code::handle_understand_code(id, params, kg);
+            }
+        }
 
         // Phase-1 invariant #9: every tool handler is a stub that
         // returns `_meta.not_yet_implemented: true`.  Downstream phases
@@ -971,7 +976,7 @@ fn not_found_response(id: &Value, name: &str) -> Value {
 }
 
 /// Build a JSON-RPC 2.0 error envelope.
-fn jsonrpc_error(id: &Value, code: i64, message: &str) -> Value {
+pub(crate) fn jsonrpc_error(id: &Value, code: i64, message: &str) -> Value {
     json!({
         "jsonrpc": JSONRPC_VERSION,
         "id": id.clone(),
