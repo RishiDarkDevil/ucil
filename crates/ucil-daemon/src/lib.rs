@@ -7,10 +7,12 @@
 #![warn(clippy::all, clippy::pedantic, clippy::nursery)]
 #![deny(rustdoc::broken_intra_doc_links)]
 
+pub mod lifecycle;
 pub mod plugin_manager;
 pub mod server;
 pub mod session_manager;
 
+pub use lifecycle::{Lifecycle, PidFile, PidFileError, ShutdownReason};
 pub use plugin_manager::{
     HealthStatus, LifecycleSection, PluginError, PluginHealth, PluginManager, PluginManifest,
     PluginRuntime, PluginSection, PluginState, TransportSection, DEFAULT_IDLE_TIMEOUT_MINUTES,
