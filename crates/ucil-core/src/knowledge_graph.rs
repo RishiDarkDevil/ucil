@@ -775,6 +775,40 @@ impl KnowledgeGraph {
         Ok(row_result.map(Some).or_else(absent_to_none)?)
     }
 
+    /// Look up a single [`Entity`] row by its primary-key `id`.
+    ///
+    /// Mirrors the read precedent of [`Self::get_entity_by_qualified_name`]
+    /// — read-only, no transaction, and `Ok(None)` (not an error) when no
+    /// row matches.  The `find_definition` MCP tool handler
+    /// (`P1-W4-F05`, master-plan §3.2 row 2 / §18 Phase 1 Week 4 line
+    /// 1751) uses this to project the source [`Entity`] of each caller
+    /// relation returned by [`Self::list_relations_by_target`] onto the
+    /// `{qualified_name, file_path, start_line}` payload a response needs.
+    ///
+    /// # Errors
+    ///
+    /// * [`KnowledgeGraphError::Sqlite`] — statement prepare, bind, or
+    ///   `query_row` failure.  Returns `Ok(None)` (not an error) when
+    ///   no row matches.
+    #[tracing::instrument(
+        level = "debug",
+        skip(self),
+        fields(id = id),
+        name = "ucil.core.kg.get_entity_by_id",
+    )]
+    pub fn get_entity_by_id(&self, id: i64) -> Result<Option<Entity>, KnowledgeGraphError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, kind, name, qualified_name, file_path, start_line, end_line, \
+                    signature, doc_comment, language, t_valid_from, t_valid_to, \
+                    importance, source_tool, source_hash \
+             FROM entities \
+             WHERE id = ?1 \
+             LIMIT 1",
+        )?;
+        let row_result = stmt.query_row(rusqlite::params![id], entity_from_row);
+        Ok(row_result.map(Some).or_else(absent_to_none)?)
+    }
+
     /// List all `entities` rows whose `file_path` matches, ordered by
     /// `start_line` ascending.
     ///
