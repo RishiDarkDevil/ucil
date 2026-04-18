@@ -338,6 +338,28 @@ pub enum WatcherError {
     /// watched root could not be stat'd).
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+    /// The `watchman` subprocess could not be spawned (e.g. binary
+    /// vanished between [`detect_watchman`] and the backend-startup
+    /// call). Surfaced only from the [`WatcherBackend::Watchman`]
+    /// dispatch path in [`FileWatcher::new_with_backend`]. No
+    /// `#[from]` conversion on this variant because
+    /// [`WatcherError::Io`] already captures generic
+    /// `std::io::Error`; this variant exists so callers can
+    /// distinguish "could not run watchman" from "could not stat the
+    /// watched root" without inspecting the underlying error string.
+    #[error("watchman spawn: {0}")]
+    WatchmanSpawn(std::io::Error),
+    /// A line emitted by the watchman subscription could not be
+    /// decoded as a JSON event. The underlying `serde_json::Error`
+    /// carries the offending line for diagnostics. Surfaced through
+    /// tracing from the Watchman forwarder task and NOT propagated
+    /// through the watcher channel (the channel carries typed
+    /// events, not errors) — the variant exists for future
+    /// error-channel integrations and so the constructor can bubble
+    /// a startup decode error (e.g. from the initial subscribe
+    /// acknowledgement) if one occurs synchronously.
+    #[error("watchman json decode: {0}")]
+    WatchmanDecode(serde_json::Error),
 }
 
 /// File-change watcher for a single root directory.
