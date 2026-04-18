@@ -14,6 +14,10 @@
 //! `inferred_domain`, and `expires_at`; `session_ttl` houses the
 //! saturating arithmetic (`compute_expires_at`, `is_expired`,
 //! [`DEFAULT_TTL_SECS`]) shared between creation and purge paths.
+//!
+//! The `storage` module (introduced in WO-0022 for P1-W2-F06) owns the
+//! two-tier `.ucil/` directory tree; see [`storage::StorageLayout`] for
+//! the layout spec (master-plan §11.2 lines 1060-1088).
 
 #![deny(warnings)]
 #![warn(clippy::all, clippy::pedantic, clippy::nursery)]
@@ -24,6 +28,7 @@ pub mod plugin_manager;
 pub mod server;
 pub mod session_manager;
 pub mod session_ttl;
+pub mod storage;
 
 pub use lifecycle::{Lifecycle, PidFile, PidFileError, ShutdownReason};
 pub use plugin_manager::{
