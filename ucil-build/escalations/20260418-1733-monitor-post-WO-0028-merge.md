@@ -40,3 +40,19 @@ Admin heartbeat. Features **36/234** on main (77d4a89). WO-0028
 - Bucket A auto-resolve on next triage pass.
 - Left unresolved in frontmatter for stop-hook bypass.
 - Gate-incomplete expected.
+
+## Resolution
+
+Auto-resolved by triage pass 2 on 2026-04-18T18:00Z. The escalation is a
+benign monitor heartbeat (`blocks_loop: false`, severity low,
+`auto_resolve_on_next_triage: bucket-A`). Conditions cited are confirmed:
+
+- WO-0028 merge commit `da0f439` is present in `git log` on main.
+- P1-W3-F08 is flipped to `passes=true` (verified via feature-list.json,
+  37 features now passing — additional WO-0029 / P1-W5-F07 progress since).
+- Working tree clean, branch in sync with origin/main.
+
+Mid-phase gate-incomplete is the expected state and not a blocker.
+No further action required.
+
+resolved: true
