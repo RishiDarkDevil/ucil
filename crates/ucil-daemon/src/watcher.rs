@@ -383,3 +383,116 @@ fn test_event_kind_mapping_covers_create_modify_remove() {
     assert_eq!(map_notify_kind(EventKind::Any), FileEventKind::Other);
     assert_eq!(map_notify_kind(EventKind::Other), FileEventKind::Other);
 }
+
+/// Drain the receiver until a timeout elapses, collecting every event that
+/// arrives. Each individual `recv` await is bounded by `per_recv` so the
+/// test fails fast on a deadlocked channel rather than waiting forever.
+#[cfg(test)]
+async fn drain_until_quiet(
+    rx: &mut mpsc::Receiver<FileEvent>,
+    overall: Duration,
+    per_recv: Duration,
+) -> Vec<FileEvent> {
+    let start = std::time::Instant::now();
+    let mut events = Vec::new();
+    while start.elapsed() < overall {
+        match tokio::time::timeout(per_recv, rx.recv()).await {
+            Ok(Some(ev)) => events.push(ev),
+            // `Ok(None)` = channel closed; `Err(_)` = per-recv timeout
+            // elapsed with nothing pending. Either is a signal to stop
+            // draining — the stream is quiet.
+            Ok(None) | Err(_) => break,
+        }
+    }
+    events
+}
+
+#[cfg(test)]
+#[tokio::test(flavor = "multi_thread")]
+async fn test_notify_emits_event_after_debounce() {
+    let tempdir = tempfile::TempDir::new().expect("create tempdir");
+    let (tx, mut rx) = mpsc::channel::<FileEvent>(32);
+
+    let _watcher = FileWatcher::new(tempdir.path(), tx).expect("create watcher");
+
+    // Give notify a brief moment to register its kernel watch before we
+    // poke the filesystem. 50 ms is short vs. the 2 s receive budget and
+    // substantially longer than inotify's registration latency.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let path = tempdir.path().join("hello.txt");
+    std::fs::write(&path, b"hi").expect("write test file");
+
+    // Debounce is 100 ms; budget 2 s to tolerate CI jitter.
+    let ev = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+        .await
+        .expect("timed out waiting for watcher event")
+        .expect("channel closed before event arrived");
+
+    assert_eq!(ev.source, EventSource::NotifyDebounced);
+    // Path classification can be `Created` or `Modified` depending on
+    // platform — accept either; the F02 contract is "editor event
+    // classified", not a specific kind.
+    assert!(
+        matches!(
+            ev.kind,
+            FileEventKind::Created | FileEventKind::Modified | FileEventKind::Other
+        ),
+        "unexpected kind for write event: {:?}",
+        ev.kind
+    );
+    // Path must match (modulo canonicalisation — on macOS tempdir may
+    // resolve through `/private/var/...`).
+    assert!(
+        ev.path.ends_with("hello.txt"),
+        "expected path to end with hello.txt, got {}",
+        ev.path.display()
+    );
+}
+
+#[cfg(test)]
+#[tokio::test(flavor = "multi_thread")]
+async fn test_notify_debounces_editor_writes() {
+    let tempdir = tempfile::TempDir::new().expect("create tempdir");
+    let (tx, mut rx) = mpsc::channel::<FileEvent>(64);
+
+    let _watcher = FileWatcher::new(tempdir.path(), tx).expect("create watcher");
+
+    // Let notify register before we start hammering the file.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let path = tempdir.path().join("editor.txt");
+    for i in 0..5 {
+        std::fs::write(&path, format!("line {i}\n").as_bytes()).expect("write");
+        // 5 ms between writes — well under the 100 ms debounce window.
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+
+    // After the last write, wait long enough for the debouncer to
+    // flush, then keep draining until 500 ms of quiet passes.
+    let events = drain_until_quiet(
+        &mut rx,
+        Duration::from_millis(1_500),
+        Duration::from_millis(500),
+    )
+    .await;
+
+    // The debouncer MUST collapse 5 rapid writes into a small batch.
+    // Real inotify / FSEvents may split into 1–3 events depending on
+    // kernel + filesystem; the F02 contract is `received_count <= 3`
+    // from 5 writes — strictly less than the raw event count.
+    assert!(
+        events.len() <= 3,
+        "expected <= 3 debounced events from 5 rapid writes, got {}: {:?}",
+        events.len(),
+        events
+    );
+    assert!(
+        !events.is_empty(),
+        "debouncer must emit at least one event for 5 rapid writes"
+    );
+    // Every event must carry the NotifyDebounced source.
+    for ev in &events {
+        assert_eq!(ev.source, EventSource::NotifyDebounced);
+    }
+}
