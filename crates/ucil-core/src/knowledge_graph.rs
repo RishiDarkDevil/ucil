@@ -240,6 +240,48 @@ pub struct HotObservation {
     pub related_symbol: Option<String>,
 }
 
+/// A read-only projection of the `entities` columns relevant to
+/// name-based symbol resolution (P1-W4-F03).
+///
+/// Returned by [`KnowledgeGraph::resolve_symbol`] so callers who know
+/// only a bare symbol name (e.g. a tree-sitter extractor that has
+/// parsed `parse_file` without the `ucil_treesitter::parser::`
+/// prefix) can still reach the definition row.  The columns projected
+/// are the subset from the §12.1 `entities` schema that every
+/// downstream pipeline step needs (file_path, start_line, signature,
+/// doc_comment), plus a derived `parent_module` computed at read-time
+/// from `qualified_name` — NOT a stored column, so no schema
+/// migration is required.
+///
+/// See master-plan §12.1 lines 1130-1145 for the source `entities`
+/// columns, and master-plan §18 Phase 1 Week 4 line 1749 ("Implement
+/// knowledge_graph.rs: CRUD, bi-temporal queries, symbol resolution")
+/// for the scope this projection satisfies.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SymbolResolution {
+    /// `entities.file_path` of the resolved row — absolute or
+    /// project-relative source-file path.  Never `None` because the
+    /// underlying column is `NOT NULL` at the schema level.
+    pub file_path: String,
+    /// `entities.start_line` — 1-based inclusive start line when
+    /// known.  `None` for file-kind entities or any row where the
+    /// extractor did not populate the column.
+    pub start_line: Option<i64>,
+    /// `entities.signature` — function / method signature or type
+    /// declaration when the row is a callable; `None` otherwise.
+    pub signature: Option<String>,
+    /// `entities.doc_comment` — attached rustdoc / `TSDoc` / docstring
+    /// when extraction is available; `None` otherwise.
+    pub doc_comment: Option<String>,
+    /// Parent module path derived from `entities.qualified_name` by
+    /// stripping the terminal `::name` segment.  `Some("foo::bar")`
+    /// when `qualified_name = "foo::bar::baz"`; `None` when
+    /// `qualified_name` is `NULL` or contains no `::` separator.
+    /// Derived at resolution time per master-plan §18 Phase 1 Week 4
+    /// line 1749 — not a stored column.
+    pub parent_module: Option<String>,
+}
+
 /// Checkpoint mode for [`KnowledgeGraph::checkpoint_wal`] — wraps
 /// `SQLite`'s `PRAGMA wal_checkpoint(<MODE>)`.
 ///
