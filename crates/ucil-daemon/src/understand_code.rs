@@ -498,14 +498,33 @@ pub fn explain_file(
     let import_count = count_imports(&source, lang);
     let line_count: u64 = u64::try_from(source.lines().count()).unwrap_or(u64::MAX);
 
-    // KG side — acquire lock for a short read.
+    // KG side — acquire lock for a short read.  The knowledge graph's
+    // `entities.file_path` column stores whatever string the ingest
+    // pipeline was given (see `ucil_daemon::executor::IngestPipeline::
+    // ingest_file`, which records `path.display().to_string()` verbatim).
+    // In production the daemon feeds absolute paths after watcher-side
+    // canonicalisation, but historical/fixture rows may carry a
+    // project-relative path.  To stay robust to both conventions we
+    // query by both the canonical absolute form AND the path the
+    // caller handed us, then dedupe by `entities.id`.
     let canonical = target_path
         .canonicalize()
         .unwrap_or_else(|_| target_path.to_path_buf());
     let canonical_str = canonical.display().to_string();
+    let raw_str = target_path.display().to_string();
+    let relative_str = project_relative(target_path, root).display().to_string();
     let kg_entities: Vec<Entity> = {
         let guard = kg.lock().map_err(|_| UnderstandCodeError::Poisoned)?;
-        guard.list_entities_by_file(&canonical_str)?
+        let mut seen_ids: std::collections::HashSet<Option<i64>> = std::collections::HashSet::new();
+        let mut merged: Vec<Entity> = Vec::new();
+        for key in [&canonical_str, &raw_str, &relative_str] {
+            for row in guard.list_entities_by_file(key)? {
+                if seen_ids.insert(row.id) {
+                    merged.push(row);
+                }
+            }
+        }
+        merged
     };
     let kg_entity_count = kg_entities.len();
 
