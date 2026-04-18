@@ -506,10 +506,10 @@
         "P1-W3-F02"
       ],
       "passes": false,
-      "last_verified_ts": null,
-      "last_verified_by": null,
-      "last_verified_commit": null,
-      "attempts": 0,
+      "last_verified_ts": "2026-04-18T10:49:29Z",
+      "last_verified_by": "verifier-3b71d8ae-adc8-4846-a412-c61263b858ef",
+      "last_verified_commit": "650c854e8534fcd68941498f0b5996a1b3f5710c",
+      "attempts": 1,
       "blocked_reason": null
     },
     {
