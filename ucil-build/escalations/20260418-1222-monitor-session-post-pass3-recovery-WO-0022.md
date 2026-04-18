@@ -7,6 +7,7 @@ blocks_loop: false
 session_role: monitor
 session_work: watched-WO-0022-full-cycle-to-merge; recovered-pass3-halt-via-rule-7g; reset-drift-counter-phase1-to-0
 auto_resolve_on_next_triage: bucket-A
+resolved: true
 ---
 
 # Phase 1 gate incomplete — monitor session (post pass-3 + drift recovery)
@@ -26,3 +27,14 @@ New run-phase PID 211785 + planner iter PID 212387 active.
 ## Notes
 - Bucket A auto-resolve on next triage pass.
 - Left unresolved in frontmatter for stop-hook bypass.
+
+## Resolution
+
+Auto-resolved by triage pass-1 (2026-04-18). Admin heartbeat whose cited
+conditions are all resolved in HEAD:
+- WO-0022 (P1-W2-F06 + P1-W3-F09) merged to main at `69a724a`.
+- Drift counter `drift-counters.json["1"]` currently `0` (reset confirmed).
+- Phase-1 pass-3 marker already cleared (fresh triage pass is pass-1).
+- Subsequent WO-0023 also merged cleanly (f95b8b3), so the recovery took.
+
+No material action required. `blocks_loop: false`, `auto_resolve_on_next_triage: bucket-A`.
