@@ -7,6 +7,7 @@ blocks_loop: false
 session_role: monitor
 session_work: observed-WO-0031-full-cycle-PASS-and-merge-c78cd8e; P1-W4-F03-flipped; drift-false-positive-resolved-at-b9c2540; loop-resumed-post-halt
 auto_resolve_on_next_triage: bucket-A
+resolved: true
 ---
 
 # Phase 1 gate incomplete — monitor session (post WO-0031 merge + drift resolve)
@@ -54,3 +55,17 @@ interactions.
   bypass fires this turn. Triage pass-1 will close cleanly (lesson
   from 1812 heartbeat: unresolved + pass-3 = halt; unresolved + pass-1
   auto-resolve = clean).
+
+## Resolution
+
+Bucket A auto-resolve on triage pass 2. Conditions described are already
+superseded in HEAD:
+
+- Feature count advanced 40→41/234 (WO-0032 merged at 2a17e91,
+  P1-W4-F04 flipped by verifier at 04b238f; critic CLEAN 1521ab3).
+- Outstanding list named P1-W4-F04 as pending — now passing.
+- Drift false-positive already resolved at b9c2540; loop resumed and
+  executed WO-0032 end-to-end.
+- Working tree clean on main; no follow-up action needed.
+
+No code or harness changes required. Heartbeat closed.
