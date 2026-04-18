@@ -749,3 +749,140 @@ async fn test_ceqp_params_on_all_tools() {
         "CEQP universal param types mismatch master-plan §8.2: {type_mismatches:?}",
     );
 }
+
+/// Acceptance test for `P1-W3-F08` — progressive startup.
+///
+/// Frozen selector: `server::test_progressive_startup` (exact match —
+/// must live at module level, not under `mod tests { … }` per DEC-0005).
+///
+/// Master-plan §18 Phase 1 Week 3 line 1745 specifies two observable
+/// invariants:
+///
+/// 1. **Startup budget.** The MCP server accepts and responds to
+///    `tools/list` within [`crate::startup::STARTUP_DEADLINE`] — the
+///    2 s ceiling from §21.2 lines 2196-2204.
+/// 2. **Priority ordering.** Paths touched via the
+///    [`crate::startup::handle_call_for_priority`] helper pop off the
+///    shared [`crate::priority_queue::PriorityIndexingQueue`] in
+///    newest-first order — the "recently queried files first"
+///    invariant.
+///
+/// The test drives both invariants end-to-end over a real
+/// [`tokio::io::duplex`] pair (no mocks of `McpServer` or `tokio::io`)
+/// and re-asserts the 22-tool contract from
+/// `test_all_22_tools_registered` so the `tools/list` catalogue is
+/// proven fully wired during the startup window.
+#[cfg(test)]
+#[tokio::test]
+async fn test_progressive_startup() {
+    use std::{path::PathBuf, sync::Arc};
+
+    use serde_json::json;
+    use tokio::io::{duplex, split, AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
+
+    use crate::{
+        priority_queue::PriorityIndexingQueue,
+        startup::{handle_call_for_priority, ProgressiveStartup, STARTUP_DEADLINE},
+    };
+
+    let queue = Arc::new(PriorityIndexingQueue::new());
+    let server = McpServer::new();
+    let startup = ProgressiveStartup::new(server, Arc::clone(&queue));
+
+    // 64 KiB duplex — the full tools/list response is ≈ 18 KiB for the
+    // 22-descriptor catalogue, so the default 16 KiB cap in
+    // `test_all_22_tools_registered` would backpressure the server's
+    // second `poll_write` (the frame terminator) until the client
+    // drains the buffer. We drain concurrently below, but the larger
+    // buffer also guards against transient stalls.
+    let (client_end, server_end) = duplex(64 * 1024);
+    let (server_read, server_write) = split(server_end);
+    let (client_read, mut client_write) = split(client_end);
+
+    let (server_task, ready_handle) = startup.start(server_read, server_write);
+
+    // Client-side: write one tools/list request. The ReadyProbeWriter
+    // inside ProgressiveStartup signals the ReadyHandle on the server's
+    // first framed response.
+    let req_list = br#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}
+"#;
+    client_write
+        .write_all(req_list)
+        .await
+        .expect("write tools/list");
+    client_write.flush().await.expect("flush tools/list");
+
+    // Concurrently drain the response frame while awaiting
+    // `ReadyHandle::wait` — an MCP host would always read as fast as
+    // possible, and concurrent draining avoids the deadlock where the
+    // server's `poll_write` on the frame terminator blocks because the
+    // duplex buffer is full, which in turn keeps `seen_newline` from
+    // ever flipping inside `ReadyProbeWriter`.
+    let mut reader = BufReader::new(client_read);
+    let mut frame = String::new();
+    let read_fut = reader.read_line(&mut frame);
+
+    // Outer 3 s cap — ReadyHandle::wait already enforces
+    // STARTUP_DEADLINE + slack internally, but a belt-and-braces timeout
+    // is cheap insurance against a wedged duplex.
+    let (elapsed, read_result) = tokio::join!(
+        timeout(Duration::from_secs(3), ready_handle.wait()),
+        read_fut
+    );
+    let elapsed = elapsed
+        .expect("ready handle must finish within 3 s")
+        .expect("ready handle must resolve with Ok(Duration)");
+    read_result.expect("read tools/list response");
+    assert!(
+        elapsed < STARTUP_DEADLINE,
+        "startup-to-first-response {elapsed:?} must be < STARTUP_DEADLINE {STARTUP_DEADLINE:?}",
+    );
+    let response: Value =
+        serde_json::from_str(frame.trim()).expect("tools/list response must be valid JSON");
+    let tools = response
+        .get("result")
+        .and_then(|r| r.get("tools"))
+        .and_then(Value::as_array)
+        .expect("tools/list result.tools must be a JSON array");
+    assert_eq!(
+        tools.len(),
+        TOOL_COUNT,
+        "tools/list must report exactly {TOOL_COUNT} tools during startup (got {})",
+        tools.len(),
+    );
+
+    // Priority-ordering invariant: touching two paths via the CEQP
+    // helper causes the most-recently-touched one to pop first.
+    handle_call_for_priority(
+        &queue,
+        &json!({
+            "current_task": {
+                "files_in_context": ["src/a.rs", "src/b.rs"]
+            }
+        }),
+    );
+    let first = queue.pop().expect("queue must have at least one entry");
+    assert_eq!(
+        first.path,
+        PathBuf::from("src/b.rs"),
+        "last-touched path must pop first",
+    );
+    let second = queue.pop().expect("queue must have a second entry");
+    assert_eq!(
+        second.path,
+        PathBuf::from("src/a.rs"),
+        "earlier-touched path must pop second",
+    );
+
+    // Clean shutdown — EOF drives the server loop to exit, then join.
+    client_write
+        .shutdown()
+        .await
+        .expect("shutdown client write half");
+    drop(client_write);
+    let serve_result = timeout(Duration::from_secs(3), server_task)
+        .await
+        .expect("server task must finish within 3 s of EOF")
+        .expect("server task must not panic");
+    serve_result.expect("server loop must return Ok after clean EOF");
+}
