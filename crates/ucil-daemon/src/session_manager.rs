@@ -225,8 +225,8 @@ impl SessionManager {
     /// Insert `file` into the session's `files_in_context` set.
     ///
     /// Duplicate paths are de-duplicated by the underlying
-    /// [`BTreeSet`](std::collections::BTreeSet); calling this twice with
-    /// the same path is a no-op on the set but still returns `Some(())`.
+    /// [`std::collections::BTreeSet`]; calling this twice with the same path
+    /// is a no-op on the set but still returns `Some(())`.
     pub async fn add_file_to_context(&self, id: &SessionId, file: PathBuf) -> Option<()> {
         self.sessions.write().await.get_mut(id).map(|info| {
             info.files_in_context.insert(file);
@@ -260,8 +260,8 @@ impl SessionManager {
     /// Remove every session whose `expires_at <= now_secs`.
     ///
     /// Takes a single write lock, iterates once via
-    /// [`HashMap::retain`](std::collections::HashMap::retain), and returns
-    /// the count of entries removed.
+    /// [`std::collections::HashMap::retain`], and returns the count of
+    /// entries removed.
     pub async fn purge_expired(&self, now_secs: u64) -> usize {
         let mut sessions = self.sessions.write().await;
         let before = sessions.len();

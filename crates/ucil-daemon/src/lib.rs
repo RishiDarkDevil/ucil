@@ -24,4 +24,6 @@ pub use server::{
     ceqp_input_schema, ucil_tools, McpError, McpServer, ToolDescriptor, JSONRPC_VERSION,
     MCP_PROTOCOL_VERSION, READ_TIMEOUT_MS, TOOL_COUNT, WRITE_TIMEOUT_MS,
 };
-pub use session_manager::{SessionId, SessionInfo, SessionManager, WorktreeInfo};
+pub use session_manager::{
+    CallRecord, SessionId, SessionInfo, SessionManager, WorktreeInfo, DEFAULT_TTL_SECS,
+};
