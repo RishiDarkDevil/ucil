@@ -496,3 +496,102 @@ async fn test_notify_debounces_editor_writes() {
         assert_eq!(ev.source, EventSource::NotifyDebounced);
     }
 }
+
+#[cfg(test)]
+#[tokio::test(flavor = "multi_thread")]
+async fn test_post_tool_use_hook_bypasses_debounce() {
+    let tempdir = tempfile::TempDir::new().expect("create tempdir");
+    let (tx, mut rx) = mpsc::channel::<FileEvent>(32);
+
+    let watcher = FileWatcher::new(tempdir.path(), tx).expect("create watcher");
+
+    // Fire 3 hook events back-to-back — deliberately with NO sleep
+    // between calls to probe that the call-site is not gated by the
+    // debouncer's 100 ms window.
+    let paths: Vec<PathBuf> = (0..3)
+        .map(|i| tempdir.path().join(format!("hook-{i}.rs")))
+        .collect();
+    let start = std::time::Instant::now();
+    for p in &paths {
+        watcher
+            .notify_hook_event(p.clone(), FileEventKind::Modified)
+            .expect("hook event send");
+    }
+
+    // All 3 must arrive within the debounce window (100 ms) — if the
+    // events were routed through the debouncer we'd see at most one
+    // batch after ~100 ms of timer tick.
+    let mut received = Vec::new();
+    for _ in 0..3 {
+        let ev = tokio::time::timeout(DEBOUNCE_WINDOW, rx.recv())
+            .await
+            .expect("hook event did not arrive within DEBOUNCE_WINDOW — did it bypass?")
+            .expect("channel closed before hook event arrived");
+        received.push(ev);
+    }
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < DEBOUNCE_WINDOW,
+        "3 hook events took {elapsed:?} to arrive — must be < {DEBOUNCE_WINDOW:?}"
+    );
+
+    assert_eq!(received.len(), 3);
+    for (got, expected) in received.iter().zip(paths.iter()) {
+        assert_eq!(got.source, EventSource::PostToolUseHook);
+        assert_eq!(got.kind, FileEventKind::Modified);
+        assert_eq!(&got.path, expected);
+    }
+}
+
+#[cfg(test)]
+#[tokio::test(flavor = "multi_thread")]
+async fn test_hook_event_source_is_distinct() {
+    let tempdir = tempfile::TempDir::new().expect("create tempdir");
+    let (tx, mut rx) = mpsc::channel::<FileEvent>(32);
+
+    let watcher = FileWatcher::new(tempdir.path(), tx).expect("create watcher");
+
+    // Let notify register before writing.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // 1. Notify path — create a real file, observe a debounced event.
+    let notify_path = tempdir.path().join("from-editor.txt");
+    std::fs::write(&notify_path, b"edit").expect("write");
+
+    let notify_event = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+        .await
+        .expect("timed out on notify event")
+        .expect("channel closed before notify event");
+    assert_eq!(
+        notify_event.source,
+        EventSource::NotifyDebounced,
+        "filesystem write must carry NotifyDebounced source"
+    );
+
+    // Drain any additional debounced events from the write so the hook
+    // event below is the next thing the channel delivers.
+    let _residue = drain_until_quiet(
+        &mut rx,
+        Duration::from_millis(300),
+        Duration::from_millis(150),
+    )
+    .await;
+
+    // 2. Hook path — same file path, but via `notify_hook_event`.
+    watcher
+        .notify_hook_event(notify_path.clone(), FileEventKind::Modified)
+        .expect("hook send");
+    let hook_event = tokio::time::timeout(DEBOUNCE_WINDOW, rx.recv())
+        .await
+        .expect("timed out on hook event")
+        .expect("channel closed before hook event");
+    assert_eq!(
+        hook_event.source,
+        EventSource::PostToolUseHook,
+        "hook-sourced event must carry PostToolUseHook source"
+    );
+
+    // The source field is the distinguishing observable between the
+    // two detection paths for the same path — §14 lines 1024-1025.
+    assert_ne!(notify_event.source, hook_event.source);
+}
