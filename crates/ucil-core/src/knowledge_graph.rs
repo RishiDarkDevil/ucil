@@ -952,6 +952,88 @@ impl KnowledgeGraph {
             Ok(id)
         })
     }
+
+    /// Stage a convention-signal hit into `hot_convention_signals`.
+    ///
+    /// `pattern_hash` is the stable hash of the convention matcher
+    /// (produced by the convention-learner layer that lands in a later
+    /// phase); `file_path` is the source file that tripped the matcher;
+    /// `example_snippet` is an optional excerpt for later human review.
+    /// `created_at` and `promoted` are owned by the schema default and
+    /// the merge-consolidator respectively.  Returns the new
+    /// `hot_convention_signals.id`.
+    ///
+    /// # Errors
+    ///
+    /// * [`KnowledgeGraphError::Sqlite`] — transaction open, statement
+    ///   prepare, bind, or `RETURNING id` fetch failed.
+    #[tracing::instrument(
+        level = "debug",
+        skip(self),
+        fields(pattern_hash = %pattern_hash, file_path = %file_path),
+        name = "ucil.core.kg.stage_hot_convention_signal",
+    )]
+    pub fn stage_hot_convention_signal(
+        &mut self,
+        pattern_hash: &str,
+        file_path: &str,
+        example_snippet: Option<&str>,
+    ) -> Result<i64, KnowledgeGraphError> {
+        self.execute_in_transaction(|tx| {
+            let mut stmt = tx.prepare(
+                "INSERT INTO hot_convention_signals (\
+                    pattern_hash, file_path, example_snippet\
+                 ) VALUES (?1, ?2, ?3) \
+                 RETURNING id;",
+            )?;
+            let id: i64 = stmt.query_row(
+                rusqlite::params![pattern_hash, file_path, example_snippet],
+                |row| row.get::<_, i64>(0),
+            )?;
+            Ok(id)
+        })
+    }
+
+    /// Stage an architecture-delta record into
+    /// `hot_architecture_deltas`.
+    ///
+    /// `change_type` is a short classifier (e.g. `"module_split"`,
+    /// `"dep_added"`); `file_path` is the file the change touches;
+    /// `details` is optional free-form context.  `created_at` and
+    /// `promoted` are owned by the schema default and the merge-
+    /// consolidator respectively.  Returns the new
+    /// `hot_architecture_deltas.id`.
+    ///
+    /// # Errors
+    ///
+    /// * [`KnowledgeGraphError::Sqlite`] — transaction open, statement
+    ///   prepare, bind, or `RETURNING id` fetch failed.
+    #[tracing::instrument(
+        level = "debug",
+        skip(self),
+        fields(change_type = %change_type, file_path = %file_path),
+        name = "ucil.core.kg.stage_hot_architecture_delta",
+    )]
+    pub fn stage_hot_architecture_delta(
+        &mut self,
+        change_type: &str,
+        file_path: &str,
+        details: Option<&str>,
+    ) -> Result<i64, KnowledgeGraphError> {
+        self.execute_in_transaction(|tx| {
+            let mut stmt = tx.prepare(
+                "INSERT INTO hot_architecture_deltas (\
+                    change_type, file_path, details\
+                 ) VALUES (?1, ?2, ?3) \
+                 RETURNING id;",
+            )?;
+            let id: i64 = stmt
+                .query_row(rusqlite::params![change_type, file_path, details], |row| {
+                    row.get::<_, i64>(0)
+                })?;
+            Ok(id)
+        })
+    }
 }
 
 // ── Row decoders ─────────────────────────────────────────────────────────────
@@ -1610,16 +1692,20 @@ fn test_bi_temporal_as_of() {
 /// `test_hot_staging_writes` — **frozen F08 acceptance selector**
 /// (`knowledge_graph::test_hot_staging_writes`).
 ///
-/// Exercises the hot-staging writers introduced by WO-0024 (P1-W4-F08):
-/// [`KnowledgeGraph::stage_hot_observation`].  Commit 7 extends this
-/// test to also cover `stage_hot_convention_signal` and
-/// `stage_hot_architecture_delta` — all three write through
-/// `execute_in_transaction` and satisfy the master-plan §11 line 1117
-/// BEGIN IMMEDIATE invariant.
+/// Exercises all three hot-staging writers introduced by WO-0024
+/// (P1-W4-F08): [`KnowledgeGraph::stage_hot_observation`],
+/// [`KnowledgeGraph::stage_hot_convention_signal`], and
+/// [`KnowledgeGraph::stage_hot_architecture_delta`].  All three write
+/// through `execute_in_transaction` and so satisfy the master-plan §11
+/// line 1117 `BEGIN IMMEDIATE` invariant.
 ///
-/// No mocks of rusqlite — the test runs against a real
-/// tempfile-backed `SQLite` db via `tempfile::TempDir` per phase-log
-/// invariant 1.
+/// Per the WO `scope_in` contract: each staging helper is called once,
+/// and each table is then count-checked back through
+/// `self.conn.query_row("SELECT COUNT(*) FROM <tbl>", …)` to assert
+/// the row landed in its owning table (not cross-table).
+///
+/// No mocks of rusqlite — the test runs against a real tempfile-backed
+/// `SQLite` db via `tempfile::TempDir` per phase-log invariant 1.
 #[cfg(test)]
 #[test]
 fn test_hot_staging_writes() {
@@ -1644,12 +1730,63 @@ fn test_hot_staging_writes() {
         "RETURNING id on hot_observations must be positive (got {obs_id})",
     );
 
-    // Count-check the row is present.
-    let count: i64 = kg
+    // ── hot_convention_signals ──────────────────────────────────────
+    let conv_id = kg
+        .stage_hot_convention_signal(
+            "sha256:abc123",
+            "crates/ucil-core/src/knowledge_graph.rs",
+            Some("fn stage_hot_observation(…) { … }"),
+        )
+        .expect("stage_hot_convention_signal must succeed");
+    assert!(
+        conv_id > 0,
+        "RETURNING id on hot_convention_signals must be positive (got {conv_id})",
+    );
+
+    // ── hot_architecture_deltas ─────────────────────────────────────
+    let arch_id = kg
+        .stage_hot_architecture_delta(
+            "module_split",
+            "crates/ucil-core/src/knowledge_graph.rs",
+            Some("split hot-staging writers into their own section"),
+        )
+        .expect("stage_hot_architecture_delta must succeed");
+    assert!(
+        arch_id > 0,
+        "RETURNING id on hot_architecture_deltas must be positive (got {arch_id})",
+    );
+
+    // ── per-table count assertions ──────────────────────────────────
+    //
+    // Confirm each row landed in its owning table (and nowhere else) —
+    // catches a cross-table INSERT typo in the three stagers above.
+    let obs_count: i64 = kg
         .conn()
         .query_row("SELECT COUNT(*) FROM hot_observations;", [], |row| {
             row.get::<_, i64>(0)
         })
-        .expect("COUNT must succeed");
-    assert_eq!(count, 1, "exactly one hot_observations row inserted");
+        .expect("COUNT(hot_observations) must succeed");
+    assert_eq!(obs_count, 1, "exactly one hot_observations row inserted");
+
+    let conv_count: i64 = kg
+        .conn()
+        .query_row("SELECT COUNT(*) FROM hot_convention_signals;", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .expect("COUNT(hot_convention_signals) must succeed");
+    assert_eq!(
+        conv_count, 1,
+        "exactly one hot_convention_signals row inserted",
+    );
+
+    let arch_count: i64 = kg
+        .conn()
+        .query_row("SELECT COUNT(*) FROM hot_architecture_deltas;", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .expect("COUNT(hot_architecture_deltas) must succeed");
+    assert_eq!(
+        arch_count, 1,
+        "exactly one hot_architecture_deltas row inserted",
+    );
 }
