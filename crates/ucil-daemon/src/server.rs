@@ -1214,7 +1214,7 @@ fn clamp_max_results(n: u64) -> usize {
 
 /// One merged row emitted by [`handle_search_code`] — the JSON
 /// serialisation is the `_meta.results[]` element shape advertised on
-/// the wire (WO-0035 scope_in point 7 / acceptance-test field spec).
+/// the wire (WO-0035 `scope_in` point 7 / acceptance-test field spec).
 ///
 /// `source` is the discriminant:
 ///
@@ -2701,7 +2701,7 @@ fn test_get_conventions_tool_non_string_category() {
 
 /// Build a `search_code` test fixture.
 ///
-/// Creates two `tempfile::TempDir` trees: one hosting the SQLite
+/// Creates two `tempfile::TempDir` trees: one hosting the `SQLite`
 /// knowledge graph (`.db`) and one hosting the source-tree that the
 /// in-process `ripgrep` walker will scan.  Writes `src/util.rs` with
 /// the `banana_split` function so both halves of the handler (symbol
@@ -2787,13 +2787,13 @@ fn build_search_code_fixture() -> (
 /// `-p ucil-daemon server::test_search_code_basic`.
 ///
 /// Exercises the full `tools/call` dispatch for `search_code` against a
-/// real `KnowledgeGraph::open` + `upsert_entity` on a temp SQLite file
+/// real `KnowledgeGraph::open` + `upsert_entity` on a temp `SQLite` file
 /// AND a real in-process `ignore` + `grep-searcher` + `grep-regex`
 /// walker pass on a `tempfile::TempDir` populated with a Rust source
-/// file.  No mocks of SQLite, `ignore`, or `grep-searcher` — both
+/// file.  No mocks of `SQLite`, `ignore`, or `grep-searcher` — both
 /// halves run against real state per the anti-laziness contract.
 ///
-/// Asserts (per WO-0035 scope_in bullet 9):
+/// Asserts (per WO-0035 `scope_in` bullet 9):
 ///
 /// 1. JSON-RPC envelope is well-formed (`jsonrpc == "2.0"`, matching
 ///    `id`, no `error`).
@@ -2920,7 +2920,7 @@ async fn test_search_code_basic() {
 
 /// Negative path: `arguments.query` is an empty string — the handler
 /// must return a JSON-RPC error envelope with `code == -32602` (Invalid
-/// params), per WO-0035 scope_in bullet 6.  Empty queries would match
+/// params), per WO-0035 `scope_in` bullet 6.  Empty queries would match
 /// every line in every file and are therefore not a useful operation.
 #[cfg(test)]
 #[tokio::test]
