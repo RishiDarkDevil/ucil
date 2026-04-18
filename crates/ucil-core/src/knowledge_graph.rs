@@ -2080,3 +2080,188 @@ fn test_wal_checkpoint_truncates() {
         "TRUNCATE must shrink kg.db-wal to 0 bytes (got {wal_size_after})",
     );
 }
+
+// ── Symbol-resolution tests (P1-W4-F03) ──────────────────────────────────────
+//
+// Module-root placement (no `mod tests { }`) per DEC-0005 — the frozen
+// F03 selector `knowledge_graph::test_symbol_resolution` must resolve
+// at nextest filter time.
+
+/// Build a test `Entity` with the F03-common defaults filled in.
+///
+/// Extracted so `test_symbol_resolution` stays under the
+/// `clippy::too_many_lines` (100) threshold while still exercising
+/// every branch of the WO-0031 scope.  `language`, `t_valid_from`,
+/// `importance`, and the source-tool columns are fixed to values
+/// that don't affect resolution — only the arguments to this helper
+/// matter to the assertions.
+#[cfg(test)]
+fn mk_resolver_fixture(
+    name: &str,
+    qualified_name: Option<&str>,
+    file_path: &str,
+    start_line: Option<i64>,
+    signature: Option<&str>,
+    doc_comment: Option<&str>,
+) -> Entity {
+    Entity {
+        id: None,
+        kind: "function".to_owned(),
+        name: name.to_owned(),
+        qualified_name: qualified_name.map(str::to_owned),
+        file_path: file_path.to_owned(),
+        start_line,
+        end_line: None,
+        signature: signature.map(str::to_owned),
+        doc_comment: doc_comment.map(str::to_owned),
+        language: Some("rust".to_owned()),
+        t_valid_from: Some("2026-04-18T00:00:00+00:00".to_owned()),
+        t_valid_to: None,
+        importance: 0.5,
+        source_tool: None,
+        source_hash: None,
+    }
+}
+
+/// `test_symbol_resolution` — **frozen F03 acceptance selector**
+/// (`knowledge_graph::test_symbol_resolution`).
+///
+/// Covers the three match shapes (bare `name`, full `qualified_name`,
+/// terminal-segment `LIKE '%::' || ?1`) + the `file_scope` narrowing
+/// + the `parent_module` derivation + the `Ok(None)` miss path
+///   documented on [`KnowledgeGraph::resolve_symbol`].
+///
+/// Tie-breaking is deterministic: `SQLite`'s `datetime('now')` schema
+/// default has second precision, so the two `"parse"`-named rows are
+/// inserted back-to-back with a >1s sleep between them to guarantee
+/// strictly-ordered `t_ingested_at` values.  Without this, an
+/// `ORDER BY t_ingested_at DESC LIMIT 1` on ties would be undefined
+/// (`SQLite`'s sort stability is not guaranteed under `LIMIT`).
+///
+/// No mocks of rusqlite / sqlite — every assertion runs against a
+/// real tempfile-backed db via `tempfile::TempDir`.
+#[cfg(test)]
+#[test]
+fn test_symbol_resolution() {
+    use tempfile::TempDir;
+
+    let tmp = TempDir::new().expect("tempdir must be creatable");
+    let mut kg =
+        KnowledgeGraph::open(&tmp.path().join("kg.db")).expect("KnowledgeGraph::open must succeed");
+
+    // ── Row 1 — treesitter::parser::parse (inserted FIRST; older).
+    kg.upsert_entity(&mk_resolver_fixture(
+        "parse",
+        Some("ucil_treesitter::parser::parse"),
+        "crates/ucil-treesitter/src/parser.rs",
+        Some(42),
+        Some("fn parse(src: &str) -> Ast"),
+        Some("Parse a source string."),
+    ))
+    .expect("row1 upsert must succeed");
+
+    // Force strictly-distinct t_ingested_at values: sleep >1s between
+    // the two back-to-back `"parse"` upserts so the second lands in a
+    // later second (schema default is `datetime('now')`, second-only
+    // precision).  Without this gap, `ORDER BY t_ingested_at DESC
+    // LIMIT 1` ties are implementation-defined under LIMIT per the
+    // SQLite query planner.
+    std::thread::sleep(std::time::Duration::from_millis(1_100));
+
+    // ── Row 2 — ucil_core::types::parse (inserted SECOND; newest wins).
+    kg.upsert_entity(&mk_resolver_fixture(
+        "parse",
+        Some("ucil_core::types::parse"),
+        "crates/ucil-core/src/types.rs",
+        Some(7),
+        None,
+        None,
+    ))
+    .expect("row2 upsert must succeed");
+
+    // ── Row 3 — `disambiguous` (qualified_name NULL → parent_module None).
+    kg.upsert_entity(&mk_resolver_fixture(
+        "disambiguous",
+        None,
+        "crates/misc.rs",
+        Some(1),
+        None,
+        None,
+    ))
+    .expect("row3 upsert must succeed");
+
+    // ── (c) unscoped resolve_symbol("parse") — newest ingest wins ──
+    let hit = kg
+        .resolve_symbol("parse", None)
+        .expect("resolve_symbol must succeed")
+        .expect("`parse` must resolve to the newest-ingested row");
+    assert_eq!(
+        hit.file_path, "crates/ucil-core/src/types.rs",
+        "newest ingest is the ucil_core::types row (row2)",
+    );
+    assert_eq!(hit.start_line, Some(7));
+    assert_eq!(hit.signature, None);
+    assert_eq!(hit.doc_comment, None);
+    assert_eq!(
+        hit.parent_module,
+        Some("ucil_core::types".to_owned()),
+        "parent_module is qualified_name minus the terminal `::name` segment",
+    );
+
+    // ── (d) scoped resolve_symbol reaches the treesitter row ─────────
+    let scoped = kg
+        .resolve_symbol("parse", Some("crates/ucil-treesitter/src/parser.rs"))
+        .expect("scoped resolve_symbol must succeed")
+        .expect("treesitter-scoped `parse` must resolve");
+    assert_eq!(
+        scoped.file_path, "crates/ucil-treesitter/src/parser.rs",
+        "file_scope narrows to the treesitter row even though types is newer",
+    );
+    assert_eq!(scoped.start_line, Some(42));
+    assert_eq!(
+        scoped.signature.as_deref(),
+        Some("fn parse(src: &str) -> Ast"),
+    );
+    assert_eq!(
+        scoped.doc_comment.as_deref(),
+        Some("Parse a source string.")
+    );
+    assert_eq!(
+        scoped.parent_module,
+        Some("ucil_treesitter::parser".to_owned()),
+    );
+
+    // ── (e) qualified_name == NULL ⇒ parent_module == None ──────────
+    let disamb = kg
+        .resolve_symbol("disambiguous", None)
+        .expect("disambiguous resolve must succeed")
+        .expect("disambiguous row must be found by bare name");
+    assert_eq!(disamb.file_path, "crates/misc.rs");
+    assert_eq!(disamb.start_line, Some(1));
+    assert_eq!(
+        disamb.parent_module, None,
+        "qualified_name was NULL so parent_module must be None",
+    );
+
+    // ── (f) absent symbol returns Ok(None) (not an error) ────────────
+    let missing = kg
+        .resolve_symbol("nonexistent", None)
+        .expect("nonexistent resolve must succeed");
+    assert!(
+        missing.is_none(),
+        "unknown symbol name must produce Ok(None), got {missing:?}",
+    );
+
+    // ── (additional) terminal-segment match via full qualified_name ──
+    // Covers the `qualified_name = ?1` and `LIKE '%::' || ?1` branches
+    // of the SQL — the bare-name branch is exercised above.
+    let by_qname = kg
+        .resolve_symbol("ucil_treesitter::parser::parse", None)
+        .expect("qualified_name resolve must succeed")
+        .expect("qualified_name exact match must resolve");
+    assert_eq!(by_qname.file_path, "crates/ucil-treesitter/src/parser.rs");
+    assert_eq!(
+        by_qname.parent_module,
+        Some("ucil_treesitter::parser".to_owned()),
+    );
+}
