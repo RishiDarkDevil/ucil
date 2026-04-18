@@ -63,3 +63,22 @@ search_code. Nineteen still stub (return _meta.not_yet_implemented).
 - Bucket A auto-resolve on next triage pass.
 - Intentionally NO `resolved: true` line in frontmatter so stop-hook
   bypass fires this turn.
+
+## Resolution
+
+Bucket A auto-resolve (triage pass 1, phase 1, 2026-04-18T17:18Z).
+This was a monitor-session heartbeat with `blocks_loop: false` and the
+escalation author explicitly marked `auto_resolve_on_next_triage:
+bucket-A`. State has advanced past the snapshot:
+
+- HEAD is 9b6ca15 `merge: WO-0036 understand-code-tool (feat → main)` —
+  WO-0036 (P1-W4-F09 understand_code MCP tool) converged, was verifier-
+  passed (18d7617), and merged. One of the four "outstanding" features
+  flagged in this heartbeat is now done.
+- Passing count advanced 44 → 45/234 exactly as expected from the
+  P1-W4-F09 flip.
+- Tree clean, branch up to date with origin/main.
+
+No residual action required.
+
+resolved: true
