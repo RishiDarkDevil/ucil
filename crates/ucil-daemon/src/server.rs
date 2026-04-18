@@ -361,7 +361,7 @@ impl McpServer {
     ///
     /// See master-plan §3.2 row 2 (`find_definition` — go-to-definition
     /// with full context) and §18 Phase 1 Week 4 line 1751 ("Implement
-    /// first working tool: find_definition").
+    /// first working tool: `find_definition`").
     #[must_use]
     pub fn with_knowledge_graph(kg: Arc<Mutex<KnowledgeGraph>>) -> Self {
         Self {
@@ -488,6 +488,17 @@ impl McpServer {
             return jsonrpc_error(id, -32602, &format!("Unknown tool: {name}"));
         }
 
+        // Route `find_definition` (P1-W4-F05) to its real handler when
+        // a KG handle is attached; every other tool — and
+        // `find_definition` when no KG is attached — falls through to
+        // the stub path so phase-1 invariant #9 is preserved for the
+        // remaining 21 tools of the §3.2 catalog.
+        if name == "find_definition" {
+            if let Some(kg) = self.kg.as_ref() {
+                return Self::handle_find_definition(id, params, kg);
+            }
+        }
+
         // Phase-1 invariant #9: every tool handler is a stub that
         // returns `_meta.not_yet_implemented: true`.  Downstream phases
         // will swap this stub for real dispatch into the group fusion
@@ -512,6 +523,242 @@ impl McpServer {
             }
         })
     }
+
+    /// Handle the `find_definition` MCP tool (`P1-W4-F05`,
+    /// master-plan §3.2 row 2 / §18 Phase 1 Week 4 line 1751).
+    ///
+    /// Extracts `arguments.name` (required, string) and
+    /// `arguments.file_path` (optional, string) from `params`, queries
+    /// the knowledge graph, and returns an MCP `tools/call` envelope
+    /// whose `result._meta` carries the structured payload:
+    ///
+    /// * `tool`: `"find_definition"`.
+    /// * `source`: `"tree-sitter+kg"` — advertises the data lineage so
+    ///   downstream G1/G2 fusion layers can merge results from other
+    ///   source tools (Serena, LSP) without clobbering the KG path.
+    /// * `found`: `true` when resolution succeeded, `false` otherwise.
+    /// * `file_path`, `start_line`, `signature`, `doc_comment`,
+    ///   `parent_module`: the resolved definition projection (present
+    ///   only when `found`).
+    /// * `callers`: array of `{qualified_name, file_path, start_line}`
+    ///   for every immediate caller (i.e. every `calls`-kind edge whose
+    ///   `target_id` is the definition's rowid).  Empty vec when the
+    ///   definition has no known callers yet.
+    ///
+    /// The not-found shape returns `isError: false` with
+    /// `_meta.found == false` so Claude Code and other MCP hosts render
+    /// a graceful "no definition found" response rather than a
+    /// JSON-RPC error envelope — matches master-plan §3.2 UX contract.
+    ///
+    /// Missing or non-string `arguments.name` → JSON-RPC error `-32602`
+    /// (invalid params), the standard code for malformed parameters.
+    fn handle_find_definition(
+        id: &Value,
+        params: &Value,
+        kg: &Arc<Mutex<KnowledgeGraph>>,
+    ) -> Value {
+        let args = params
+            .get("arguments")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        let Some(name) = args.get("name").and_then(Value::as_str) else {
+            return jsonrpc_error(
+                id,
+                -32602,
+                "find_definition: `arguments.name` is required and must be a string",
+            );
+        };
+        let file_scope = args.get("file_path").and_then(Value::as_str);
+
+        match read_find_definition(kg, name, file_scope) {
+            Ok(FindDefinitionPayload::Found {
+                resolution,
+                callers,
+            }) => found_response(id, name, &resolution, &callers),
+            Ok(FindDefinitionPayload::NotFound) => not_found_response(id, name),
+            Err(e) => jsonrpc_error(id, e.code, &e.message),
+        }
+    }
+}
+
+/// Internal error shape for the `find_definition` read pipeline —
+/// threads a `(code, message)` pair out of the KG-locked section so the
+/// outer handler can build the JSON-RPC error envelope with the mutex
+/// guard already released.
+#[derive(Debug)]
+struct FindDefinitionReadError {
+    code: i64,
+    message: String,
+}
+
+/// Internal payload shape produced by
+/// [`McpServer::handle_find_definition`] — threads the KG read results
+/// out of the mutex-guarded block so the response encoding happens with
+/// the lock released.
+#[derive(Debug)]
+enum FindDefinitionPayload {
+    /// Definition resolved — carries the [`ucil_core::SymbolResolution`]
+    /// projection plus the projected caller list (already JSON-shaped).
+    Found {
+        /// The resolved symbol's [`ucil_core::SymbolResolution`]
+        /// projection from [`KnowledgeGraph::resolve_symbol`].
+        resolution: ucil_core::SymbolResolution,
+        /// Projected caller list, one JSON object per `calls`-kind
+        /// inbound edge: `{qualified_name, file_path, start_line}`.
+        callers: Vec<Value>,
+    },
+    /// Resolver returned `Ok(None)` for the requested `(name,
+    /// file_scope)` pair.
+    NotFound,
+}
+
+/// Execute the knowledge-graph reads that back `find_definition`:
+/// acquire the lock, resolve the symbol, enumerate `calls`-kind
+/// inbound edges, and project each caller onto its
+/// `{qualified_name, file_path, start_line}` shape.
+///
+/// Kept out of the `McpServer` impl so `handle_find_definition` stays
+/// under the `clippy::too_many_lines` threshold; the outer method
+/// owns the argument parsing and JSON envelope construction.
+fn read_find_definition(
+    kg: &Arc<Mutex<KnowledgeGraph>>,
+    name: &str,
+    file_scope: Option<&str>,
+) -> Result<FindDefinitionPayload, FindDefinitionReadError> {
+    let guard = kg.lock().map_err(|poisoned| {
+        tracing::error!("knowledge graph mutex is poisoned: {poisoned}");
+        FindDefinitionReadError {
+            code: -32603,
+            message: "find_definition: internal error (knowledge graph mutex poisoned)".to_owned(),
+        }
+    })?;
+    match guard.resolve_symbol(name, file_scope) {
+        Ok(Some(resolution)) => {
+            let entity_id = resolution.id.unwrap_or_default();
+            let caller_rows = guard.list_relations_by_target(entity_id).map_err(|e| {
+                tracing::error!("list_relations_by_target failed: {e}");
+                FindDefinitionReadError {
+                    code: -32603,
+                    message: format!("find_definition: callers lookup failed: {e}"),
+                }
+            })?;
+            let callers = project_callers(&guard, &caller_rows)?;
+            drop(guard);
+            Ok(FindDefinitionPayload::Found {
+                resolution,
+                callers,
+            })
+        }
+        Ok(None) => {
+            drop(guard);
+            Ok(FindDefinitionPayload::NotFound)
+        }
+        Err(e) => {
+            tracing::error!("resolve_symbol failed: {e}");
+            Err(FindDefinitionReadError {
+                code: -32603,
+                message: format!("find_definition: resolve failed: {e}"),
+            })
+        }
+    }
+}
+
+/// Project `calls`-kind inbound relations onto their caller entity's
+/// `{qualified_name, file_path, start_line}` JSON shape.
+///
+/// Dangling foreign keys (source row deleted between queries) are
+/// logged and skipped — the caller list is best-effort because the
+/// §12.1 `relations` table has no cascading delete.
+fn project_callers(
+    guard: &std::sync::MutexGuard<'_, KnowledgeGraph>,
+    caller_rows: &[ucil_core::Relation],
+) -> Result<Vec<Value>, FindDefinitionReadError> {
+    let mut callers: Vec<Value> = Vec::new();
+    for rel in caller_rows.iter().filter(|r| r.kind == "calls") {
+        match guard.get_entity_by_id(rel.source_id) {
+            Ok(Some(caller)) => {
+                callers.push(json!({
+                    "qualified_name": caller.qualified_name,
+                    "file_path": caller.file_path,
+                    "start_line": caller.start_line,
+                }));
+            }
+            Ok(None) => {
+                tracing::warn!(
+                    source_id = rel.source_id,
+                    "find_definition: caller source row missing (dangling fk)",
+                );
+            }
+            Err(e) => {
+                tracing::error!("get_entity_by_id failed: {e}");
+                return Err(FindDefinitionReadError {
+                    code: -32603,
+                    message: format!("find_definition: caller projection failed: {e}"),
+                });
+            }
+        }
+    }
+    Ok(callers)
+}
+
+/// Build the JSON-RPC response envelope for a resolved definition.
+fn found_response(
+    id: &Value,
+    name: &str,
+    resolution: &ucil_core::SymbolResolution,
+    callers: &[Value],
+) -> Value {
+    let text = format!(
+        "`{name}` defined in {} at line {}",
+        resolution.file_path,
+        resolution
+            .start_line
+            .map_or_else(|| "?".to_owned(), |l| l.to_string()),
+    );
+    json!({
+        "jsonrpc": JSONRPC_VERSION,
+        "id": id.clone(),
+        "result": {
+            "_meta": {
+                "tool": "find_definition",
+                "source": "tree-sitter+kg",
+                "found": true,
+                "file_path": resolution.file_path,
+                "start_line": resolution.start_line,
+                "signature": resolution.signature,
+                "doc_comment": resolution.doc_comment,
+                "parent_module": resolution.parent_module,
+                "qualified_name": resolution.qualified_name,
+                "callers": callers.to_vec(),
+            },
+            "content": [
+                { "type": "text", "text": text }
+            ],
+            "isError": false
+        }
+    })
+}
+
+/// Build the JSON-RPC response envelope for an unresolved symbol.
+fn not_found_response(id: &Value, name: &str) -> Value {
+    json!({
+        "jsonrpc": JSONRPC_VERSION,
+        "id": id.clone(),
+        "result": {
+            "_meta": {
+                "tool": "find_definition",
+                "source": "tree-sitter+kg",
+                "found": false,
+            },
+            "content": [
+                {
+                    "type": "text",
+                    "text": format!("no definition found for `{name}`"),
+                }
+            ],
+            "isError": false
+        }
+    })
 }
 
 /// Build a JSON-RPC 2.0 error envelope.
