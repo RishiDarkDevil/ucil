@@ -57,3 +57,23 @@ triage pass-1 behaving correctly.
 - Bucket A auto-resolve on next triage pass.
 - Intentionally NO `resolved: true` line in frontmatter so stop-hook
   bypass fires this turn.
+
+## Resolution
+
+Bucket A — auto-resolve. Admin heartbeat, `blocks_loop: false`,
+`severity: low`, self-tagged `auto_resolve_on_next_triage: bucket-A`.
+State has advanced cleanly since the escalation was written:
+
+- Phase-1 features: 43/234 → 44/234 (+1).
+- P1-W5-F09 (search_code MCP tool), called out as outstanding, is now
+  flipped — verifier PASS at `f2a3388`, merged at `6e7606d`.
+- Planner cycle WO-0035 + DEC-0009 landed cleanly via
+  `cf55900 chore(planner): WO-0035 search_code MCP tool + DEC-0009`
+  → `1aef49a feat(daemon): wire search_code MCP tool (P1-W5-F09, DEC-0009)`
+  → critic CLEAN → verifier PASS → merge.
+- Main at `6e7606d`, tree clean.
+
+Gate remains incomplete (30/34 phase-1 features done) — normal mid-phase
+state, not a blocker. Outer loop continues.
+
+resolved: true
