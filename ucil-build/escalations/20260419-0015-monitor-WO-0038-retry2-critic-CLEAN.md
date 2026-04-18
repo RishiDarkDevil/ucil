@@ -36,3 +36,10 @@ unblock monitor stop-hook.
 - Bucket A auto-resolve on next triage pass.
 - Intentionally NO `resolved: true` line in frontmatter so stop-hook
   bypass fires this turn.
+
+
+## Resolution
+
+Auto-resolve per triage pass-3 force-halt at 1dfaa92. Condition already satisfied in HEAD 6839440 (WO-0038 merged, P1-W5-F08 passing).
+
+resolved: true
