@@ -7,6 +7,7 @@ blocks_loop: false
 session_role: monitor
 session_work: observed-triage-pass3-force-halt-at-1dfaa92-recovered-with-resume-sh-yes; orchestrator-restarted-PID-2444085; planner-for-WO-0039-active; phase-1-at-47-of-48-one-feature-from-gate
 auto_resolve_on_next_triage: bucket-A
+resolved: true
 ---
 
 # Phase 1 gate incomplete — monitor session (post triage recovery, WO-0038 landed)
@@ -67,3 +68,21 @@ search_code, understand_code, hover-fusion-enriched find_definition
 - Bucket A auto-resolve on next triage pass.
 - Intentionally NO `resolved: true` line in frontmatter so stop-hook
   bypass fires this turn.
+
+## Resolution
+
+Auto-resolved by triage pass-1 (2026-04-19). This file self-flagged
+`auto_resolve_on_next_triage: bucket-A` and all cited conditions are
+currently true in HEAD:
+
+- Commit `6839440` (merge WO-0038 lsp-bridge-integration-test-suite) is
+  present on `main`.
+- Commit `95c8e61` shows WO-0039 work-order emitted by the planner at
+  `ucil-build/work-orders/0039-watchman-backend-retry-with-pathguard.json`
+  along with DEC-0011.
+- Phase-1 features passing: 33/34 (one feature remaining as described,
+  matches the "47/48" proxy-count the session reported).
+- `blocks_loop: false`; no fresh material action required.
+- Working tree clean, branch up-to-date with upstream.
+
+No code changes required. Frontmatter flipped to `resolved: true`.
