@@ -617,6 +617,193 @@ impl KnowledgeGraph {
         tx.commit()?;
         Ok(out)
     }
+
+    // ── Entity CRUD ──────────────────────────────────────────────────
+    //
+    // Every writer routes through `execute_in_transaction` so the
+    // `BEGIN IMMEDIATE` invariant (§11 line 1117) is preserved.  The
+    // ON CONFLICT branch honours the
+    // `UNIQUE(qualified_name, file_path, t_valid_from)` constraint at
+    // `INIT_SQL` line 125: the second insert with the same triple
+    // returns the existing row's id via `RETURNING id`, bumps
+    // `access_count`, and refreshes `t_last_verified` — all in a single
+    // round-trip.
+
+    /// Upsert an [`Entity`] into the `entities` table.
+    ///
+    /// Issues
+    /// `INSERT INTO entities (...) VALUES (...) ON CONFLICT(qualified_name,
+    /// file_path, t_valid_from) DO UPDATE SET t_last_verified = datetime('now'),
+    /// access_count = access_count + 1 RETURNING id` so the caller gets
+    /// the inserted-or-updated rowid without a second `SELECT`.  Returns
+    /// the `entities.id` from whichever branch fired.
+    ///
+    /// The write routes through [`Self::execute_in_transaction`] and
+    /// therefore runs under `BEGIN IMMEDIATE` per master-plan §11 line
+    /// 1117 — the chokepoint that keeps every UCIL writer out of the
+    /// default `BEGIN DEFERRED` → lock-upgrade → `SQLITE_BUSY` trap.
+    ///
+    /// # Errors
+    ///
+    /// * [`KnowledgeGraphError::Sqlite`] — transaction open, statement
+    ///   prepare, parameter bind, or row return failed.
+    #[tracing::instrument(
+        level = "debug",
+        skip(self, entity),
+        fields(name = %entity.name),
+        name = "ucil.core.kg.upsert_entity",
+    )]
+    pub fn upsert_entity(&mut self, entity: &Entity) -> Result<i64, KnowledgeGraphError> {
+        self.execute_in_transaction(|tx| {
+            let mut stmt = tx.prepare(
+                "INSERT INTO entities (\
+                    kind, name, qualified_name, file_path, start_line, end_line, \
+                    signature, doc_comment, language, t_valid_from, t_valid_to, \
+                    importance, source_tool, source_hash\
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14) \
+                 ON CONFLICT(qualified_name, file_path, t_valid_from) DO UPDATE SET \
+                    t_last_verified = datetime('now'), \
+                    access_count = access_count + 1 \
+                 RETURNING id;",
+            )?;
+            let id: i64 = stmt.query_row(
+                rusqlite::params![
+                    entity.kind,
+                    entity.name,
+                    entity.qualified_name,
+                    entity.file_path,
+                    entity.start_line,
+                    entity.end_line,
+                    entity.signature,
+                    entity.doc_comment,
+                    entity.language,
+                    entity.t_valid_from,
+                    entity.t_valid_to,
+                    entity.importance,
+                    entity.source_tool,
+                    entity.source_hash,
+                ],
+                |row| row.get::<_, i64>(0),
+            )?;
+            Ok(id)
+        })
+    }
+
+    /// Look up the most recent [`Entity`] row by qualified name.
+    ///
+    /// When `file_path` is `Some(_)` the lookup is scoped to that file;
+    /// when `None` any file matches.  The query orders by
+    /// `t_ingested_at DESC LIMIT 1` so the caller always gets the
+    /// latest-ingested record (the bi-temporal
+    /// [`Self::get_entity_as_of`] helper is the right choice for
+    /// valid-time range queries).
+    ///
+    /// # Errors
+    ///
+    /// * [`KnowledgeGraphError::Sqlite`] — statement prepare, bind, or
+    ///   `query_row` failure.  Returns `Ok(None)` (not an error) when
+    ///   no row matches.
+    pub fn get_entity_by_qualified_name(
+        &self,
+        qualified_name: &str,
+        file_path: Option<&str>,
+    ) -> Result<Option<Entity>, KnowledgeGraphError> {
+        let sql = if file_path.is_some() {
+            "SELECT id, kind, name, qualified_name, file_path, start_line, end_line, \
+                    signature, doc_comment, language, t_valid_from, t_valid_to, \
+                    importance, source_tool, source_hash \
+             FROM entities \
+             WHERE qualified_name = ?1 AND file_path = ?2 \
+             ORDER BY t_ingested_at DESC LIMIT 1"
+        } else {
+            "SELECT id, kind, name, qualified_name, file_path, start_line, end_line, \
+                    signature, doc_comment, language, t_valid_from, t_valid_to, \
+                    importance, source_tool, source_hash \
+             FROM entities \
+             WHERE qualified_name = ?1 \
+             ORDER BY t_ingested_at DESC LIMIT 1"
+        };
+        let mut stmt = self.conn.prepare(sql)?;
+        let row_result = if let Some(path) = file_path {
+            stmt.query_row(rusqlite::params![qualified_name, path], entity_from_row)
+        } else {
+            stmt.query_row(rusqlite::params![qualified_name], entity_from_row)
+        };
+        Ok(row_result.map(Some).or_else(absent_to_none)?)
+    }
+
+    /// List all `entities` rows whose `file_path` matches, ordered by
+    /// `start_line` ascending.
+    ///
+    /// The document-order return matters for downstream formatters that
+    /// want to render a file's outline top-to-bottom; callers that need
+    /// a different order must sort themselves.
+    ///
+    /// # Errors
+    ///
+    /// * [`KnowledgeGraphError::Sqlite`] — statement prepare, bind, or
+    ///   iteration failure.
+    pub fn list_entities_by_file(
+        &self,
+        file_path: &str,
+    ) -> Result<Vec<Entity>, KnowledgeGraphError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, kind, name, qualified_name, file_path, start_line, end_line, \
+                    signature, doc_comment, language, t_valid_from, t_valid_to, \
+                    importance, source_tool, source_hash \
+             FROM entities \
+             WHERE file_path = ?1 \
+             ORDER BY start_line ASC, id ASC",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![file_path], entity_from_row)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+}
+
+// ── Row decoders ─────────────────────────────────────────────────────────────
+//
+// Free functions rather than `impl`s so `query_row` / `query_map`
+// callers can pass them directly — rusqlite's closure signature is
+// `FnMut(&Row<'_>) -> rusqlite::Result<T>` and free functions coerce
+// cleanly.
+
+/// Read an [`Entity`] row from a `SELECT id, kind, name, qualified_name,
+/// file_path, start_line, end_line, signature, doc_comment, language,
+/// t_valid_from, t_valid_to, importance, source_tool, source_hash`
+/// statement (exact column order).
+fn entity_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Entity> {
+    Ok(Entity {
+        id: row.get::<_, Option<i64>>(0)?,
+        kind: row.get::<_, String>(1)?,
+        name: row.get::<_, String>(2)?,
+        qualified_name: row.get::<_, Option<String>>(3)?,
+        file_path: row.get::<_, String>(4)?,
+        start_line: row.get::<_, Option<i64>>(5)?,
+        end_line: row.get::<_, Option<i64>>(6)?,
+        signature: row.get::<_, Option<String>>(7)?,
+        doc_comment: row.get::<_, Option<String>>(8)?,
+        language: row.get::<_, Option<String>>(9)?,
+        t_valid_from: row.get::<_, Option<String>>(10)?,
+        t_valid_to: row.get::<_, Option<String>>(11)?,
+        importance: row.get::<_, f64>(12)?,
+        source_tool: row.get::<_, Option<String>>(13)?,
+        source_hash: row.get::<_, Option<String>>(14)?,
+    })
+}
+
+/// Convert a `QueryReturnedNoRows` into `Ok(None)` so the read helpers
+/// can distinguish "absent" from "SQL error".  Any other error flows
+/// through.
+fn absent_to_none<T>(err: rusqlite::Error) -> Result<Option<T>, rusqlite::Error> {
+    if matches!(err, rusqlite::Error::QueryReturnedNoRows) {
+        Ok(None)
+    } else {
+        Err(err)
+    }
 }
 
 // ── Module-level acceptance test ─────────────────────────────────────────────
@@ -775,4 +962,220 @@ fn test_schema_creation() {
         )
         .expect("the pre-reopen session row must persist");
     assert_eq!(session_id, "wo-0011-test-session");
+}
+
+// ── Entity CRUD tests ────────────────────────────────────────────────────────
+//
+// Module-root placement (no `mod tests { }`) per DEC-0005 and the
+// frozen selector `knowledge_graph::test_*` — see
+// `test_schema_creation` above as the precedent WO-0011 established.
+
+/// `test_upsert_and_get_entity` — round-trip an `Entity` through
+/// `upsert_entity` + `get_entity_by_qualified_name` and assert every
+/// field survives.
+#[cfg(test)]
+#[test]
+fn test_upsert_and_get_entity() {
+    use tempfile::TempDir;
+
+    let tmp = TempDir::new().expect("tempdir must be creatable");
+    let mut kg = KnowledgeGraph::open(&tmp.path().join("kg.db"))
+        .expect("KnowledgeGraph::open must succeed on fresh tempfile");
+
+    let entity = Entity {
+        id: None,
+        kind: "function".to_owned(),
+        name: "render".to_owned(),
+        qualified_name: Some("app::view::render".to_owned()),
+        file_path: "src/app/view.rs".to_owned(),
+        start_line: Some(42),
+        end_line: Some(97),
+        signature: Some("fn render(ctx: &Ctx) -> Html".to_owned()),
+        doc_comment: Some("Render a page.".to_owned()),
+        language: Some("rust".to_owned()),
+        t_valid_from: Some("2026-04-18T00:00:00+00:00".to_owned()),
+        t_valid_to: None,
+        importance: 0.75,
+        source_tool: Some("tree-sitter".to_owned()),
+        source_hash: Some("deadbeef".to_owned()),
+    };
+    let id = kg
+        .upsert_entity(&entity)
+        .expect("first upsert must succeed");
+    assert!(id > 0, "RETURNING id must produce a positive rowid");
+
+    let fetched = kg
+        .get_entity_by_qualified_name("app::view::render", Some("src/app/view.rs"))
+        .expect("read must succeed")
+        .expect("row must be present after upsert");
+
+    assert_eq!(fetched.id, Some(id));
+    assert_eq!(fetched.kind, entity.kind);
+    assert_eq!(fetched.name, entity.name);
+    assert_eq!(fetched.qualified_name, entity.qualified_name);
+    assert_eq!(fetched.file_path, entity.file_path);
+    assert_eq!(fetched.start_line, entity.start_line);
+    assert_eq!(fetched.end_line, entity.end_line);
+    assert_eq!(fetched.signature, entity.signature);
+    assert_eq!(fetched.doc_comment, entity.doc_comment);
+    assert_eq!(fetched.language, entity.language);
+    assert_eq!(fetched.t_valid_from, entity.t_valid_from);
+    assert_eq!(fetched.t_valid_to, entity.t_valid_to);
+    assert!(
+        (fetched.importance - entity.importance).abs() < 1e-9,
+        "importance round-trips as f64",
+    );
+    assert_eq!(fetched.source_tool, entity.source_tool);
+    assert_eq!(fetched.source_hash, entity.source_hash);
+
+    // The `file_path=None` lookup form also resolves.
+    let fetched_any = kg
+        .get_entity_by_qualified_name("app::view::render", None)
+        .expect("read must succeed")
+        .expect("row must be present in any-file lookup");
+    assert_eq!(fetched_any.id, Some(id));
+
+    // Negative path: absent qualified_name returns Ok(None), not error.
+    let missing = kg
+        .get_entity_by_qualified_name("app::view::missing", None)
+        .expect("missing row must be Ok(None)");
+    assert!(missing.is_none(), "absent qualified_name must be None");
+}
+
+/// `test_list_entities_by_file` — insert 3 rows in the same file with
+/// ascending `start_line`, assert `list_entities_by_file` returns them
+/// in document order.
+#[cfg(test)]
+#[test]
+fn test_list_entities_by_file() {
+    use tempfile::TempDir;
+
+    let tmp = TempDir::new().expect("tempdir must be creatable");
+    let mut kg =
+        KnowledgeGraph::open(&tmp.path().join("kg.db")).expect("KnowledgeGraph::open must succeed");
+
+    let file_path = "src/pipeline.rs".to_owned();
+    let rows = [
+        (10_i64, "parse", "pipeline::parse"),
+        (40_i64, "lint", "pipeline::lint"),
+        (80_i64, "emit", "pipeline::emit"),
+    ];
+    for (line, name, qname) in &rows {
+        let e = Entity {
+            id: None,
+            kind: "function".to_owned(),
+            name: (*name).to_owned(),
+            qualified_name: Some((*qname).to_owned()),
+            file_path: file_path.clone(),
+            start_line: Some(*line),
+            end_line: Some(*line + 5),
+            signature: None,
+            doc_comment: None,
+            language: Some("rust".to_owned()),
+            t_valid_from: Some("2026-04-18T00:00:00+00:00".to_owned()),
+            t_valid_to: None,
+            importance: 0.5,
+            source_tool: None,
+            source_hash: None,
+        };
+        kg.upsert_entity(&e).expect("upsert must succeed");
+    }
+
+    let listed = kg
+        .list_entities_by_file(&file_path)
+        .expect("list must succeed");
+    assert_eq!(listed.len(), 3, "all three rows returned");
+    let names: Vec<&str> = listed.iter().map(|e| e.name.as_str()).collect();
+    assert_eq!(
+        names,
+        vec!["parse", "lint", "emit"],
+        "rows returned in start_line ASC order",
+    );
+
+    // A file with no entities returns an empty vec, not an error.
+    let none = kg
+        .list_entities_by_file("does/not/exist.rs")
+        .expect("list for absent file must succeed");
+    assert!(none.is_empty(), "absent file yields empty vec");
+}
+
+/// `test_entity_unique_constraint_updates` — inserting the same
+/// `(qualified_name, file_path, t_valid_from)` triple twice hits the
+/// `ON CONFLICT DO UPDATE` branch: the second call returns the SAME
+/// `id`, bumps `access_count`, and refreshes `t_last_verified`.
+#[cfg(test)]
+#[test]
+fn test_entity_unique_constraint_updates() {
+    use tempfile::TempDir;
+
+    let tmp = TempDir::new().expect("tempdir must be creatable");
+    let mut kg =
+        KnowledgeGraph::open(&tmp.path().join("kg.db")).expect("KnowledgeGraph::open must succeed");
+
+    let entity = Entity {
+        id: None,
+        kind: "function".to_owned(),
+        name: "handle".to_owned(),
+        qualified_name: Some("api::handle".to_owned()),
+        file_path: "src/api.rs".to_owned(),
+        start_line: Some(10),
+        end_line: Some(25),
+        signature: None,
+        doc_comment: None,
+        language: Some("rust".to_owned()),
+        t_valid_from: Some("2026-04-18T00:00:00+00:00".to_owned()),
+        t_valid_to: None,
+        importance: 0.5,
+        source_tool: None,
+        source_hash: None,
+    };
+
+    let id1 = kg.upsert_entity(&entity).expect("first upsert");
+    let id2 = kg
+        .upsert_entity(&entity)
+        .expect("second upsert must hit ON CONFLICT");
+    assert_eq!(id1, id2, "ON CONFLICT DO UPDATE preserves the rowid");
+
+    // `access_count` bumped.
+    let count: i64 = kg
+        .conn()
+        .query_row(
+            "SELECT access_count FROM entities WHERE id = ?1;",
+            rusqlite::params![id1],
+            |row| row.get::<_, i64>(0),
+        )
+        .expect("access_count read must succeed");
+    assert!(
+        count >= 1,
+        "access_count must be incremented on conflict (got {count})",
+    );
+
+    // `t_last_verified` set.
+    let tlv: Option<String> = kg
+        .conn()
+        .query_row(
+            "SELECT t_last_verified FROM entities WHERE id = ?1;",
+            rusqlite::params![id1],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .expect("t_last_verified read must succeed");
+    assert!(
+        tlv.is_some() && !tlv.as_deref().unwrap_or("").is_empty(),
+        "ON CONFLICT DO UPDATE must set t_last_verified (got {tlv:?})",
+    );
+
+    // Third upsert bumps `access_count` again.
+    kg.upsert_entity(&entity).expect("third upsert");
+    let count3: i64 = kg
+        .conn()
+        .query_row(
+            "SELECT access_count FROM entities WHERE id = ?1;",
+            rusqlite::params![id1],
+            |row| row.get::<_, i64>(0),
+        )
+        .expect("access_count read must succeed");
+    assert!(
+        count3 > count,
+        "access_count monotonic across conflicts (was {count}, now {count3})",
+    );
 }
