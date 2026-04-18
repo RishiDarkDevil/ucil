@@ -1214,20 +1214,22 @@ fn clamp_max_results(n: u64) -> usize {
 
 /// One merged row emitted by [`handle_search_code`] — the JSON
 /// serialisation is the `_meta.results[]` element shape advertised on
-/// the wire.
+/// the wire (WO-0035 scope_in point 7 / acceptance-test field spec).
 ///
 /// `source` is the discriminant:
 ///
 /// * `"symbol"` — only the KG half reported this `(file, line)`.
 /// * `"text"` — only the `ripgrep` half reported this `(file, line)`.
-/// * `"both"` — both halves reported it; the symbol fields are
-///   preserved and `line_text` carries the `ripgrep` line text.
+/// * `"both"` — both halves reported it; the symbol metadata is
+///   preserved and `preview` carries the `ripgrep` line text so the
+///   caller sees the raw matched source line.
 ///
-/// The three symbol-only fields (`name`, `kind`, `qualified_name`) are
-/// `#[serde(skip_serializing_if = "Option::is_none")]` so text-only
-/// rows emit a tight four-key object rather than three `null`s.
+/// `qualified_name` / `signature` are symbol-only; text-only rows
+/// omit them via `#[serde(skip_serializing_if = "Option::is_none")]`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 struct SearchCodeResult {
+    /// Origin discriminant: `"symbol"`, `"text"`, or `"both"`.
+    source: String,
     /// Path of the file the hit came from — absolute when produced by
     /// the text walker (walker yields absolute paths), and as-stored
     /// on the KG row when produced by the symbol half.
@@ -1236,25 +1238,22 @@ struct SearchCodeResult {
     /// `start_line`; for text rows it is `grep_searcher`'s reported
     /// line number.
     line_number: u64,
-    /// Origin discriminant: `"symbol"`, `"text"`, or `"both"`.
-    source: String,
-    /// Display text for the hit.  Symbol rows use the entity's
-    /// `qualified_name` (or `name` when absent); text rows use the
-    /// matching line with its trailing terminator stripped.  On a
-    /// `"both"` collision, the text line wins so the caller sees the
-    /// raw source line rather than the qualified name.
-    line_text: String,
-    /// Symbol name — present on `"symbol"` and `"both"` rows only.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    name: Option<String>,
-    /// Symbol kind (`function`, `struct`, …) — present on `"symbol"`
-    /// and `"both"` rows only.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    kind: Option<String>,
+    /// Human-readable preview for the hit.  Symbol rows use the
+    /// entity's `qualified_name` (falling back to `name` when the
+    /// entity has no qualified name); text rows use the matching line
+    /// with its trailing terminator stripped.  On a `"both"`
+    /// collision, the raw text line wins so the caller sees the
+    /// source line rather than the qualified name.
+    preview: String,
     /// Fully qualified symbol name — present on `"symbol"` and
     /// `"both"` rows only, and only when the entity row carried one.
     #[serde(skip_serializing_if = "Option::is_none")]
     qualified_name: Option<String>,
+    /// Tree-sitter-extracted symbol signature — present on `"symbol"`
+    /// and `"both"` rows only, and only when the entity row carried
+    /// one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    signature: Option<String>,
 }
 
 /// Execute the symbol half of the `search_code` pipeline: acquire the
@@ -1330,16 +1329,15 @@ fn merge_search_results(
             // the current ingest pipeline but is cheap to guard.
             continue;
         }
-        let display = e.qualified_name.clone().unwrap_or_else(|| e.name.clone());
+        let preview = e.qualified_name.clone().unwrap_or_else(|| e.name.clone());
         let idx = out.len();
         out.push(SearchCodeResult {
+            source: "symbol".to_owned(),
             file_path: e.file_path.clone(),
             line_number: line,
-            source: "symbol".to_owned(),
-            line_text: display,
-            name: Some(e.name.clone()),
-            kind: Some(e.kind.clone()),
+            preview,
             qualified_name: e.qualified_name.clone(),
+            signature: e.signature.clone(),
         });
         seen.insert(key, idx);
     }
@@ -1352,19 +1350,18 @@ fn merge_search_results(
         if let Some(&idx) = seen.get(&key) {
             if let Some(slot) = out.get_mut(idx) {
                 "both".clone_into(&mut slot.source);
-                slot.line_text.clone_from(&t.line_text);
+                slot.preview.clone_from(&t.line_text);
             }
             continue;
         }
         let idx = out.len();
         out.push(SearchCodeResult {
+            source: "text".to_owned(),
             file_path: t.file_path.display().to_string(),
             line_number: t.line_number,
-            source: "text".to_owned(),
-            line_text: t.line_text.clone(),
-            name: None,
-            kind: None,
+            preview: t.line_text.clone(),
             qualified_name: None,
+            signature: None,
         });
         seen.insert(key, idx);
     }
@@ -1900,20 +1897,22 @@ fn test_merge_search_results_symbol_only() {
         "symbol-only merge keeps all rows: {merged:?}"
     );
     assert_eq!(merged[0].source, "symbol");
-    assert_eq!(merged[0].name.as_deref(), Some("banana_split"));
     assert_eq!(
         merged[0].qualified_name.as_deref(),
         Some("util::banana_split")
     );
-    assert_eq!(merged[0].line_text, "util::banana_split");
+    assert_eq!(merged[0].preview, "util::banana_split");
     assert_eq!(merged[1].source, "symbol");
-    assert_eq!(merged[1].name.as_deref(), Some("banana_peel"));
+    assert_eq!(
+        merged[1].qualified_name.as_deref(),
+        Some("util::banana_peel")
+    );
 }
 
 /// Text-only path: when only the `ripgrep` half produces hits,
 /// `merge_search_results` returns one row per text match, each
-/// marked `source == "text"` with `name` / `kind` / `qualified_name`
-/// all `None` (and therefore absent from the JSON encoding).
+/// marked `source == "text"` with `qualified_name` / `signature`
+/// both `None` (and therefore absent from the JSON encoding).
 #[cfg(test)]
 #[test]
 fn test_merge_search_results_text_only() {
@@ -1928,19 +1927,18 @@ fn test_merge_search_results_text_only() {
     assert_eq!(merged[0].source, "text");
     assert_eq!(merged[0].file_path, "/tmp/src/util.rs");
     assert_eq!(merged[0].line_number, 42);
-    assert_eq!(merged[0].line_text, "fn banana_split() {}");
-    assert!(merged[0].name.is_none());
-    assert!(merged[0].kind.is_none());
+    assert_eq!(merged[0].preview, "fn banana_split() {}");
     assert!(merged[0].qualified_name.is_none());
+    assert!(merged[0].signature.is_none());
     assert_eq!(merged[1].source, "text");
     assert_eq!(merged[1].file_path, "/tmp/README.md");
 }
 
 /// Collision path: the same `(file_path, line_number)` reported by
 /// both halves collapses to a single row whose `source` flips to
-/// `"both"`, symbol fields (`name` / `kind` / `qualified_name`) are
-/// retained, and `line_text` is overwritten with the `ripgrep` line
-/// text so the caller sees the raw matched line.
+/// `"both"`, `qualified_name` / `signature` are retained, and
+/// `preview` is overwritten with the `ripgrep` line text so the
+/// caller sees the raw matched line.
 #[cfg(test)]
 #[test]
 fn test_merge_search_results_collision_flips_to_both() {
@@ -1959,8 +1957,7 @@ fn test_merge_search_results_collision_flips_to_both() {
     let merged = merge_search_results(&symbols, &texts, 50);
     assert_eq!(merged.len(), 2, "collision collapses to 2 rows: {merged:?}");
     assert_eq!(merged[0].source, "both");
-    assert_eq!(merged[0].line_text, "fn banana_split() { /* ... */ }");
-    assert_eq!(merged[0].name.as_deref(), Some("banana_split"));
+    assert_eq!(merged[0].preview, "fn banana_split() { /* ... */ }");
     assert_eq!(
         merged[0].qualified_name.as_deref(),
         Some("util::banana_split")
