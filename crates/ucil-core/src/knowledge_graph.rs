@@ -47,7 +47,9 @@
 
 use std::{io, path::Path, path::PathBuf};
 
+use chrono::{DateTime, Utc};
 use rusqlite::{Connection, Transaction, TransactionBehavior};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 // ── Errors ────────────────────────────────────────────────────────────────────
@@ -93,6 +95,184 @@ pub enum KnowledgeGraphError {
         /// The value the pragma read-back returned.
         actual: String,
     },
+
+    /// A caller-supplied timestamp could not be parsed / round-tripped
+    /// through the bi-temporal layer's RFC-3339 contract.  Reserved for
+    /// future helpers; the CRUD helpers landed in WO-0024 never surface
+    /// this variant directly because they take pre-formatted
+    /// `DateTime<Utc>` values or `Option<String>`-typed RFC-3339 text.
+    #[error("invalid timestamp: {0}")]
+    InvalidTimestamp(String),
+}
+
+// ── Domain types ──────────────────────────────────────────────────────────────
+
+/// A row in the §12.1 `entities` table — the unit of identity in the
+/// knowledge graph.
+///
+/// Fields mirror `INIT_SQL`'s `entities` declaration verbatim so a round
+/// trip through [`KnowledgeGraph::upsert_entity`] ↔
+/// [`KnowledgeGraph::get_entity_by_qualified_name`] preserves every
+/// user-supplied column.  `id` is `None` before insert and `Some(rowid)`
+/// after; the three `t_*` TEXT columns are RFC-3339 strings (via
+/// [`chrono::DateTime::to_rfc3339`]) so `SQLite`'s string-comparison-based
+/// range queries in [`KnowledgeGraph::get_entity_as_of`] stay
+/// lexicographically correct — mixing RFC-3339 with the bare-space
+/// `datetime('now')` format on the *same* range-queried column is a
+/// silent-bug trap (WO-0024 RCA §Non-negotiable invariant 5).
+///
+/// See master-plan §12.1 lines 1130-1145 for the schema; §12.2 for the
+/// bi-temporal `t_valid_from` / `t_valid_to` semantics.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Entity {
+    /// `entities.id` — `None` until inserted; `Some(rowid)` after
+    /// [`KnowledgeGraph::upsert_entity`] returns on either the insert
+    /// or `ON CONFLICT DO UPDATE` branch.
+    pub id: Option<i64>,
+    /// `entities.kind` — `"function"`, `"class"`, `"module"`, `"file"`,
+    /// etc.  Free-form text; no enum constraint at the schema level.
+    pub kind: String,
+    /// `entities.name` — the unqualified symbol / file name.
+    pub name: String,
+    /// `entities.qualified_name` — fully-qualified identifier
+    /// (`module::path::Symbol`) when known.  Nullable because some
+    /// `entities.kind` values (e.g. `"file"`) don't have a qualified
+    /// name.  Participates in the `UNIQUE(qualified_name, file_path,
+    /// t_valid_from)` constraint at `INIT_SQL` line 125.
+    pub qualified_name: Option<String>,
+    /// `entities.file_path` — source-file path relative to the project
+    /// root.  Required (NOT NULL at the schema level).
+    pub file_path: String,
+    /// `entities.start_line` — 1-based inclusive start line.
+    pub start_line: Option<i64>,
+    /// `entities.end_line` — 1-based inclusive end line.
+    pub end_line: Option<i64>,
+    /// `entities.signature` — function/method signature or type
+    /// declaration when `kind` is a callable.
+    pub signature: Option<String>,
+    /// `entities.doc_comment` — attached rustdoc / `TSDoc` / docstring
+    /// when extraction is available.
+    pub doc_comment: Option<String>,
+    /// `entities.language` — ISO language tag or language-family name
+    /// (`"rust"`, `"python"`, `"typescript"`, ...).
+    pub language: Option<String>,
+    /// `entities.t_valid_from` — RFC-3339 timestamp (via
+    /// [`chrono::DateTime::to_rfc3339`]) of when the entity's facts
+    /// started being true in reality.  Nullable for facts with unknown
+    /// valid-time lower bound.
+    pub t_valid_from: Option<String>,
+    /// `entities.t_valid_to` — RFC-3339 timestamp of when the entity's
+    /// facts stopped being true.  `None` means "still valid".
+    pub t_valid_to: Option<String>,
+    /// `entities.importance` — 0.0..=1.0 fusion-layer hint; the schema
+    /// default is `0.5`.
+    pub importance: f64,
+    /// `entities.source_tool` — tool that produced the record
+    /// (`"tree-sitter"`, `"lsp"`, `"manual"`, ...).
+    pub source_tool: Option<String>,
+    /// `entities.source_hash` — content hash of the source span used at
+    /// extraction time, for staleness detection.
+    pub source_hash: Option<String>,
+}
+
+/// A row in the §12.1 `relations` table — a typed directed edge between
+/// two [`Entity`] rows.
+///
+/// `relations` has NO `UNIQUE` constraint in §12.1 — every call to
+/// [`KnowledgeGraph::upsert_relation`] appends a fresh row.  Callers
+/// that need dedup semantics must query first.
+///
+/// See master-plan §12.1 lines 1147-1156 for the schema.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Relation {
+    /// `relations.id` — `None` until inserted; `Some(rowid)` after
+    /// [`KnowledgeGraph::upsert_relation`] returns.
+    pub id: Option<i64>,
+    /// `relations.source_id` — the `entities.id` of the source vertex.
+    pub source_id: i64,
+    /// `relations.target_id` — the `entities.id` of the target vertex.
+    pub target_id: i64,
+    /// `relations.kind` — `"calls"`, `"imports"`, `"implements"`,
+    /// `"inherits"`, etc.  Free-form text; no enum constraint.
+    pub kind: String,
+    /// `relations.weight` — 0.0..=1.0 edge strength; the schema default
+    /// is `1.0`.
+    pub weight: f64,
+    /// `relations.t_valid_from` — RFC-3339 lower bound of validity, same
+    /// convention as [`Entity::t_valid_from`].
+    pub t_valid_from: Option<String>,
+    /// `relations.t_valid_to` — RFC-3339 upper bound of validity.
+    pub t_valid_to: Option<String>,
+    /// `relations.source_tool` — tool that produced the edge.
+    pub source_tool: Option<String>,
+    /// `relations.source_evidence` — free-form snippet / path / line
+    /// range documenting where the edge was inferred from.
+    pub source_evidence: Option<String>,
+    /// `relations.confidence` — 0.0..=1.0 fusion-layer hint; the schema
+    /// default is `0.8`.
+    pub confidence: f64,
+}
+
+/// A hot-tier observation staged for the merge-consolidator.
+///
+/// Written through [`KnowledgeGraph::stage_hot_observation`] so the
+/// insert goes through the `BEGIN IMMEDIATE` chokepoint
+/// (master-plan §11 line 1117) — the hot-staging tier is the most
+/// write-contended path in the UCIL pipeline and single-writer
+/// contention is the #1 source of `SQLITE_BUSY`.
+///
+/// Corresponds to the `hot_observations` row at `INIT_SQL` lines
+/// 190-198.  `created_at` and `promoted_to_warm` are managed by the
+/// schema default / consolidator and are not part of the writer
+/// contract.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HotObservation {
+    /// `hot_observations.raw_text` — the observation body; required.
+    pub raw_text: String,
+    /// `hot_observations.session_id` — id of the session that produced
+    /// the observation; optional for tool-side or offline batches.
+    pub session_id: Option<String>,
+    /// `hot_observations.related_file` — file path the observation
+    /// concerns, when known.
+    pub related_file: Option<String>,
+    /// `hot_observations.related_symbol` — symbol name the observation
+    /// concerns, when known.
+    pub related_symbol: Option<String>,
+}
+
+/// Checkpoint mode for [`KnowledgeGraph::checkpoint_wal`] — wraps
+/// `SQLite`'s `PRAGMA wal_checkpoint(<MODE>)`.
+///
+/// The Phase 1 Week 4 F08 hot-staging feature triggers a periodic
+/// checkpoint to bound WAL size under high insert pressure from the
+/// hot-tier writers; `Truncate` is the aggressive mode the scheduled
+/// sweep uses, `Passive` is the best-effort mode other call-sites use.
+///
+/// See the `SQLite` docs for `wal_checkpoint` for the full semantics of
+/// the four modes (`PASSIVE` / `FULL` / `RESTART` / `TRUNCATE`); UCIL
+/// only exposes the two relevant to the hot-staging sweep.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WalCheckpointMode {
+    /// `PASSIVE` — checkpoints as many frames as possible without
+    /// blocking any readers or writers; never returns `SQLITE_BUSY`.
+    /// The default mode for ad-hoc checkpoints.
+    Passive,
+    /// `TRUNCATE` — implies `RESTART` + truncates the WAL to zero
+    /// bytes; the aggressive mode the scheduled sweep uses to keep the
+    /// WAL file bounded.
+    Truncate,
+}
+
+impl WalCheckpointMode {
+    /// The string token `SQLite` expects inside
+    /// `PRAGMA wal_checkpoint(<MODE>)`.
+    #[must_use]
+    pub const fn as_sql(self) -> &'static str {
+        match self {
+            Self::Passive => "PASSIVE",
+            Self::Truncate => "TRUNCATE",
+        }
+    }
 }
 
 // ── Init DDL ──────────────────────────────────────────────────────────────────
@@ -438,6 +618,535 @@ impl KnowledgeGraph {
         tx.commit()?;
         Ok(out)
     }
+
+    // ── Entity CRUD ──────────────────────────────────────────────────
+    //
+    // Every writer routes through `execute_in_transaction` so the
+    // `BEGIN IMMEDIATE` invariant (§11 line 1117) is preserved.  The
+    // ON CONFLICT branch honours the
+    // `UNIQUE(qualified_name, file_path, t_valid_from)` constraint at
+    // `INIT_SQL` line 125: the second insert with the same triple
+    // returns the existing row's id via `RETURNING id`, bumps
+    // `access_count`, and refreshes `t_last_verified` — all in a single
+    // round-trip.
+
+    /// Upsert an [`Entity`] into the `entities` table.
+    ///
+    /// Issues
+    /// `INSERT INTO entities (...) VALUES (...) ON CONFLICT(qualified_name,
+    /// file_path, t_valid_from) DO UPDATE SET t_last_verified = datetime('now'),
+    /// access_count = access_count + 1 RETURNING id` so the caller gets
+    /// the inserted-or-updated rowid without a second `SELECT`.  Returns
+    /// the `entities.id` from whichever branch fired.
+    ///
+    /// The write routes through [`Self::execute_in_transaction`] and
+    /// therefore runs under `BEGIN IMMEDIATE` per master-plan §11 line
+    /// 1117 — the chokepoint that keeps every UCIL writer out of the
+    /// default `BEGIN DEFERRED` → lock-upgrade → `SQLITE_BUSY` trap.
+    ///
+    /// # Errors
+    ///
+    /// * [`KnowledgeGraphError::Sqlite`] — transaction open, statement
+    ///   prepare, parameter bind, or row return failed.
+    #[tracing::instrument(
+        level = "debug",
+        skip(self, entity),
+        fields(name = %entity.name),
+        name = "ucil.core.kg.upsert_entity",
+    )]
+    pub fn upsert_entity(&mut self, entity: &Entity) -> Result<i64, KnowledgeGraphError> {
+        self.execute_in_transaction(|tx| {
+            let mut stmt = tx.prepare(
+                "INSERT INTO entities (\
+                    kind, name, qualified_name, file_path, start_line, end_line, \
+                    signature, doc_comment, language, t_valid_from, t_valid_to, \
+                    importance, source_tool, source_hash\
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14) \
+                 ON CONFLICT(qualified_name, file_path, t_valid_from) DO UPDATE SET \
+                    t_last_verified = datetime('now'), \
+                    access_count = access_count + 1 \
+                 RETURNING id;",
+            )?;
+            let id: i64 = stmt.query_row(
+                rusqlite::params![
+                    entity.kind,
+                    entity.name,
+                    entity.qualified_name,
+                    entity.file_path,
+                    entity.start_line,
+                    entity.end_line,
+                    entity.signature,
+                    entity.doc_comment,
+                    entity.language,
+                    entity.t_valid_from,
+                    entity.t_valid_to,
+                    entity.importance,
+                    entity.source_tool,
+                    entity.source_hash,
+                ],
+                |row| row.get::<_, i64>(0),
+            )?;
+            Ok(id)
+        })
+    }
+
+    /// Look up the most recent [`Entity`] row by qualified name.
+    ///
+    /// When `file_path` is `Some(_)` the lookup is scoped to that file;
+    /// when `None` any file matches.  The query orders by
+    /// `t_ingested_at DESC LIMIT 1` so the caller always gets the
+    /// latest-ingested record (the bi-temporal
+    /// [`Self::get_entity_as_of`] helper is the right choice for
+    /// valid-time range queries).
+    ///
+    /// # Errors
+    ///
+    /// * [`KnowledgeGraphError::Sqlite`] — statement prepare, bind, or
+    ///   `query_row` failure.  Returns `Ok(None)` (not an error) when
+    ///   no row matches.
+    pub fn get_entity_by_qualified_name(
+        &self,
+        qualified_name: &str,
+        file_path: Option<&str>,
+    ) -> Result<Option<Entity>, KnowledgeGraphError> {
+        let sql = if file_path.is_some() {
+            "SELECT id, kind, name, qualified_name, file_path, start_line, end_line, \
+                    signature, doc_comment, language, t_valid_from, t_valid_to, \
+                    importance, source_tool, source_hash \
+             FROM entities \
+             WHERE qualified_name = ?1 AND file_path = ?2 \
+             ORDER BY t_ingested_at DESC LIMIT 1"
+        } else {
+            "SELECT id, kind, name, qualified_name, file_path, start_line, end_line, \
+                    signature, doc_comment, language, t_valid_from, t_valid_to, \
+                    importance, source_tool, source_hash \
+             FROM entities \
+             WHERE qualified_name = ?1 \
+             ORDER BY t_ingested_at DESC LIMIT 1"
+        };
+        let mut stmt = self.conn.prepare(sql)?;
+        let row_result = if let Some(path) = file_path {
+            stmt.query_row(rusqlite::params![qualified_name, path], entity_from_row)
+        } else {
+            stmt.query_row(rusqlite::params![qualified_name], entity_from_row)
+        };
+        Ok(row_result.map(Some).or_else(absent_to_none)?)
+    }
+
+    /// List all `entities` rows whose `file_path` matches, ordered by
+    /// `start_line` ascending.
+    ///
+    /// The document-order return matters for downstream formatters that
+    /// want to render a file's outline top-to-bottom; callers that need
+    /// a different order must sort themselves.
+    ///
+    /// # Errors
+    ///
+    /// * [`KnowledgeGraphError::Sqlite`] — statement prepare, bind, or
+    ///   iteration failure.
+    pub fn list_entities_by_file(
+        &self,
+        file_path: &str,
+    ) -> Result<Vec<Entity>, KnowledgeGraphError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, kind, name, qualified_name, file_path, start_line, end_line, \
+                    signature, doc_comment, language, t_valid_from, t_valid_to, \
+                    importance, source_tool, source_hash \
+             FROM entities \
+             WHERE file_path = ?1 \
+             ORDER BY start_line ASC, id ASC",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![file_path], entity_from_row)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    // ── Relation CRUD ────────────────────────────────────────────────
+    //
+    // `relations` has NO UNIQUE constraint in §12.1 — each call to
+    // `upsert_relation` appends a fresh row.  Name is kept as
+    // `upsert_*` for API symmetry with `upsert_entity` and to leave
+    // room for a future dedup pass; today the implementation is a
+    // pure insert.
+
+    /// Insert a [`Relation`] row.
+    ///
+    /// Routes through [`Self::execute_in_transaction`] so the write
+    /// respects the `BEGIN IMMEDIATE` chokepoint (§11 line 1117).
+    /// Returns the new `relations.id` via `RETURNING id`.
+    ///
+    /// # Errors
+    ///
+    /// * [`KnowledgeGraphError::Sqlite`] — transaction open, statement
+    ///   prepare, parameter bind, or row return failed.  Foreign-key
+    ///   violations on `source_id` / `target_id` (the columns
+    ///   `REFERENCES entities(id)` per §12.1) also flow through this
+    ///   variant.
+    #[tracing::instrument(
+        level = "debug",
+        skip(self, relation),
+        fields(kind = %relation.kind, source_id = relation.source_id, target_id = relation.target_id),
+        name = "ucil.core.kg.upsert_relation",
+    )]
+    pub fn upsert_relation(&mut self, relation: &Relation) -> Result<i64, KnowledgeGraphError> {
+        self.execute_in_transaction(|tx| {
+            let mut stmt = tx.prepare(
+                "INSERT INTO relations (\
+                    source_id, target_id, kind, weight, \
+                    t_valid_from, t_valid_to, \
+                    source_tool, source_evidence, confidence\
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) \
+                 RETURNING id;",
+            )?;
+            let id: i64 = stmt.query_row(
+                rusqlite::params![
+                    relation.source_id,
+                    relation.target_id,
+                    relation.kind,
+                    relation.weight,
+                    relation.t_valid_from,
+                    relation.t_valid_to,
+                    relation.source_tool,
+                    relation.source_evidence,
+                    relation.confidence,
+                ],
+                |row| row.get::<_, i64>(0),
+            )?;
+            Ok(id)
+        })
+    }
+
+    /// List every [`Relation`] row with the given `source_id`.
+    ///
+    /// Read-only — no transaction.  Returns rows in insertion order
+    /// (`id ASC`) so callers can reason about append-only arrival.
+    ///
+    /// # Errors
+    ///
+    /// * [`KnowledgeGraphError::Sqlite`] — statement prepare, bind, or
+    ///   iteration failure.
+    pub fn list_relations_by_source(
+        &self,
+        source_id: i64,
+    ) -> Result<Vec<Relation>, KnowledgeGraphError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, source_id, target_id, kind, weight, \
+                    t_valid_from, t_valid_to, \
+                    source_tool, source_evidence, confidence \
+             FROM relations \
+             WHERE source_id = ?1 \
+             ORDER BY id ASC",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![source_id], relation_from_row)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    // ── Bi-temporal reads ────────────────────────────────────────────
+    //
+    // `t_valid_from` / `t_valid_to` are TEXT columns in SQLite, and
+    // the comparison is lexicographic — which is fine as long as every
+    // writer encodes via `DateTime<Utc>::to_rfc3339()` and every reader
+    // compares via the same format.  Mixing RFC-3339 with
+    // `datetime('now')` (space separator) on the same range-queried
+    // column silently returns wrong rows (WO-0024 RCA §Non-negotiable
+    // invariant 5).
+
+    /// Return the [`Entity`] whose valid-time window contains `at`.
+    ///
+    /// Implements master-plan §12.2 bi-temporal semantics: the row's
+    /// valid-time window `[t_valid_from, t_valid_to)` is treated as
+    /// half-open (inclusive lower bound, exclusive upper bound); a
+    /// `t_valid_to` of `NULL` means "still valid".  When multiple rows
+    /// match (e.g. two overlapping versions of the same entity) the
+    /// one with the greatest `t_valid_from` wins — i.e. the most
+    /// recently started window.
+    ///
+    /// The `at` parameter is encoded via
+    /// [`chrono::DateTime::to_rfc3339`] so the TEXT string comparison
+    /// is lexicographically correct against any row written via the
+    /// `upsert_*` helpers.
+    ///
+    /// # Errors
+    ///
+    /// * [`KnowledgeGraphError::Sqlite`] — prepare, bind, or row-fetch
+    ///   failure.  `Ok(None)` (not an error) when no valid-time window
+    ///   contains `at`.
+    #[tracing::instrument(
+        level = "debug",
+        skip(self),
+        fields(qualified_name = %qualified_name, at = %at.to_rfc3339()),
+        name = "ucil.core.kg.get_entity_as_of",
+    )]
+    pub fn get_entity_as_of(
+        &self,
+        qualified_name: &str,
+        at: DateTime<Utc>,
+    ) -> Result<Option<Entity>, KnowledgeGraphError> {
+        let at_str = at.to_rfc3339();
+        let mut stmt = self.conn.prepare(
+            "SELECT id, kind, name, qualified_name, file_path, start_line, end_line, \
+                    signature, doc_comment, language, t_valid_from, t_valid_to, \
+                    importance, source_tool, source_hash \
+             FROM entities \
+             WHERE qualified_name = ?1 \
+               AND t_valid_from <= ?2 \
+               AND (t_valid_to IS NULL OR t_valid_to > ?2) \
+             ORDER BY t_valid_from DESC \
+             LIMIT 1",
+        )?;
+        let row_result = stmt.query_row(rusqlite::params![qualified_name, at_str], entity_from_row);
+        Ok(row_result.map(Some).or_else(absent_to_none)?)
+    }
+
+    // ── Hot-staging writers (P1-W4-F08) ─────────────────────────────
+    //
+    // Routes every hot-tier insert through `execute_in_transaction`
+    // (BEGIN IMMEDIATE per master-plan §11 line 1117) so the
+    // merge-consolidator's background sweep doesn't collide with
+    // concurrent producer writes.
+
+    /// Stage a [`HotObservation`] into the `hot_observations` table.
+    ///
+    /// `created_at` is set by the schema default (`datetime('now')`)
+    /// and `promoted_to_warm` starts at `0`; both are managed by the
+    /// merge-consolidator and are not part of the writer contract.
+    /// Returns the new `hot_observations.id`.
+    ///
+    /// # Errors
+    ///
+    /// * [`KnowledgeGraphError::Sqlite`] — transaction open, statement
+    ///   prepare, bind, or `RETURNING id` fetch failed.
+    #[tracing::instrument(
+        level = "debug",
+        skip(self, observation),
+        fields(session_id = observation.session_id.as_deref().unwrap_or("")),
+        name = "ucil.core.kg.stage_hot_observation",
+    )]
+    pub fn stage_hot_observation(
+        &mut self,
+        observation: &HotObservation,
+    ) -> Result<i64, KnowledgeGraphError> {
+        self.execute_in_transaction(|tx| {
+            let mut stmt = tx.prepare(
+                "INSERT INTO hot_observations (\
+                    raw_text, session_id, related_file, related_symbol\
+                 ) VALUES (?1, ?2, ?3, ?4) \
+                 RETURNING id;",
+            )?;
+            let id: i64 = stmt.query_row(
+                rusqlite::params![
+                    observation.raw_text,
+                    observation.session_id,
+                    observation.related_file,
+                    observation.related_symbol,
+                ],
+                |row| row.get::<_, i64>(0),
+            )?;
+            Ok(id)
+        })
+    }
+
+    /// Stage a convention-signal hit into `hot_convention_signals`.
+    ///
+    /// `pattern_hash` is the stable hash of the convention matcher
+    /// (produced by the convention-learner layer that lands in a later
+    /// phase); `file_path` is the source file that tripped the matcher;
+    /// `example_snippet` is an optional excerpt for later human review.
+    /// `created_at` and `promoted` are owned by the schema default and
+    /// the merge-consolidator respectively.  Returns the new
+    /// `hot_convention_signals.id`.
+    ///
+    /// # Errors
+    ///
+    /// * [`KnowledgeGraphError::Sqlite`] — transaction open, statement
+    ///   prepare, bind, or `RETURNING id` fetch failed.
+    #[tracing::instrument(
+        level = "debug",
+        skip(self),
+        fields(pattern_hash = %pattern_hash, file_path = %file_path),
+        name = "ucil.core.kg.stage_hot_convention_signal",
+    )]
+    pub fn stage_hot_convention_signal(
+        &mut self,
+        pattern_hash: &str,
+        file_path: &str,
+        example_snippet: Option<&str>,
+    ) -> Result<i64, KnowledgeGraphError> {
+        self.execute_in_transaction(|tx| {
+            let mut stmt = tx.prepare(
+                "INSERT INTO hot_convention_signals (\
+                    pattern_hash, file_path, example_snippet\
+                 ) VALUES (?1, ?2, ?3) \
+                 RETURNING id;",
+            )?;
+            let id: i64 = stmt.query_row(
+                rusqlite::params![pattern_hash, file_path, example_snippet],
+                |row| row.get::<_, i64>(0),
+            )?;
+            Ok(id)
+        })
+    }
+
+    /// Stage an architecture-delta record into
+    /// `hot_architecture_deltas`.
+    ///
+    /// `change_type` is a short classifier (e.g. `"module_split"`,
+    /// `"dep_added"`); `file_path` is the file the change touches;
+    /// `details` is optional free-form context.  `created_at` and
+    /// `promoted` are owned by the schema default and the merge-
+    /// consolidator respectively.  Returns the new
+    /// `hot_architecture_deltas.id`.
+    ///
+    /// # Errors
+    ///
+    /// * [`KnowledgeGraphError::Sqlite`] — transaction open, statement
+    ///   prepare, bind, or `RETURNING id` fetch failed.
+    #[tracing::instrument(
+        level = "debug",
+        skip(self),
+        fields(change_type = %change_type, file_path = %file_path),
+        name = "ucil.core.kg.stage_hot_architecture_delta",
+    )]
+    pub fn stage_hot_architecture_delta(
+        &mut self,
+        change_type: &str,
+        file_path: &str,
+        details: Option<&str>,
+    ) -> Result<i64, KnowledgeGraphError> {
+        self.execute_in_transaction(|tx| {
+            let mut stmt = tx.prepare(
+                "INSERT INTO hot_architecture_deltas (\
+                    change_type, file_path, details\
+                 ) VALUES (?1, ?2, ?3) \
+                 RETURNING id;",
+            )?;
+            let id: i64 = stmt
+                .query_row(rusqlite::params![change_type, file_path, details], |row| {
+                    row.get::<_, i64>(0)
+                })?;
+            Ok(id)
+        })
+    }
+
+    // ── WAL checkpoint (P1-W4-F02 supporting primitive) ─────────────
+    //
+    // Exposes `PRAGMA wal_checkpoint(<MODE>)` as a typed method so the
+    // merge-consolidator's sweep loop — and ad-hoc shutdown code — can
+    // bound the WAL file size without hand-building PRAGMA strings at
+    // call sites.  Routing through a typed enum also enforces the
+    // master-plan §11 line 1117 invariant that only the documented
+    // checkpoint modes are used.
+
+    /// Run `PRAGMA wal_checkpoint(<MODE>)` against the underlying
+    /// connection and return the three-tuple `(busy, log, checkpointed)`
+    /// the pragma reports — matching the `SQLite` column order.
+    ///
+    /// * `busy` — `1` if the pragma could not complete because another
+    ///   connection was writing; `0` otherwise.
+    /// * `log` — number of frames currently in the WAL file (after the
+    ///   pragma runs).
+    /// * `checkpointed` — number of frames successfully moved from the
+    ///   WAL into the main database by this call.
+    ///
+    /// `WalCheckpointMode::Truncate` additionally shrinks the WAL file
+    /// to zero bytes on success, which is the mode the scheduled sweep
+    /// uses to keep on-disk state bounded.
+    ///
+    /// # Errors
+    ///
+    /// * [`KnowledgeGraphError::Sqlite`] — the `PRAGMA` failed, the row
+    ///   shape was unexpected, or the connection was poisoned.
+    #[tracing::instrument(
+        level = "debug",
+        skip(self),
+        fields(mode = %mode.as_sql()),
+        name = "ucil.core.kg.checkpoint_wal",
+    )]
+    pub fn checkpoint_wal(
+        &self,
+        mode: WalCheckpointMode,
+    ) -> Result<(i64, i64, i64), KnowledgeGraphError> {
+        // PRAGMA wal_checkpoint cannot be bound with `?N` parameters —
+        // the mode is part of the pragma syntax — so we format the
+        // token in.  `mode.as_sql()` returns one of two hard-coded
+        // `&'static str`s so there is no injection surface.
+        let sql = format!("PRAGMA wal_checkpoint({});", mode.as_sql());
+        let tuple = self.conn.query_row(&sql, [], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })?;
+        Ok(tuple)
+    }
+}
+
+// ── Row decoders ─────────────────────────────────────────────────────────────
+//
+// Free functions rather than `impl`s so `query_row` / `query_map`
+// callers can pass them directly — rusqlite's closure signature is
+// `FnMut(&Row<'_>) -> rusqlite::Result<T>` and free functions coerce
+// cleanly.
+
+/// Read an [`Entity`] row from a `SELECT id, kind, name, qualified_name,
+/// file_path, start_line, end_line, signature, doc_comment, language,
+/// t_valid_from, t_valid_to, importance, source_tool, source_hash`
+/// statement (exact column order).
+fn entity_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Entity> {
+    Ok(Entity {
+        id: row.get::<_, Option<i64>>(0)?,
+        kind: row.get::<_, String>(1)?,
+        name: row.get::<_, String>(2)?,
+        qualified_name: row.get::<_, Option<String>>(3)?,
+        file_path: row.get::<_, String>(4)?,
+        start_line: row.get::<_, Option<i64>>(5)?,
+        end_line: row.get::<_, Option<i64>>(6)?,
+        signature: row.get::<_, Option<String>>(7)?,
+        doc_comment: row.get::<_, Option<String>>(8)?,
+        language: row.get::<_, Option<String>>(9)?,
+        t_valid_from: row.get::<_, Option<String>>(10)?,
+        t_valid_to: row.get::<_, Option<String>>(11)?,
+        importance: row.get::<_, f64>(12)?,
+        source_tool: row.get::<_, Option<String>>(13)?,
+        source_hash: row.get::<_, Option<String>>(14)?,
+    })
+}
+
+/// Read a [`Relation`] row from a `SELECT id, source_id, target_id,
+/// kind, weight, t_valid_from, t_valid_to, source_tool,
+/// source_evidence, confidence` statement (exact column order).
+fn relation_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Relation> {
+    Ok(Relation {
+        id: row.get::<_, Option<i64>>(0)?,
+        source_id: row.get::<_, i64>(1)?,
+        target_id: row.get::<_, i64>(2)?,
+        kind: row.get::<_, String>(3)?,
+        weight: row.get::<_, f64>(4)?,
+        t_valid_from: row.get::<_, Option<String>>(5)?,
+        t_valid_to: row.get::<_, Option<String>>(6)?,
+        source_tool: row.get::<_, Option<String>>(7)?,
+        source_evidence: row.get::<_, Option<String>>(8)?,
+        confidence: row.get::<_, f64>(9)?,
+    })
+}
+
+/// Convert a `QueryReturnedNoRows` into `Ok(None)` so the read helpers
+/// can distinguish "absent" from "SQL error".  Any other error flows
+/// through.
+fn absent_to_none<T>(err: rusqlite::Error) -> Result<Option<T>, rusqlite::Error> {
+    if matches!(err, rusqlite::Error::QueryReturnedNoRows) {
+        Ok(None)
+    } else {
+        Err(err)
+    }
 }
 
 // ── Module-level acceptance test ─────────────────────────────────────────────
@@ -596,4 +1305,626 @@ fn test_schema_creation() {
         )
         .expect("the pre-reopen session row must persist");
     assert_eq!(session_id, "wo-0011-test-session");
+}
+
+// ── Entity CRUD tests ────────────────────────────────────────────────────────
+//
+// Module-root placement (no `mod tests { }`) per DEC-0005 and the
+// frozen selector `knowledge_graph::test_*` — see
+// `test_schema_creation` above as the precedent WO-0011 established.
+
+/// `test_upsert_and_get_entity` — round-trip an `Entity` through
+/// `upsert_entity` + `get_entity_by_qualified_name` and assert every
+/// field survives.
+#[cfg(test)]
+#[test]
+fn test_upsert_and_get_entity() {
+    use tempfile::TempDir;
+
+    let tmp = TempDir::new().expect("tempdir must be creatable");
+    let mut kg = KnowledgeGraph::open(&tmp.path().join("kg.db"))
+        .expect("KnowledgeGraph::open must succeed on fresh tempfile");
+
+    let entity = Entity {
+        id: None,
+        kind: "function".to_owned(),
+        name: "render".to_owned(),
+        qualified_name: Some("app::view::render".to_owned()),
+        file_path: "src/app/view.rs".to_owned(),
+        start_line: Some(42),
+        end_line: Some(97),
+        signature: Some("fn render(ctx: &Ctx) -> Html".to_owned()),
+        doc_comment: Some("Render a page.".to_owned()),
+        language: Some("rust".to_owned()),
+        t_valid_from: Some("2026-04-18T00:00:00+00:00".to_owned()),
+        t_valid_to: None,
+        importance: 0.75,
+        source_tool: Some("tree-sitter".to_owned()),
+        source_hash: Some("deadbeef".to_owned()),
+    };
+    let id = kg
+        .upsert_entity(&entity)
+        .expect("first upsert must succeed");
+    assert!(id > 0, "RETURNING id must produce a positive rowid");
+
+    let fetched = kg
+        .get_entity_by_qualified_name("app::view::render", Some("src/app/view.rs"))
+        .expect("read must succeed")
+        .expect("row must be present after upsert");
+
+    assert_eq!(fetched.id, Some(id));
+    assert_eq!(fetched.kind, entity.kind);
+    assert_eq!(fetched.name, entity.name);
+    assert_eq!(fetched.qualified_name, entity.qualified_name);
+    assert_eq!(fetched.file_path, entity.file_path);
+    assert_eq!(fetched.start_line, entity.start_line);
+    assert_eq!(fetched.end_line, entity.end_line);
+    assert_eq!(fetched.signature, entity.signature);
+    assert_eq!(fetched.doc_comment, entity.doc_comment);
+    assert_eq!(fetched.language, entity.language);
+    assert_eq!(fetched.t_valid_from, entity.t_valid_from);
+    assert_eq!(fetched.t_valid_to, entity.t_valid_to);
+    assert!(
+        (fetched.importance - entity.importance).abs() < 1e-9,
+        "importance round-trips as f64",
+    );
+    assert_eq!(fetched.source_tool, entity.source_tool);
+    assert_eq!(fetched.source_hash, entity.source_hash);
+
+    // The `file_path=None` lookup form also resolves.
+    let fetched_any = kg
+        .get_entity_by_qualified_name("app::view::render", None)
+        .expect("read must succeed")
+        .expect("row must be present in any-file lookup");
+    assert_eq!(fetched_any.id, Some(id));
+
+    // Negative path: absent qualified_name returns Ok(None), not error.
+    let missing = kg
+        .get_entity_by_qualified_name("app::view::missing", None)
+        .expect("missing row must be Ok(None)");
+    assert!(missing.is_none(), "absent qualified_name must be None");
+}
+
+/// `test_list_entities_by_file` — insert 3 rows in the same file with
+/// ascending `start_line`, assert `list_entities_by_file` returns them
+/// in document order.
+#[cfg(test)]
+#[test]
+fn test_list_entities_by_file() {
+    use tempfile::TempDir;
+
+    let tmp = TempDir::new().expect("tempdir must be creatable");
+    let mut kg =
+        KnowledgeGraph::open(&tmp.path().join("kg.db")).expect("KnowledgeGraph::open must succeed");
+
+    let file_path = "src/pipeline.rs".to_owned();
+    let rows = [
+        (10_i64, "parse", "pipeline::parse"),
+        (40_i64, "lint", "pipeline::lint"),
+        (80_i64, "emit", "pipeline::emit"),
+    ];
+    for (line, name, qname) in &rows {
+        let e = Entity {
+            id: None,
+            kind: "function".to_owned(),
+            name: (*name).to_owned(),
+            qualified_name: Some((*qname).to_owned()),
+            file_path: file_path.clone(),
+            start_line: Some(*line),
+            end_line: Some(*line + 5),
+            signature: None,
+            doc_comment: None,
+            language: Some("rust".to_owned()),
+            t_valid_from: Some("2026-04-18T00:00:00+00:00".to_owned()),
+            t_valid_to: None,
+            importance: 0.5,
+            source_tool: None,
+            source_hash: None,
+        };
+        kg.upsert_entity(&e).expect("upsert must succeed");
+    }
+
+    let listed = kg
+        .list_entities_by_file(&file_path)
+        .expect("list must succeed");
+    assert_eq!(listed.len(), 3, "all three rows returned");
+    let names: Vec<&str> = listed.iter().map(|e| e.name.as_str()).collect();
+    assert_eq!(
+        names,
+        vec!["parse", "lint", "emit"],
+        "rows returned in start_line ASC order",
+    );
+
+    // A file with no entities returns an empty vec, not an error.
+    let none = kg
+        .list_entities_by_file("does/not/exist.rs")
+        .expect("list for absent file must succeed");
+    assert!(none.is_empty(), "absent file yields empty vec");
+}
+
+/// `test_entity_unique_constraint_updates` — inserting the same
+/// `(qualified_name, file_path, t_valid_from)` triple twice hits the
+/// `ON CONFLICT DO UPDATE` branch: the second call returns the SAME
+/// `id`, bumps `access_count`, and refreshes `t_last_verified`.
+#[cfg(test)]
+#[test]
+fn test_entity_unique_constraint_updates() {
+    use tempfile::TempDir;
+
+    let tmp = TempDir::new().expect("tempdir must be creatable");
+    let mut kg =
+        KnowledgeGraph::open(&tmp.path().join("kg.db")).expect("KnowledgeGraph::open must succeed");
+
+    let entity = Entity {
+        id: None,
+        kind: "function".to_owned(),
+        name: "handle".to_owned(),
+        qualified_name: Some("api::handle".to_owned()),
+        file_path: "src/api.rs".to_owned(),
+        start_line: Some(10),
+        end_line: Some(25),
+        signature: None,
+        doc_comment: None,
+        language: Some("rust".to_owned()),
+        t_valid_from: Some("2026-04-18T00:00:00+00:00".to_owned()),
+        t_valid_to: None,
+        importance: 0.5,
+        source_tool: None,
+        source_hash: None,
+    };
+
+    let id1 = kg.upsert_entity(&entity).expect("first upsert");
+    let id2 = kg
+        .upsert_entity(&entity)
+        .expect("second upsert must hit ON CONFLICT");
+    assert_eq!(id1, id2, "ON CONFLICT DO UPDATE preserves the rowid");
+
+    // `access_count` bumped.
+    let count: i64 = kg
+        .conn()
+        .query_row(
+            "SELECT access_count FROM entities WHERE id = ?1;",
+            rusqlite::params![id1],
+            |row| row.get::<_, i64>(0),
+        )
+        .expect("access_count read must succeed");
+    assert!(
+        count >= 1,
+        "access_count must be incremented on conflict (got {count})",
+    );
+
+    // `t_last_verified` set.
+    let tlv: Option<String> = kg
+        .conn()
+        .query_row(
+            "SELECT t_last_verified FROM entities WHERE id = ?1;",
+            rusqlite::params![id1],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .expect("t_last_verified read must succeed");
+    assert!(
+        tlv.is_some() && !tlv.as_deref().unwrap_or("").is_empty(),
+        "ON CONFLICT DO UPDATE must set t_last_verified (got {tlv:?})",
+    );
+
+    // Third upsert bumps `access_count` again.
+    kg.upsert_entity(&entity).expect("third upsert");
+    let count3: i64 = kg
+        .conn()
+        .query_row(
+            "SELECT access_count FROM entities WHERE id = ?1;",
+            rusqlite::params![id1],
+            |row| row.get::<_, i64>(0),
+        )
+        .expect("access_count read must succeed");
+    assert!(
+        count3 > count,
+        "access_count monotonic across conflicts (was {count}, now {count3})",
+    );
+}
+
+/// `test_upsert_relation_and_list` — insert 2 entities + 1 relation
+/// between them, assert `list_relations_by_source` returns the single
+/// relation with all fields intact.
+#[cfg(test)]
+#[test]
+fn test_upsert_relation_and_list() {
+    use tempfile::TempDir;
+
+    let tmp = TempDir::new().expect("tempdir must be creatable");
+    let mut kg =
+        KnowledgeGraph::open(&tmp.path().join("kg.db")).expect("KnowledgeGraph::open must succeed");
+
+    let make_entity = |name: &str, qname: &str| Entity {
+        id: None,
+        kind: "function".to_owned(),
+        name: name.to_owned(),
+        qualified_name: Some(qname.to_owned()),
+        file_path: "src/graph.rs".to_owned(),
+        start_line: Some(1),
+        end_line: Some(10),
+        signature: None,
+        doc_comment: None,
+        language: Some("rust".to_owned()),
+        t_valid_from: Some("2026-04-18T00:00:00+00:00".to_owned()),
+        t_valid_to: None,
+        importance: 0.5,
+        source_tool: None,
+        source_hash: None,
+    };
+    let src_id = kg
+        .upsert_entity(&make_entity("caller", "graph::caller"))
+        .expect("source entity upsert must succeed");
+    let tgt_id = kg
+        .upsert_entity(&make_entity("callee", "graph::callee"))
+        .expect("target entity upsert must succeed");
+
+    let relation = Relation {
+        id: None,
+        source_id: src_id,
+        target_id: tgt_id,
+        kind: "calls".to_owned(),
+        weight: 0.9,
+        t_valid_from: Some("2026-04-18T00:00:00+00:00".to_owned()),
+        t_valid_to: None,
+        source_tool: Some("tree-sitter".to_owned()),
+        source_evidence: Some("src/graph.rs:7".to_owned()),
+        confidence: 0.95,
+    };
+    let rel_id = kg
+        .upsert_relation(&relation)
+        .expect("relation upsert must succeed");
+    assert!(rel_id > 0, "RETURNING id must be positive");
+
+    let listed = kg
+        .list_relations_by_source(src_id)
+        .expect("list_relations_by_source must succeed");
+    assert_eq!(listed.len(), 1, "exactly one relation was inserted");
+    let fetched = &listed[0];
+    assert_eq!(fetched.id, Some(rel_id));
+    assert_eq!(fetched.source_id, src_id);
+    assert_eq!(fetched.target_id, tgt_id);
+    assert_eq!(fetched.kind, relation.kind);
+    assert!(
+        (fetched.weight - relation.weight).abs() < 1e-9,
+        "weight round-trips as f64",
+    );
+    assert_eq!(fetched.t_valid_from, relation.t_valid_from);
+    assert_eq!(fetched.t_valid_to, relation.t_valid_to);
+    assert_eq!(fetched.source_tool, relation.source_tool);
+    assert_eq!(fetched.source_evidence, relation.source_evidence);
+    assert!(
+        (fetched.confidence - relation.confidence).abs() < 1e-9,
+        "confidence round-trips as f64",
+    );
+
+    // No UNIQUE constraint — a second insert appends a fresh row.
+    kg.upsert_relation(&relation)
+        .expect("second insert appends");
+    let listed2 = kg
+        .list_relations_by_source(src_id)
+        .expect("second list must succeed");
+    assert_eq!(
+        listed2.len(),
+        2,
+        "relations has no UNIQUE; second insert appends",
+    );
+
+    // A source id with no edges returns an empty vec.
+    let empty = kg
+        .list_relations_by_source(9_999_999)
+        .expect("empty list must be Ok");
+    assert!(empty.is_empty(), "absent source_id yields empty vec");
+}
+
+/// `test_bi_temporal_as_of` — insert three rows for the same
+/// `qualified_name` with staggered `t_valid_from` / `t_valid_to`, query
+/// `get_entity_as_of` at different instants, assert the correct
+/// version is returned.
+#[cfg(test)]
+#[test]
+fn test_bi_temporal_as_of() {
+    use chrono::TimeZone;
+    use tempfile::TempDir;
+
+    let tmp = TempDir::new().expect("tempdir must be creatable");
+    let mut kg =
+        KnowledgeGraph::open(&tmp.path().join("kg.db")).expect("KnowledgeGraph::open must succeed");
+
+    // Three valid-time windows on the same qualified_name:
+    //
+    //   row-1: [2020-01-01, 2022-01-01)
+    //   row-2: [2022-01-01, 2024-01-01)
+    //   row-3: [2024-01-01, NULL)          ← still valid
+    //
+    // Each row lives in a different file_path so the
+    // UNIQUE(qualified_name, file_path, t_valid_from) constraint
+    // doesn't collapse them — and the bi-temporal query returns the
+    // version whose window contains the query instant regardless of
+    // which file_path it lives in.
+    let make_row = |file: &str, from: &str, to: Option<&str>, signature: &str| Entity {
+        id: None,
+        kind: "function".to_owned(),
+        name: "authenticate".to_owned(),
+        qualified_name: Some("api::authenticate".to_owned()),
+        file_path: file.to_owned(),
+        start_line: Some(1),
+        end_line: Some(20),
+        signature: Some(signature.to_owned()),
+        doc_comment: None,
+        language: Some("rust".to_owned()),
+        t_valid_from: Some(from.to_owned()),
+        t_valid_to: to.map(str::to_owned),
+        importance: 0.5,
+        source_tool: None,
+        source_hash: None,
+    };
+    kg.upsert_entity(&make_row(
+        "src/api.rs",
+        "2020-01-01T00:00:00+00:00",
+        Some("2022-01-01T00:00:00+00:00"),
+        "fn authenticate(user: &str)",
+    ))
+    .expect("row-1 upsert");
+    kg.upsert_entity(&make_row(
+        "src/api/v2.rs",
+        "2022-01-01T00:00:00+00:00",
+        Some("2024-01-01T00:00:00+00:00"),
+        "fn authenticate(user: &str, password: &str)",
+    ))
+    .expect("row-2 upsert");
+    kg.upsert_entity(&make_row(
+        "src/api/v3.rs",
+        "2024-01-01T00:00:00+00:00",
+        None,
+        "fn authenticate(creds: &Creds) -> Result<User, AuthError>",
+    ))
+    .expect("row-3 upsert");
+
+    // Query between row-2 and row-3 (2023-06-15) — expect row-2.
+    let t_mid = Utc
+        .with_ymd_and_hms(2023, 6, 15, 0, 0, 0)
+        .single()
+        .expect("2023-06-15 must be a valid UTC instant");
+    let hit_mid = kg
+        .get_entity_as_of("api::authenticate", t_mid)
+        .expect("as_of must succeed")
+        .expect("row-2's window contains 2023-06-15");
+    assert_eq!(
+        hit_mid.signature.as_deref(),
+        Some("fn authenticate(user: &str, password: &str)"),
+        "expected row-2 (v2) at t=2023-06-15, got {:?}",
+        hit_mid.signature,
+    );
+    assert_eq!(hit_mid.file_path, "src/api/v2.rs");
+
+    // Query after row-3 started (2025-03-01) — expect row-3 (open
+    // window, `t_valid_to IS NULL`).
+    let t_now = Utc
+        .with_ymd_and_hms(2025, 3, 1, 0, 0, 0)
+        .single()
+        .expect("2025-03-01 must be valid");
+    let hit_now = kg
+        .get_entity_as_of("api::authenticate", t_now)
+        .expect("as_of must succeed")
+        .expect("row-3's open window covers 2025-03-01");
+    assert_eq!(
+        hit_now.signature.as_deref(),
+        Some("fn authenticate(creds: &Creds) -> Result<User, AuthError>"),
+        "expected row-3 (v3) at t=2025-03-01, got {:?}",
+        hit_now.signature,
+    );
+    assert_eq!(hit_now.file_path, "src/api/v3.rs");
+
+    // Query at row-1's lower bound (2020-01-01) — expect row-1
+    // (inclusive lower bound).
+    let t_early = Utc
+        .with_ymd_and_hms(2020, 1, 1, 0, 0, 0)
+        .single()
+        .expect("2020-01-01 must be valid");
+    let hit_early = kg
+        .get_entity_as_of("api::authenticate", t_early)
+        .expect("as_of must succeed")
+        .expect("row-1's window includes its lower bound");
+    assert_eq!(hit_early.file_path, "src/api.rs");
+
+    // Query before all rows (1999-01-01) — expect None.
+    let t_before = Utc
+        .with_ymd_and_hms(1999, 1, 1, 0, 0, 0)
+        .single()
+        .expect("1999-01-01 must be valid");
+    let miss = kg
+        .get_entity_as_of("api::authenticate", t_before)
+        .expect("as_of must succeed");
+    assert!(
+        miss.is_none(),
+        "pre-1999 has no valid version, got {miss:?}",
+    );
+}
+
+/// `test_hot_staging_writes` — **frozen F08 acceptance selector**
+/// (`knowledge_graph::test_hot_staging_writes`).
+///
+/// Exercises all three hot-staging writers introduced by WO-0024
+/// (P1-W4-F08): [`KnowledgeGraph::stage_hot_observation`],
+/// [`KnowledgeGraph::stage_hot_convention_signal`], and
+/// [`KnowledgeGraph::stage_hot_architecture_delta`].  All three write
+/// through `execute_in_transaction` and so satisfy the master-plan §11
+/// line 1117 `BEGIN IMMEDIATE` invariant.
+///
+/// Per the WO `scope_in` contract: each staging helper is called once,
+/// and each table is then count-checked back through
+/// `self.conn.query_row("SELECT COUNT(*) FROM <tbl>", …)` to assert
+/// the row landed in its owning table (not cross-table).
+///
+/// No mocks of rusqlite — the test runs against a real tempfile-backed
+/// `SQLite` db via `tempfile::TempDir` per phase-log invariant 1.
+#[cfg(test)]
+#[test]
+fn test_hot_staging_writes() {
+    use tempfile::TempDir;
+
+    let tmp = TempDir::new().expect("tempdir must be creatable");
+    let mut kg =
+        KnowledgeGraph::open(&tmp.path().join("kg.db")).expect("KnowledgeGraph::open must succeed");
+
+    // ── hot_observations ────────────────────────────────────────────
+    let obs = HotObservation {
+        raw_text: "the daemon logged a retry on SIGHUP at 12:04".to_owned(),
+        session_id: Some("sess-001".to_owned()),
+        related_file: Some("crates/ucil-daemon/src/signals.rs".to_owned()),
+        related_symbol: Some("handle_sighup".to_owned()),
+    };
+    let obs_id = kg
+        .stage_hot_observation(&obs)
+        .expect("stage_hot_observation must succeed");
+    assert!(
+        obs_id > 0,
+        "RETURNING id on hot_observations must be positive (got {obs_id})",
+    );
+
+    // ── hot_convention_signals ──────────────────────────────────────
+    let conv_id = kg
+        .stage_hot_convention_signal(
+            "sha256:abc123",
+            "crates/ucil-core/src/knowledge_graph.rs",
+            Some("fn stage_hot_observation(…) { … }"),
+        )
+        .expect("stage_hot_convention_signal must succeed");
+    assert!(
+        conv_id > 0,
+        "RETURNING id on hot_convention_signals must be positive (got {conv_id})",
+    );
+
+    // ── hot_architecture_deltas ─────────────────────────────────────
+    let arch_id = kg
+        .stage_hot_architecture_delta(
+            "module_split",
+            "crates/ucil-core/src/knowledge_graph.rs",
+            Some("split hot-staging writers into their own section"),
+        )
+        .expect("stage_hot_architecture_delta must succeed");
+    assert!(
+        arch_id > 0,
+        "RETURNING id on hot_architecture_deltas must be positive (got {arch_id})",
+    );
+
+    // ── per-table count assertions ──────────────────────────────────
+    //
+    // Confirm each row landed in its owning table (and nowhere else) —
+    // catches a cross-table INSERT typo in the three stagers above.
+    let obs_count: i64 = kg
+        .conn()
+        .query_row("SELECT COUNT(*) FROM hot_observations;", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .expect("COUNT(hot_observations) must succeed");
+    assert_eq!(obs_count, 1, "exactly one hot_observations row inserted");
+
+    let conv_count: i64 = kg
+        .conn()
+        .query_row("SELECT COUNT(*) FROM hot_convention_signals;", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .expect("COUNT(hot_convention_signals) must succeed");
+    assert_eq!(
+        conv_count, 1,
+        "exactly one hot_convention_signals row inserted",
+    );
+
+    let arch_count: i64 = kg
+        .conn()
+        .query_row("SELECT COUNT(*) FROM hot_architecture_deltas;", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .expect("COUNT(hot_architecture_deltas) must succeed");
+    assert_eq!(
+        arch_count, 1,
+        "exactly one hot_architecture_deltas row inserted",
+    );
+}
+
+/// `test_wal_checkpoint_truncates` — acceptance test for the WAL
+/// checkpoint primitive that underpins the merge-consolidator's
+/// scheduled sweep (P1-W4-F02).
+///
+/// Drives the db through a real write workload so the WAL file has
+/// frames to checkpoint, then calls
+/// [`KnowledgeGraph::checkpoint_wal`] with both modes and asserts:
+///
+/// 1. `Passive` returns a non-busy tuple (`busy == 0`) — nobody else
+///    holds a write lock in a single-threaded test.
+/// 2. `Truncate` returns a non-busy tuple AND the `kg.db-wal` file on
+///    disk shrinks to zero bytes (the defining behaviour of
+///    `TRUNCATE` vs. `PASSIVE` / `FULL` / `RESTART`).
+///
+/// No mocks of rusqlite or `SQLite` — the test runs against a real
+/// tempfile-backed db.
+#[cfg(test)]
+#[test]
+fn test_wal_checkpoint_truncates() {
+    use tempfile::TempDir;
+
+    let tmp = TempDir::new().expect("tempdir must be creatable");
+    let db_path = tmp.path().join("kg.db");
+    let wal_path = tmp.path().join("kg.db-wal");
+
+    let mut kg = KnowledgeGraph::open(&db_path).expect("KnowledgeGraph::open must succeed");
+
+    // Drive a real write workload through `execute_in_transaction` so
+    // the WAL file accumulates frames.  Without any writes the WAL is
+    // already empty and a TRUNCATE checkpoint is indistinguishable
+    // from a no-op.
+    for i in 0..10 {
+        kg.execute_in_transaction(|tx| {
+            tx.execute(
+                "INSERT INTO sessions (id, agent_id, branch) \
+                 VALUES (?1, 'wal-truncate-test', 'main');",
+                rusqlite::params![format!("sess-{i:03}")],
+            )?;
+            Ok(())
+        })
+        .expect("workload insert must succeed");
+    }
+
+    // Assert the WAL exists on disk and has non-zero size.  (Ext4
+    // reports the WAL file as soon as the first write frame is
+    // appended; WAL2 / bigfile-WAL configurations still create it.)
+    let wal_size_before = std::fs::metadata(&wal_path)
+        .expect("kg.db-wal must exist after a workload")
+        .len();
+    assert!(
+        wal_size_before > 0,
+        "expected non-empty WAL before TRUNCATE checkpoint, got {wal_size_before} bytes",
+    );
+
+    // ── PASSIVE ─────────────────────────────────────────────────────
+    //
+    // Single-threaded test → no concurrent writer → `busy == 0`.
+    let (busy_p, _log_p, _ckpt_p) = kg
+        .checkpoint_wal(WalCheckpointMode::Passive)
+        .expect("PASSIVE checkpoint must succeed");
+    assert_eq!(
+        busy_p, 0,
+        "PASSIVE checkpoint must not report BUSY in a single-threaded test (got {busy_p})",
+    );
+
+    // ── TRUNCATE ────────────────────────────────────────────────────
+    //
+    // TRUNCATE is the defining behaviour: after a successful call the
+    // WAL file is zero-length on disk.
+    let (busy_t, _log_t, _ckpt_t) = kg
+        .checkpoint_wal(WalCheckpointMode::Truncate)
+        .expect("TRUNCATE checkpoint must succeed");
+    assert_eq!(
+        busy_t, 0,
+        "TRUNCATE checkpoint must not report BUSY in a single-threaded test (got {busy_t})",
+    );
+    let wal_size_after = std::fs::metadata(&wal_path)
+        .expect("kg.db-wal must still exist after TRUNCATE")
+        .len();
+    assert_eq!(
+        wal_size_after, 0,
+        "TRUNCATE must shrink kg.db-wal to 0 bytes (got {wal_size_after})",
+    );
 }

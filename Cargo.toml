@@ -79,6 +79,14 @@ tree-sitter-json = "0.24"
 # Unique IDs for session manager
 uuid = { version = "1", features = ["v4", "serde"] }
 
+# Timestamps for bi-temporal queries on the knowledge graph — used by
+# `ucil-core::knowledge_graph` for RFC-3339 encoding of `t_valid_from` /
+# `t_valid_to` so SQLite TEXT string-comparison is lexicographic.
+# `default-features = false` avoids the `oldtime` / `time 0.1`
+# transitive chain (clippy-deny warnings on some rustc versions — see
+# WO-0012 RCA §Risk point 5).  Phase 1 Week 4 (WO-0024).
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
+
 # Recursive filesystem walker for plugin discovery (Phase 1 Week 5)
 walkdir = "2"
 
