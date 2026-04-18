@@ -6,6 +6,7 @@ verifier_attempts: 3
 max_feature_attempts: 0
 severity: high
 blocks_loop: true
+resolved: true
 ---
 
 # WO-0024 hit verifier-reject cap
@@ -19,3 +20,27 @@ Latest root-cause: ucil-build/verification-reports/root-cause-WO-0024.md (if pre
 If the rejection cites harness-script bugs (reality-check.sh,
 flip-feature.sh, a hook, a launcher), triage may auto-resolve this
 escalation via Bucket B before the loop halts.
+
+---
+
+## Resolution
+
+Resolved 2026-04-18 by triage cap-rescue pass — companion to
+`20260418-0820-pre-existing-incremental-rustdoc-bug.md` which carries the
+technical details. The rejection does NOT cite harness-script bugs; it
+cites a pre-existing UCIL-source bug in
+`crates/ucil-core/src/incremental.rs` (two ambiguous intra-doc links
+introduced silently by WO-0009 commit `5c2739a`). Both affected features
+P1-W4-F02 and P1-W4-F08 carry `attempts: 0` in feature-list.json (verifier
+protocol forbids flipping on reject), so the Bucket-D branch applies.
+
+Remediation path: the companion 0820 escalation was converted to
+**WO-0025 (fix-incremental-rustdoc-ambiguity)** in this same triage pass
+(commits `347f1df` emitting the WO + `52ec529` resolving 0820). The
+orchestrator's next iteration will process WO-0025, land the 4-character
+fix, and then re-verify WO-0024 with a fresh verifier session (the
+verifier_attempts counter is orchestrator-in-memory per DEC-0007 / triage
+rubric). Criterion 5 (`cargo doc`) will go green; the other 17 checks
+already pass per the three prior rejection runs.
+
+Bucket A — companion escalation, remediation path established via WO-0025.
