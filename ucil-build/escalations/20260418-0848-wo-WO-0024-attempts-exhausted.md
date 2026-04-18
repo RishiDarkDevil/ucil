@@ -44,3 +44,9 @@ rubric). Criterion 5 (`cargo doc`) will go green; the other 17 checks
 already pass per the three prior rejection runs.
 
 Bucket A — companion escalation, remediation path established via WO-0025.
+
+**Update 2026-04-18:** WO-0025 fix landed directly on main at commit
+**`f6ec86e`** (user applied the 4-char intra-doc-link disambiguation
+manually after the orchestrator kept re-verifying WO-0024 instead of
+scheduling WO-0025 first). `cargo doc -p ucil-core --no-deps` verified
+green locally. WO-0024 can re-verify cleanly on next loop iter.
