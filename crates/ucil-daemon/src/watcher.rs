@@ -81,6 +81,79 @@ use tokio::{
 /// events ([`EventSource::PostToolUseHook`]) bypass this window entirely.
 pub const DEBOUNCE_WINDOW: Duration = Duration::from_millis(100);
 
+/// File-count threshold above which [`auto_select_backend`] upgrades from
+/// `notify` (inotify / FSEvents / `ReadDirectoryChangesW`) to Watchman,
+/// when a Watchman binary is present on the `PATH`.
+///
+/// Fixed at `50_000` per master-plan §2 line 138 — "file-watcher:
+/// `notify` crate default / Watchman upgrade for repos `>` 50K files /
+/// `PollWatcher` fallback for network mounts". The threshold lives as a
+/// named `pub const` so downstream code paths (future `ucil init` CLI
+/// wiring — WO-0027 is explicitly scoped out of CLI edits) can reference
+/// the same policy value.
+pub const WATCHMAN_AUTO_SELECT_THRESHOLD: usize = 50_000;
+
+/// Poll interval used by the [`WatcherBackend::Poll`] backend.
+///
+/// Fixed at 2 seconds — a conservative trade-off for the network-mount
+/// fallback path described in master-plan §2 line 138: short enough
+/// that editor writes still feel near-live, long enough that the
+/// `PollWatcher` re-scan cost stays bounded on large repos (the
+/// `notify` crate's `PollWatcher` default is 30 s which is too slow for
+/// agent-assisted workflows). The interval lives as a named `pub const`
+/// so tests and downstream consumers share a single source of truth.
+pub const POLL_WATCHER_INTERVAL: Duration = Duration::from_secs(2);
+
+/// Which backend drives a [`FileWatcher`].
+///
+/// Master-plan §2 line 138 specifies three detection strategies for the
+/// daemon file watcher:
+///
+/// 1. [`WatcherBackend::NotifyDebounced`] — the default path, using
+///    `notify-debouncer-full` on top of `notify`'s recommended
+///    watcher (inotify on Linux, FSEvents on macOS,
+///    `ReadDirectoryChangesW` on Windows). Collapses rapid editor
+///    writes through the [`DEBOUNCE_WINDOW`].
+/// 2. [`WatcherBackend::Watchman`] — the optional upgrade for large
+///    repositories (`>` [`WATCHMAN_AUTO_SELECT_THRESHOLD`] files) where
+///    kernel-level watch descriptors become expensive. Driven by
+///    spawning the external `watchman` binary and subscribing to a
+///    recursive file-change feed.
+/// 3. [`WatcherBackend::Poll`] — the explicit opt-in fallback for
+///    network mounts (NFS, SMB, sshfs) where inotify and friends do
+///    not deliver change events. Uses `notify::PollWatcher` at
+///    [`POLL_WATCHER_INTERVAL`]; NOT auto-selected (callers opt in
+///    because detecting network mounts cross-platform is out of
+///    scope for this feature — see WO-0027 `scope_out`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum WatcherBackend {
+    /// `notify-debouncer-full` default — editor / filesystem writes
+    /// with a 100 ms debounce window.
+    NotifyDebounced,
+    /// External `watchman` subscription — auto-selected for repos
+    /// above [`WATCHMAN_AUTO_SELECT_THRESHOLD`].
+    Watchman,
+    /// `notify::PollWatcher` — explicit opt-in for network mounts.
+    /// Events flow through the same debouncer pipeline as
+    /// [`WatcherBackend::NotifyDebounced`] so consumers observe
+    /// [`EventSource::NotifyDebounced`] on the output side (the
+    /// detection path matters for CPU cost, not semantics).
+    Poll,
+}
+
+/// Runtime capability descriptor for an installed Watchman binary.
+///
+/// Returned by [`detect_watchman`]. Carries only the absolute path of
+/// the binary we found on the `PATH`; a future WO may extend this
+/// struct with a parsed `watchman --version` probe when that field
+/// becomes load-bearing (e.g. when a specific Watchman RPC surface
+/// requires a minimum version). Kept deliberately minimal for WO-0027.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WatchmanCapability {
+    /// Absolute path to the `watchman` executable resolved on `PATH`.
+    pub binary: PathBuf,
+}
+
 /// Total classification of a file-change event.
 ///
 /// This enum is *total* over the event kinds we route through the
