@@ -13,7 +13,7 @@
 #![allow(clippy::module_name_repetitions)]
 
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -21,6 +21,37 @@ use std::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::RwLock;
+
+/// Default session TTL in seconds — 1 hour.
+///
+/// Used by [`SessionManager::create_session`] to compute
+/// [`SessionInfo::expires_at`] = `created_at + DEFAULT_TTL_SECS`.
+pub const DEFAULT_TTL_SECS: u64 = 3600;
+
+/// A single tool invocation recorded on a session's call history.
+///
+/// Recorded by [`SessionManager::record_call`]; `at` is a unix-seconds
+/// timestamp captured at record time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CallRecord {
+    /// Name of the tool that was invoked (e.g. `"ucil.pack_context"`).
+    pub tool: String,
+    /// Unix timestamp (seconds) at which the call was recorded.
+    pub at: u64,
+}
+
+/// Return the current unix time in seconds, or 0 if the clock is before
+/// `UNIX_EPOCH` (which should be impossible on any modern OS).
+///
+/// Mirrors the existing `created_at` computation in
+/// [`SessionManager::create_session`] — no new error path is introduced
+/// just to record state on a live session.
+fn now_unix_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
 
 /// Unique session identifier (UUID v4).
 ///
@@ -54,6 +85,12 @@ pub struct WorktreeInfo {
 }
 
 /// Metadata stored for each live UCIL session.
+///
+/// The four state-tracking fields (`call_history`, `inferred_domain`,
+/// `files_in_context`, `expires_at`) were added in Phase 1 Week 4
+/// (feature P1-W4-F07). Each is annotated with `#[serde(default)]` so
+/// older on-disk blobs — which did not know about these fields — continue
+/// to deserialise; they default to empty / `None` / `0` respectively.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionInfo {
     /// Unique session identifier.
@@ -64,6 +101,20 @@ pub struct SessionInfo {
     pub worktree_root: PathBuf,
     /// Unix timestamp (seconds) when the session was created.
     pub created_at: u64,
+    /// Ordered history of tool invocations on this session.
+    #[serde(default)]
+    pub call_history: Vec<CallRecord>,
+    /// Domain inferred for this session (if any), e.g. `"backend-api"`.
+    #[serde(default)]
+    pub inferred_domain: Option<String>,
+    /// Files currently in scope for this session. Uses `BTreeSet` for
+    /// deterministic iteration order in tests and snapshots.
+    #[serde(default)]
+    pub files_in_context: BTreeSet<PathBuf>,
+    /// Unix timestamp (seconds) at which this session expires and is
+    /// eligible for purge by [`SessionManager::purge_expired`].
+    #[serde(default)]
+    pub expires_at: u64,
 }
 
 /// Errors that can arise from session-manager operations.
@@ -144,9 +195,80 @@ impl SessionManager {
             branch,
             worktree_root: workdir.to_path_buf(),
             created_at,
+            call_history: Vec::new(),
+            inferred_domain: None,
+            files_in_context: BTreeSet::new(),
+            expires_at: created_at.saturating_add(DEFAULT_TTL_SECS),
         };
         self.sessions.write().await.insert(id.clone(), info);
         Ok(id)
+    }
+
+    /// Append a [`CallRecord`] to the session's `call_history`.
+    ///
+    /// The `at` field is stamped with the current unix time (seconds).
+    /// Returns `Some(())` if the session existed, `None` otherwise — this
+    /// mirrors the `Option`-based missing-key convention used by
+    /// [`SessionManager::get_session`].
+    pub async fn record_call(&self, id: &SessionId, tool: &str) -> Option<()> {
+        let record = CallRecord {
+            tool: tool.to_owned(),
+            at: now_unix_secs(),
+        };
+        self.sessions
+            .write()
+            .await
+            .get_mut(id)
+            .map(|info| info.call_history.push(record))
+    }
+
+    /// Insert `file` into the session's `files_in_context` set.
+    ///
+    /// Duplicate paths are de-duplicated by the underlying
+    /// [`BTreeSet`](std::collections::BTreeSet); calling this twice with
+    /// the same path is a no-op on the set but still returns `Some(())`.
+    pub async fn add_file_to_context(&self, id: &SessionId, file: PathBuf) -> Option<()> {
+        self.sessions.write().await.get_mut(id).map(|info| {
+            info.files_in_context.insert(file);
+        })
+    }
+
+    /// Set the session's `inferred_domain` field.
+    ///
+    /// Overwrites any prior value.
+    pub async fn set_inferred_domain(&self, id: &SessionId, domain: String) -> Option<()> {
+        self.sessions
+            .write()
+            .await
+            .get_mut(id)
+            .map(|info| info.inferred_domain = Some(domain))
+    }
+
+    /// Set the session's TTL, recomputing `expires_at = created_at + ttl_secs`.
+    ///
+    /// A `ttl_secs` of 0 yields `expires_at == created_at`, which means
+    /// [`SessionManager::purge_expired`] with any `now_secs >= created_at`
+    /// will remove the session.
+    pub async fn set_ttl(&self, id: &SessionId, ttl_secs: u64) -> Option<()> {
+        self.sessions
+            .write()
+            .await
+            .get_mut(id)
+            .map(|info| info.expires_at = info.created_at.saturating_add(ttl_secs))
+    }
+
+    /// Remove every session whose `expires_at <= now_secs`.
+    ///
+    /// Takes a single write lock, iterates once via
+    /// [`HashMap::retain`](std::collections::HashMap::retain), and returns
+    /// the count of entries removed.
+    pub async fn purge_expired(&self, now_secs: u64) -> usize {
+        let mut sessions = self.sessions.write().await;
+        let before = sessions.len();
+        sessions.retain(|_, info| info.expires_at > now_secs);
+        let after = sessions.len();
+        drop(sessions);
+        before - after
     }
 
     /// Detect the current git branch for the repository at `workdir`.
@@ -293,6 +415,80 @@ fn parse_worktree_porcelain(output: &str) -> Vec<WorktreeInfo> {
     }
 
     result
+}
+
+// P1-W4-F07 acceptance test. Placed at MODULE ROOT (NOT inside
+// `#[cfg(test)] mod tests { }`) so the frozen nextest selector
+// `session_manager::test_session_state_tracking` matches by exact path
+// segments — nextest treats a `::tests::` nesting as a distinct path
+// segment. See DEC-0005 and the WO-0007 rejection history.
+#[cfg(test)]
+#[tokio::test]
+async fn test_session_state_tracking() {
+    let repo = std::env::current_dir().expect("current dir");
+    let sm = SessionManager::new();
+    let id = sm
+        .create_session(&repo)
+        .await
+        .expect("create_session inside a git repo should succeed");
+
+    // (2) Two calls → call_history has length 2 in insertion order.
+    sm.record_call(&id, "ucil.pack_context")
+        .await
+        .expect("session exists");
+    sm.record_call(&id, "ucil.who_calls")
+        .await
+        .expect("session exists");
+    {
+        let info = sm.get_session(&id).await.expect("session");
+        assert_eq!(info.call_history.len(), 2, "two calls were recorded");
+        assert_eq!(info.call_history[0].tool, "ucil.pack_context");
+        assert_eq!(info.call_history[1].tool, "ucil.who_calls");
+    }
+
+    // (3) Two distinct files + a duplicate → set size stays 2.
+    let f1 = PathBuf::from("src/lib.rs");
+    let f2 = PathBuf::from("src/main.rs");
+    sm.add_file_to_context(&id, f1.clone())
+        .await
+        .expect("session exists");
+    sm.add_file_to_context(&id, f2.clone())
+        .await
+        .expect("session exists");
+    sm.add_file_to_context(&id, f1.clone())
+        .await
+        .expect("session exists (duplicate)");
+    {
+        let info = sm.get_session(&id).await.expect("session");
+        assert_eq!(
+            info.files_in_context.len(),
+            2,
+            "BTreeSet de-dupes identical paths"
+        );
+        assert!(info.files_in_context.contains(&f1));
+        assert!(info.files_in_context.contains(&f2));
+    }
+
+    // (4) Inferred-domain round-trip.
+    sm.set_inferred_domain(&id, "backend-api".to_owned())
+        .await
+        .expect("session exists");
+    {
+        let info = sm.get_session(&id).await.expect("session");
+        assert_eq!(info.inferred_domain.as_deref(), Some("backend-api"));
+    }
+
+    // (5) TTL + purge: ttl=1s means expires_at = created_at+1; purging
+    // at created_at+2 must remove exactly this one session and get_session
+    // must subsequently return None.
+    let created_at = sm.get_session(&id).await.expect("session").created_at;
+    sm.set_ttl(&id, 1).await.expect("session exists");
+    let removed = sm.purge_expired(created_at + 2).await;
+    assert_eq!(removed, 1, "exactly one session was expired and purged");
+    assert!(
+        sm.get_session(&id).await.is_none(),
+        "purged session must no longer be retrievable"
+    );
 }
 
 #[cfg(test)]
