@@ -27,6 +27,23 @@ if [[ -z "$WO_FILE" ]]; then
 fi
 
 REJECTION="ucil-build/rejections/${WO_ID}.md"
+# The verifier commits the rejection onto the feat branch (its own worktree
+# never touched main's checkout). Before the existence check, try to pull
+# the file from origin/feat/${WO_ID}-<slug> into main's working tree so RCF
+# has it to read. Harmless if the file is already present.
+if [[ ! -f "$REJECTION" ]]; then
+  _rcf_slug=$(jq -r .slug "$WO_FILE" 2>/dev/null || echo "")
+  _rcf_branch="feat/${WO_ID}-${_rcf_slug}"
+  if [[ -n "$_rcf_slug" ]]; then
+    git fetch origin "$_rcf_branch" --quiet 2>/dev/null || true
+    if git cat-file -e "origin/${_rcf_branch}:${REJECTION}" 2>/dev/null; then
+      mkdir -p "$(dirname "$REJECTION")"
+      git show "origin/${_rcf_branch}:${REJECTION}" > "$REJECTION"
+      echo "[run-rcf] fetched rejection from origin/${_rcf_branch}"
+    fi
+  fi
+  unset _rcf_slug _rcf_branch
+fi
 if [[ ! -f "$REJECTION" ]]; then
   echo "ERROR: no rejection file at $REJECTION" >&2
   exit 3

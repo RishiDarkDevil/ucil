@@ -284,11 +284,19 @@ Apply the RCF's recommended remediation, commit + push incrementally, re-write
 ucil-build/work-orders/$(basename "$LATEST_WO" .json)-ready-for-review.md when all
 acceptance criteria pass locally, and end cleanly. Reuse the existing worktree
 at ../ucil-wt/${WO_ID} (scripts/run-executor.sh cleans stale state already)."
-    CLAUDE_SUBAGENT_NAME=executor claude -p "$RETRY_PROMPT" \
-      --model "${CLAUDE_CODE_MODEL:-claude-opus-4-7}" \
-      --dangerously-skip-permissions \
-      --append-system-prompt "$(cat .claude/agents/executor.md)" \
-      >/tmp/ucil-executor-retry.log 2>&1 || {
+    # Re-source _load-auth.sh so this spawn sees the fresh OAuth token from
+    # ~/.claude/.credentials.json. Without this, the executor-retry inherits
+    # the stale token loaded at run-phase.sh startup and fails with 401
+    # (TOCTOU: the verifier's run refreshed credentials.json in between).
+    # shellcheck source=scripts/_load-auth.sh
+    (
+      source "$(dirname "$0")/_load-auth.sh"
+      CLAUDE_SUBAGENT_NAME=executor claude -p "$RETRY_PROMPT" \
+        --model "${CLAUDE_CODE_MODEL:-claude-opus-4-7}" \
+        --dangerously-skip-permissions \
+        --append-system-prompt "$(cat .claude/agents/executor.md)" \
+        >/tmp/ucil-executor-retry.log 2>&1
+    ) || {
         echo "[run-phase] executor retry failed — see /tmp/ucil-executor-retry.log"
       }
     safe_git_pull
@@ -297,11 +305,18 @@ at ../ucil-wt/${WO_ID} (scripts/run-executor.sh cleans stale state already)."
     RETRY_CRIT_PROMPT="You are the UCIL critic. Re-review the executor's diff for work-order $LATEST_WO
 after retry attempt ${vattempt}. Apply every check in .claude/agents/critic.md.
 Overwrite ucil-build/critic-reports/${WO_ID}.md with the fresh review, commit, push."
-    CLAUDE_SUBAGENT_NAME=critic claude -p "$RETRY_CRIT_PROMPT" \
-      --model "${CLAUDE_CODE_MODEL:-claude-opus-4-7}" \
-      --dangerously-skip-permissions \
-      --append-system-prompt "$(cat .claude/agents/critic.md)" \
-      >/tmp/ucil-critic-retry.log 2>&1 || true
+    # Same TOCTOU fix: re-source auth before the critic-retry spawn so it
+    # picks up the current OAuth token rather than the stale one from
+    # run-phase.sh startup.
+    # shellcheck source=scripts/_load-auth.sh
+    (
+      source "$(dirname "$0")/_load-auth.sh"
+      CLAUDE_SUBAGENT_NAME=critic claude -p "$RETRY_CRIT_PROMPT" \
+        --model "${CLAUDE_CODE_MODEL:-claude-opus-4-7}" \
+        --dangerously-skip-permissions \
+        --append-system-prompt "$(cat .claude/agents/critic.md)" \
+        >/tmp/ucil-critic-retry.log 2>&1
+    ) || true
     safe_git_pull
 
     vattempt=$((vattempt+1))
