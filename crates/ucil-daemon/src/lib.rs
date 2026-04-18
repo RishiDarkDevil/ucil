@@ -33,9 +33,8 @@ pub mod session_manager;
 pub mod session_ttl;
 pub mod storage;
 
-pub use lifecycle::{
-    Checkpoint, CheckpointError, Lifecycle, PidFile, PidFileError, ShutdownReason,
-};
+#[rustfmt::skip]
+pub use lifecycle::{Checkpoint, CheckpointError, Lifecycle, PidFile, PidFileError, ShutdownReason};
 pub use plugin_manager::{
     HealthStatus, LifecycleSection, PluginError, PluginHealth, PluginManager, PluginManifest,
     PluginRuntime, PluginSection, PluginState, TransportSection, DEFAULT_IDLE_TIMEOUT_MINUTES,
