@@ -38,7 +38,10 @@
 // `plugin_manager` and `session_manager`.
 #![allow(clippy::module_name_repetitions)]
 
-use std::time::Duration;
+use std::{
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use serde_json::{json, Value};
 use thiserror::Error;
@@ -46,6 +49,7 @@ use tokio::{
     io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader},
     time::timeout,
 };
+use ucil_core::KnowledgeGraph;
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -310,6 +314,14 @@ pub struct McpServer {
     /// Advertised tool catalog.  Populated by
     /// [`McpServer::new`] from [`ucil_tools`].
     pub tools: Vec<ToolDescriptor>,
+    /// Optional handle onto the bi-temporal knowledge graph populated by
+    /// the `P1-W4-F04` tree-sitter → KG ingest pipeline.  When present,
+    /// `tools/call` dispatches the `find_definition` tool
+    /// (`P1-W4-F05`, master-plan §3.2 row 2) to a real handler that
+    /// pulls definition + callers from the graph; when absent, the tool
+    /// falls through to the `_meta.not_yet_implemented: true` stub path
+    /// every other tool still uses (phase-1 invariant #9).
+    pub kg: Option<Arc<Mutex<KnowledgeGraph>>>,
 }
 
 impl Default for McpServer {
@@ -320,10 +332,41 @@ impl Default for McpServer {
 
 impl McpServer {
     /// Construct a server whose catalog is the Phase-1 22-tool set.
+    ///
+    /// The returned server carries no knowledge-graph handle, so every
+    /// `tools/call` — including `find_definition` — falls through to the
+    /// `_meta.not_yet_implemented: true` stub response required by
+    /// phase-1 invariant #9.  This keeps the WO-0010 acceptance
+    /// selector `server::test_all_22_tools_registered` wire-compatible
+    /// and is the shape every pre-`P1-W4-F05` call-site expects.
     #[must_use]
     pub fn new() -> Self {
         Self {
             tools: ucil_tools(),
+            kg: None,
+        }
+    }
+
+    /// Construct a server that routes `find_definition` (`P1-W4-F05`)
+    /// to the real `handle_find_definition` handler backed by the
+    /// supplied knowledge graph.
+    ///
+    /// The handle is `Arc<Mutex<_>>` so the caller can keep a second
+    /// reference (e.g. the ingest pipeline) and mutate the graph
+    /// concurrently; the handler takes the lock for the duration of a
+    /// single read and releases it before encoding the response.  Every
+    /// tool **other** than `find_definition` still falls through to the
+    /// stub path — the 22-tool catalog is unchanged and phase-1
+    /// invariant #9 is preserved for the remaining 21 tools.
+    ///
+    /// See master-plan §3.2 row 2 (`find_definition` — go-to-definition
+    /// with full context) and §18 Phase 1 Week 4 line 1751 ("Implement
+    /// first working tool: find_definition").
+    #[must_use]
+    pub fn with_knowledge_graph(kg: Arc<Mutex<KnowledgeGraph>>) -> Self {
+        Self {
+            tools: ucil_tools(),
+            kg: Some(kg),
         }
     }
 
