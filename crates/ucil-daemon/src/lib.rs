@@ -17,7 +17,10 @@
 //!
 //! The `storage` module (introduced in WO-0022 for P1-W2-F06) owns the
 //! two-tier `.ucil/` directory tree; see [`storage::StorageLayout`] for
-//! the layout spec (master-plan §11.2 lines 1060-1088).
+//! the layout spec (master-plan §11.2 lines 1060-1088). The matching
+//! crash-recovery [`Checkpoint`] (WO-0022 for P1-W3-F09) lives in the
+//! `lifecycle` module and persists the daemon's last-indexed commit to
+//! `.ucil/checkpoint.json` so a restart skips already-indexed prefixes.
 
 #![deny(warnings)]
 #![warn(clippy::all, clippy::pedantic, clippy::nursery)]
@@ -48,3 +51,4 @@ pub use session_manager::{
     CallRecord, SessionId, SessionInfo, SessionManager, WorktreeInfo, DEFAULT_TTL_SECS,
 };
 pub use session_ttl::{compute_expires_at, is_expired};
+pub use storage::{StorageError, StorageLayout};
