@@ -39,3 +39,16 @@ commits, then triage pass-3 force-halted on the prior 1812 heartbeat
 - Bucket A auto-resolve on next triage pass.
 - Intentionally NO `resolved: true` line so stop-hook bypass fires this
   turn. Triage pass-1 will close it cleanly without hitting pass-3.
+
+## Resolution
+
+Bucket A auto-resolve (triage pass-1, phase 1, 2026-04-18). Admin
+heartbeat; `blocks_loop: false`; `auto_resolve_on_next_triage: bucket-A`
+as declared by the author. Condition is a normal mid-phase
+gate-incomplete state. Since this heartbeat was filed at 9e98006 the
+loop has advanced — HEAD at c78cd8e merges WO-0031 (flipping
+P1-W4-F03), so features-passing has moved from 39/234 to 40/234. No
+material action required; heartbeat is stale. Tree clean, branch up
+with upstream.
+
+resolved: true
