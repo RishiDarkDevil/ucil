@@ -7,6 +7,13 @@
 //! The `lifecycle` module (introduced in WO-0021 for P1-W3-F01) owns
 //! the daemon's PID-file guard and `SIGTERM` / `SIGHUP` driven shutdown
 //! — see [`lifecycle`] for details.
+//!
+//! The `session_manager` + `session_ttl` pair (WO-0021 for P1-W4-F07)
+//! own in-memory session state: `SessionManager` indexes sessions by
+//! [`SessionId`] and tracks `call_history`, `files_in_context`,
+//! `inferred_domain`, and `expires_at`; `session_ttl` houses the
+//! saturating arithmetic (`compute_expires_at`, `is_expired`,
+//! [`DEFAULT_TTL_SECS`]) shared between creation and purge paths.
 
 #![deny(warnings)]
 #![warn(clippy::all, clippy::pedantic, clippy::nursery)]
