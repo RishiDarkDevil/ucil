@@ -47,6 +47,7 @@
 
 use std::{io, path::Path, path::PathBuf};
 
+use chrono::{DateTime, Utc};
 use rusqlite::{Connection, Transaction, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -846,6 +847,63 @@ impl KnowledgeGraph {
         }
         Ok(out)
     }
+
+    // ── Bi-temporal reads ────────────────────────────────────────────
+    //
+    // `t_valid_from` / `t_valid_to` are TEXT columns in SQLite, and
+    // the comparison is lexicographic — which is fine as long as every
+    // writer encodes via `DateTime<Utc>::to_rfc3339()` and every reader
+    // compares via the same format.  Mixing RFC-3339 with
+    // `datetime('now')` (space separator) on the same range-queried
+    // column silently returns wrong rows (WO-0024 RCA §Non-negotiable
+    // invariant 5).
+
+    /// Return the [`Entity`] whose valid-time window contains `at`.
+    ///
+    /// Implements master-plan §12.2 bi-temporal semantics: the row's
+    /// valid-time window `[t_valid_from, t_valid_to)` is treated as
+    /// half-open (inclusive lower bound, exclusive upper bound); a
+    /// `t_valid_to` of `NULL` means "still valid".  When multiple rows
+    /// match (e.g. two overlapping versions of the same entity) the
+    /// one with the greatest `t_valid_from` wins — i.e. the most
+    /// recently started window.
+    ///
+    /// The `at` parameter is encoded via
+    /// [`chrono::DateTime::to_rfc3339`] so the TEXT string comparison
+    /// is lexicographically correct against any row written via the
+    /// `upsert_*` helpers.
+    ///
+    /// # Errors
+    ///
+    /// * [`KnowledgeGraphError::Sqlite`] — prepare, bind, or row-fetch
+    ///   failure.  `Ok(None)` (not an error) when no valid-time window
+    ///   contains `at`.
+    #[tracing::instrument(
+        level = "debug",
+        skip(self),
+        fields(qualified_name = %qualified_name, at = %at.to_rfc3339()),
+        name = "ucil.core.kg.get_entity_as_of",
+    )]
+    pub fn get_entity_as_of(
+        &self,
+        qualified_name: &str,
+        at: DateTime<Utc>,
+    ) -> Result<Option<Entity>, KnowledgeGraphError> {
+        let at_str = at.to_rfc3339();
+        let mut stmt = self.conn.prepare(
+            "SELECT id, kind, name, qualified_name, file_path, start_line, end_line, \
+                    signature, doc_comment, language, t_valid_from, t_valid_to, \
+                    importance, source_tool, source_hash \
+             FROM entities \
+             WHERE qualified_name = ?1 \
+               AND t_valid_from <= ?2 \
+               AND (t_valid_to IS NULL OR t_valid_to > ?2) \
+             ORDER BY t_valid_from DESC \
+             LIMIT 1",
+        )?;
+        let row_result = stmt.query_row(rusqlite::params![qualified_name, at_str], entity_from_row);
+        Ok(row_result.map(Some).or_else(absent_to_none)?)
+    }
 }
 
 // ── Row decoders ─────────────────────────────────────────────────────────────
@@ -1374,4 +1432,129 @@ fn test_upsert_relation_and_list() {
         .list_relations_by_source(9_999_999)
         .expect("empty list must be Ok");
     assert!(empty.is_empty(), "absent source_id yields empty vec");
+}
+
+/// `test_bi_temporal_as_of` — insert three rows for the same
+/// `qualified_name` with staggered `t_valid_from` / `t_valid_to`, query
+/// `get_entity_as_of` at different instants, assert the correct
+/// version is returned.
+#[cfg(test)]
+#[test]
+fn test_bi_temporal_as_of() {
+    use chrono::TimeZone;
+    use tempfile::TempDir;
+
+    let tmp = TempDir::new().expect("tempdir must be creatable");
+    let mut kg =
+        KnowledgeGraph::open(&tmp.path().join("kg.db")).expect("KnowledgeGraph::open must succeed");
+
+    // Three valid-time windows on the same qualified_name:
+    //
+    //   row-1: [2020-01-01, 2022-01-01)
+    //   row-2: [2022-01-01, 2024-01-01)
+    //   row-3: [2024-01-01, NULL)          ← still valid
+    //
+    // Each row lives in a different file_path so the
+    // UNIQUE(qualified_name, file_path, t_valid_from) constraint
+    // doesn't collapse them — and the bi-temporal query returns the
+    // version whose window contains the query instant regardless of
+    // which file_path it lives in.
+    let make_row = |file: &str, from: &str, to: Option<&str>, signature: &str| Entity {
+        id: None,
+        kind: "function".to_owned(),
+        name: "authenticate".to_owned(),
+        qualified_name: Some("api::authenticate".to_owned()),
+        file_path: file.to_owned(),
+        start_line: Some(1),
+        end_line: Some(20),
+        signature: Some(signature.to_owned()),
+        doc_comment: None,
+        language: Some("rust".to_owned()),
+        t_valid_from: Some(from.to_owned()),
+        t_valid_to: to.map(str::to_owned),
+        importance: 0.5,
+        source_tool: None,
+        source_hash: None,
+    };
+    kg.upsert_entity(&make_row(
+        "src/api.rs",
+        "2020-01-01T00:00:00+00:00",
+        Some("2022-01-01T00:00:00+00:00"),
+        "fn authenticate(user: &str)",
+    ))
+    .expect("row-1 upsert");
+    kg.upsert_entity(&make_row(
+        "src/api/v2.rs",
+        "2022-01-01T00:00:00+00:00",
+        Some("2024-01-01T00:00:00+00:00"),
+        "fn authenticate(user: &str, password: &str)",
+    ))
+    .expect("row-2 upsert");
+    kg.upsert_entity(&make_row(
+        "src/api/v3.rs",
+        "2024-01-01T00:00:00+00:00",
+        None,
+        "fn authenticate(creds: &Creds) -> Result<User, AuthError>",
+    ))
+    .expect("row-3 upsert");
+
+    // Query between row-2 and row-3 (2023-06-15) — expect row-2.
+    let t_mid = Utc
+        .with_ymd_and_hms(2023, 6, 15, 0, 0, 0)
+        .single()
+        .expect("2023-06-15 must be a valid UTC instant");
+    let hit_mid = kg
+        .get_entity_as_of("api::authenticate", t_mid)
+        .expect("as_of must succeed")
+        .expect("row-2's window contains 2023-06-15");
+    assert_eq!(
+        hit_mid.signature.as_deref(),
+        Some("fn authenticate(user: &str, password: &str)"),
+        "expected row-2 (v2) at t=2023-06-15, got {:?}",
+        hit_mid.signature,
+    );
+    assert_eq!(hit_mid.file_path, "src/api/v2.rs");
+
+    // Query after row-3 started (2025-03-01) — expect row-3 (open
+    // window, `t_valid_to IS NULL`).
+    let t_now = Utc
+        .with_ymd_and_hms(2025, 3, 1, 0, 0, 0)
+        .single()
+        .expect("2025-03-01 must be valid");
+    let hit_now = kg
+        .get_entity_as_of("api::authenticate", t_now)
+        .expect("as_of must succeed")
+        .expect("row-3's open window covers 2025-03-01");
+    assert_eq!(
+        hit_now.signature.as_deref(),
+        Some("fn authenticate(creds: &Creds) -> Result<User, AuthError>"),
+        "expected row-3 (v3) at t=2025-03-01, got {:?}",
+        hit_now.signature,
+    );
+    assert_eq!(hit_now.file_path, "src/api/v3.rs");
+
+    // Query at row-1's lower bound (2020-01-01) — expect row-1
+    // (inclusive lower bound).
+    let t_early = Utc
+        .with_ymd_and_hms(2020, 1, 1, 0, 0, 0)
+        .single()
+        .expect("2020-01-01 must be valid");
+    let hit_early = kg
+        .get_entity_as_of("api::authenticate", t_early)
+        .expect("as_of must succeed")
+        .expect("row-1's window includes its lower bound");
+    assert_eq!(hit_early.file_path, "src/api.rs");
+
+    // Query before all rows (1999-01-01) — expect None.
+    let t_before = Utc
+        .with_ymd_and_hms(1999, 1, 1, 0, 0, 0)
+        .single()
+        .expect("1999-01-01 must be valid");
+    let miss = kg
+        .get_entity_as_of("api::authenticate", t_before)
+        .expect("as_of must succeed");
+    assert!(
+        miss.is_none(),
+        "pre-1999 has no valid version, got {miss:?}",
+    );
 }
