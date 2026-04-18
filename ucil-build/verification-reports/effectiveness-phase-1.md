@@ -1,7 +1,7 @@
 # Effectiveness Report — Phase 1
 
-Run at: 2026-04-19T03:47Z
-Commit: 341b8150c4585a3c63f6329e4d364e6dbae949db
+Run at: 2026-04-19T04:30Z
+Commit: 92d604898d938b4204ae91505e67d711f602da44
 Evaluator: effectiveness-evaluator (fresh session, `claude-opus-4-7`)
 
 ## Summary
@@ -15,39 +15,44 @@ Evaluator: effectiveness-evaluator (fresh session, `claude-opus-4-7`)
 | Scenarios WIN | 0 |
 | Scenarios FAIL | 0 |
 
-**Gate verdict: PASS (vacuous, 8th consecutive)** — the single
+**Gate verdict: PASS (vacuous, 9th consecutive)** — the single
 phase-1-eligible scenario (`nav-rust-symbol`) auto-skips because one
 of its `requires_tools` (`find_references`, feature `P2-W7-F05`) is
 still a Phase-1 stub at this commit. The gate contract (see §"Gate
 contract") permits this as a vacuous pass. The §"Advisory" section
 documents what would make the pass *substantive* rather than vacuous.
 
-## Progress since the previous report (`effectiveness-phase-1.md` @ `e8d7c2f`)
+## Progress since the previous report (`effectiveness-phase-1.md` @ `341b815`)
 
-HEAD advanced `e8d7c2f` → `341b815` (5 commits). All five are
-verification/integration **log refreshes** + escalation admin — zero
-source delta in `crates/`, `adapters/`, `ml/`, `plugin*/`, `scripts/`,
-`.claude/settings.json`, `tests/scenarios/`, or `tests/fixtures/`:
+HEAD advanced `341b815` → `92d6048` (6 commits). All six are
+verification/integration **log refreshes** + escalation admin —
+zero source delta in `crates/`, `adapters/`, `ml/`, `plugin*/`,
+`scripts/`, `.claude/settings.json`, `tests/scenarios/`, or
+`tests/fixtures/`:
 
 ```
-git diff e8d7c2f..341b815 -- crates/ adapters/ ml/ plugin/ plugins/ \
+git diff 341b815..92d6048 -- crates/ adapters/ ml/ plugin/ plugins/ \
                              scripts/ .claude/settings.json | wc -l
   → 0
-git diff e8d7c2f..341b815 -- tests/scenarios/ tests/fixtures/ | wc -l
+git diff 341b815..92d6048 -- tests/scenarios/ tests/fixtures/ | wc -l
+  → 0
+git diff 341b815..92d6048 -- ucil-build/feature-list.json | wc -l
   → 0
 ```
 
 | sha | subject | category |
 |---|---|---|
-| `e53eb05` | test(effectiveness): phase-1 gate refresh at e8d7c2f — verdict PASS (vacuous, 7th) | prior evaluator output |
-| `dc3ec3c` | chore(escalation): phase-1 gate stable red — awaiting WO-0042 + bucket-B harness fixes | escalation admin |
-| `fc019de` | chore(verification-reports): gate log refresh | log refresh |
-| `36a8929` | chore(escalation): manual resolve 20260419-0343 — unblock triage pass-3 401 stall | escalation admin |
-| `341b815` | test(integration): phase-1 integration pass at 36a8929 — verdict FAIL (diagnostics-bridge) | integration log refresh |
+| `32688cf` | test(effectiveness): phase-1 gate refresh at 341b815 — verdict PASS (vacuous, 8th) | prior evaluator output |
+| `9050b64` | chore(escalation): phase-1 gate stable red 8th pass — no regressions, 3 same blockers | escalation admin |
+| `19f186d` | chore(verification-reports): gate log refresh | log refresh |
+| `6624534` | chore(escalation): manual resolve 20260419-0420 + kill stuck triage subagent | escalation admin |
+| `7436cf9` | chore(verification-reports): gate log refresh (post-resume) | log refresh |
+| `deb73d6` | test(integration): phase-1 integration pass at 6624534 — verdict FAIL (diagnostics-bridge) | integration log refresh |
+| `92d6048` | test(integration): phase-1 integration report refresh — verdict FAIL (diagnostics-bridge) | integration log refresh |
 
 No advisory item from the prior report has shipped in this window:
 
-| # | Advisory (from `e8d7c2f` report) | Status at `341b815` |
+| # | Advisory (from `341b815` report) | Status at `92d6048` |
 |---|---|---|
 | 1 | Attach a KG from the stdio entry point so `find_definition` becomes responsive over stdio | ✅ remains landed at `f11ebfd` (WO-0041) — re-confirmed in Probe 3 below |
 | 2 | Register UCIL under `mcpServers.ucil` in `.claude/settings.json` | ⏳ still open (Probe 4) |
@@ -88,10 +93,10 @@ point is `ucil-daemon mcp --stdio`, which the evaluator contract
 ### Probe 2 — stdio handshake via `ucil-daemon mcp --stdio --repo <fixture>`
 
 Spawned from CWD `tests/fixtures/rust-project`, `--repo .`.
-Server stderr (single startup log line, fresh at `341b815`):
+Server stderr (single startup log line, fresh at `92d6048`):
 
 ```
-2026-04-18T22:46:58.839024Z INFO ucil_daemon:
+2026-04-18T23:07:37.582970Z INFO ucil_daemon:
   ucil-daemon mcp --stdio bootstrap complete
   repo=. discovered=7 ingested=7
 ```
@@ -101,7 +106,7 @@ under `tests/`). KG populated pre-request.
 
 ### Probe 3 — `tools/call` responsiveness
 
-Transcript at `/tmp/ucil-eval-probes-341b815/probe-out.jsonl`.
+Transcript at `/tmp/ucil-eval-probes-92d6048/probe-out.jsonl`.
 
 ```
 id=0 → initialize
@@ -118,8 +123,9 @@ Response summaries:
 | 2 | `find_definition`   | **absent** | `source: tree-sitter+kg`, `file_path: ./src/transform.rs`, `start_line: 78`, `signature: pub fn simplify(expr: &Expr) -> Expr`, `qualified_name: ./src/transform.rs::simplify@78:5`, `doc_comment` populated, `found: true` | **operational** |
 | 3 | `find_references`   | **true**   | `content[0].text: "tool \`find_references\` is registered but its handler is not yet implemented (Phase 1 stub)"` | **STUB — not ready** |
 
-State of both tools is **bit-identical to the `e8d7c2f` / `855cdfa` /
-`cfe3344` probes**. As expected from the empty source-delta above.
+State of both tools is **bit-identical to the `341b815` / `e8d7c2f` /
+`855cdfa` / `cfe3344` probes**. As expected from the empty source-delta
+above.
 
 Canonical 22-tool roster returned by `tools/list`:
 
@@ -149,7 +155,7 @@ it would block a child-`claude -p`-driven scenario (see Advisory §).
 
 ### Probe 5 — in-process feature status
 
-Per `ucil-build/feature-list.json` at `341b815`:
+Per `ucil-build/feature-list.json` at `92d6048`:
 
 | Tool | Feature ID | phase | passes | last_verified_by |
 |---|---|---|---|---|
@@ -197,7 +203,7 @@ contract. Per evaluator contract §"Tool-availability checks" —
     + planner approval per `CLAUDE.md` rules — likely premature given
     W5/W6 scope — **or** author a new phase-1-only scenario whose
     `requires_tools` is a subset of `{find_definition, search_code,
-    get_conventions, understand_code}` (all KG-routable at `341b815`).
+    get_conventions, understand_code}` (all KG-routable at `92d6048`).
   - Register UCIL under `mcpServers.ucil` in `.claude/settings.json`
     if/when a scenario is added that drives UCIL from inside a spawned
     `claude -p` child (this evaluator's probe shortcut works without
@@ -206,7 +212,7 @@ contract. Per evaluator contract §"Tool-availability checks" —
   copied** to tempdirs because no run was attempted.
   `/tmp/ucil-eval-<scenario>` not created (confirmed absent at start
   and end of run via `find /tmp -maxdepth 1 -name 'ucil-eval-*'` →
-  only probe dir `/tmp/ucil-eval-probes-341b815/` present, which
+  only probe dir `/tmp/ucil-eval-probes-92d6048/` present, which
   holds this report's probe artifacts, not scenario run state).
 - **Acceptance checks:** not run (no UCIL output to check; running
   baseline alone would violate contract §"Hard rules" — *"If you omit
@@ -235,13 +241,13 @@ Applied here:
 
 ## Advisory (non-gating)
 
-This is the **eighth consecutive vacuous PASS**
+This is the **ninth consecutive vacuous PASS**
 (`316109e` → `8d8fc0c` → `5edc200` → `97932e0` → `f11ebfd` →
-`855cdfa` → `e8d7c2f` → `341b815`). The HEAD movement in this window
-(`e8d7c2f` → `341b815`, 5 commits) is log-refresh + escalation-admin
-only — no source change touched the MCP tool surface, no scenario
-was added, no host registration changed. Advisory items #2 and #3
-remain open with no progress.
+`855cdfa` → `e8d7c2f` → `341b815` → `92d6048`). The HEAD movement
+in this window (`341b815` → `92d6048`, 6 commits) is log-refresh +
+escalation-admin only — no source change touched the MCP tool
+surface, no scenario was added, no host registration changed.
+Advisory items #2 and #3 remain open with no progress.
 
 Residual path to a **substantive** phase-1 effectiveness pass
 (unchanged from prior reports):
@@ -265,7 +271,7 @@ Residual path to a **substantive** phase-1 effectiveness pass
 The evaluator does not block the gate on items 1 or 2 — they are
 carried as planner input. Recommend planner pick item 1 up before
 phase-1 ships, so the eventual phase-1 ship has at least one
-substantive effectiveness datapoint instead of eight vacuous passes.
+substantive effectiveness datapoint instead of nine vacuous passes.
 The scenario-authoring task is short (≈40 lines of new YAML + one
 acceptance-check script) and is not blocked by any open escalation.
 
@@ -273,17 +279,17 @@ acceptance-check script) and is not blocked by any open escalation.
 
 - Repo root: `/home/rishidarkdevil/Desktop/ucil`
 - Branch: `main`
-- HEAD: `341b8150c4585a3c63f6329e4d364e6dbae949db`
+- HEAD: `92d604898d938b4204ae91505e67d711f602da44`
 - Evaluator binary spawn: `./target/debug/ucil-daemon mcp --stdio
   --repo .` from CWD `tests/fixtures/rust-project` (no rebuild
   forced; binary inherits from the WO-0041 build at `f11ebfd`, which
   remains on disk and unchanged).
 - Probe artifacts (transient):
-  - `/tmp/ucil-eval-probes-341b815/probe-msgs.jsonl` — 4-message
+  - `/tmp/ucil-eval-probes-92d6048/probe-msgs.jsonl` — 4-message
     input JSONL (initialize + tools/list + find_definition +
     find_references).
-  - `/tmp/ucil-eval-probes-341b815/probe-out.jsonl` — transcript.
-  - `/tmp/ucil-eval-probes-341b815/probe-err.log` — server-side
+  - `/tmp/ucil-eval-probes-92d6048/probe-out.jsonl` — transcript.
+  - `/tmp/ucil-eval-probes-92d6048/probe-err.log` — server-side
     tracing (single `bootstrap complete` line).
 - `/tmp/ucil-eval-<scenario-id>` tempdirs were **not** created
   (no scenario was runnable).
