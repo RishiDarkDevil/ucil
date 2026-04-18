@@ -1,0 +1,78 @@
+{
+  "id": "WO-0031",
+  "slug": "symbol-resolution",
+  "phase": 1,
+  "week": 4,
+  "features": ["P1-W4-F03"],
+  "feature_ids": ["P1-W4-F03"],
+  "branch": "feat/WO-0031-symbol-resolution",
+  "worktree_branch": "feat/WO-0031-symbol-resolution",
+  "executor_agent": "executor",
+  "goal": "Layer a name-based symbol-resolution API over the just-landed KG CRUD (P1-W4-F02) so callers can look up a definition by bare symbol name + optional file scope without knowing the qualified_name. Unblocks the Week-4 cascade (F04 tree-sitter-extraction-pipeline → F05 find_definition → F09 understand_code → W5 Serena G1 fusion).",
+  "plan_summary": "Add a `SymbolResolution` value struct (file_path, start_line, signature, doc_comment, parent_module) and a read-only `KnowledgeGraph::resolve_symbol(name, file_scope)` method to `crates/ucil-core/src/knowledge_graph.rs`. The SQL MUST match entities either (a) by exact `name = ?1` OR (b) by `qualified_name` whose terminal component equals `?1` (i.e. `qualified_name = ?1` OR `qualified_name LIKE '%::' || ?1`) — this lets tree-sitter callers pass `parse_file` without knowing the crate-qualified path, while still preferring a qualified match. If `file_scope` is provided, an `AND file_path = ?2` filter applies. Tie-breaking MUST pick the most recently-ingested row (`ORDER BY t_ingested_at DESC LIMIT 1`) — this is deterministic against the F02 frozen test fixtures. `parent_module` is DERIVED from `qualified_name` at resolution time by stripping the final `::name` segment (`Some(\"foo::bar\")` for `qualified_name=\"foo::bar::baz\"`; `None` when qualified_name is absent or has no `::`). Test lives at module root per DEC-0005, named `test_symbol_resolution` (the frozen F03 selector). Re-export `SymbolResolution` from `crates/ucil-core/src/lib.rs` alongside the existing public surface.",
+  "scope_in": [
+    "crates/ucil-core/src/knowledge_graph.rs — add `pub struct SymbolResolution` with fields (exact order): `pub file_path: String`, `pub start_line: Option<i64>`, `pub signature: Option<String>`, `pub doc_comment: Option<String>`, `pub parent_module: Option<String>`. Derives: `Debug, Clone, PartialEq, Eq, Serialize, Deserialize`. Rustdoc MUST cite master-plan §12.1 (entities schema) and §18 Phase 1 Week 4 line 1749 (symbol resolution scope).",
+    "crates/ucil-core/src/knowledge_graph.rs — add `impl KnowledgeGraph { pub fn resolve_symbol(&self, name: &str, file_scope: Option<&str>) -> Result<Option<SymbolResolution>, KnowledgeGraphError> }`. Read-only (no transaction needed). The SQL: `SELECT file_path, start_line, signature, doc_comment, qualified_name FROM entities WHERE (name = ?1 OR qualified_name = ?1 OR qualified_name LIKE '%::' || ?1) [AND file_path = ?2] ORDER BY t_ingested_at DESC LIMIT 1`. Map the row → SymbolResolution, computing parent_module from qualified_name by splitting on the final `::` — if qualified_name is None or has no `::`, parent_module is None. `#[tracing::instrument(level=\"debug\", skip(self), fields(name = %name, scoped = file_scope.is_some()))]` per master-plan §15.2.",
+    "crates/ucil-core/src/knowledge_graph.rs — module-root test `test_symbol_resolution` under `#[cfg(test)] #[test]` (DEC-0005 — NOT inside `mod tests { … }`). The test MUST: (a) open an in-memory or tmp KG via `KnowledgeGraph::open`; (b) upsert three Entity rows: `{name: \"parse\", qualified_name: Some(\"ucil_treesitter::parser::parse\"), file_path: \"crates/ucil-treesitter/src/parser.rs\", start_line: Some(42), signature: Some(\"fn parse(src: &str) -> Ast\".into()), doc_comment: Some(\"Parse a source string.\".into())}`, `{name: \"parse\", qualified_name: Some(\"ucil_core::types::parse\"), file_path: \"crates/ucil-core/src/types.rs\", start_line: Some(7), signature: None, doc_comment: None}`, `{name: \"disambiguous\", qualified_name: None, file_path: \"crates/misc.rs\", start_line: Some(1), signature: None, doc_comment: None}`; (c) assert `resolve_symbol(\"parse\", None)` returns `Some(SymbolResolution{..})` with parent_module `Some(\"ucil_core::types\")` (most-recent ingest wins; the test MUST force ordering by inserting the two rows back-to-back — the second insert is newest); (d) assert `resolve_symbol(\"parse\", Some(\"crates/ucil-treesitter/src/parser.rs\"))` returns the treesitter-scoped row with parent_module `Some(\"ucil_treesitter::parser\")` and start_line `Some(42)`; (e) assert `resolve_symbol(\"disambiguous\", None)` returns a row with parent_module == `None` (qualified_name was None); (f) assert `resolve_symbol(\"nonexistent\", None)` returns `Ok(None)`.",
+    "crates/ucil-core/src/lib.rs — extend the existing `pub use knowledge_graph::{...}` re-export to also emit `SymbolResolution`.",
+    "Rustdoc on every new public item (SymbolResolution, resolve_symbol). Each rustdoc block MUST cite master-plan §12.1 schema OR §18 Phase 1 Week 4 line 1749. `#![deny(rustdoc::broken_intra_doc_links)]` is active — use unambiguous intra-doc link forms (e.g. prefer `[KnowledgeGraph::resolve_symbol]` over `[resolve_symbol]`).",
+    "CRITICAL: keep commits ≤50 lines per .claude/rules/commit-style.md. Suggested split: (1) feat(core): add SymbolResolution struct (~30 LoC), (2) feat(core): add KnowledgeGraph::resolve_symbol (~50 LoC), (3) test(core): cover symbol resolution (scope/scope-less/none paths) (~60 LoC — DEC-0005 allows one larger test commit), (4) docs(core): re-export SymbolResolution + rustdoc links (~10 LoC)."
+  ],
+  "scope_out": [
+    "crates/ucil-core/src/incremental.rs — DO NOT touch (WO-0025 fix already merged at f6ec86e; it is NOT a forbidden path but is out of scope here)",
+    "crates/ucil-daemon/ — any server, executor, or pipeline work (P1-W4-F04, F05, F10 land in later WOs)",
+    "crates/ucil-treesitter/ — symbol extraction already passes (P1-W2-F02)",
+    "Any changes to P1-W4-F02's existing methods (`upsert_entity`, `get_entity_by_qualified_name`, `list_entities_by_file`, `get_entity_as_of`, `upsert_relation`, `list_relations_by_source`, `stage_hot_*`, `checkpoint_wal`) — they just landed via WO-0030 and are FROZEN. Only ADDITIONS are in scope.",
+    "Any changes to the `entities` DDL, the Entity struct fields, or the UNIQUE constraint — the schema is now live data.",
+    "New columns on `entities` (e.g. a `parent_module` column) — parent_module is derived at read time, never stored. Adding a column would be a schema migration requiring an ADR.",
+    "Any changes to feature-list.json (only the verifier flips passes via scripts/flip-feature.sh)",
+    "Any changes to scripts/gate/** or scripts/flip-feature.sh",
+    "Any tracing / span renames for existing methods"
+  ],
+  "acceptance": [
+    "Branch feat/WO-0031-symbol-resolution exists on origin with ≥4 commits (small-commit discipline per DEC-0001 / commit-style)",
+    "`cargo nextest run -p ucil-core knowledge_graph::test_symbol_resolution` — the one FROZEN F03 selector — exits 0",
+    "`cargo nextest run -p ucil-core knowledge_graph::` — ALL prior F02/F08 tests still green (regression-clean)",
+    "`cargo clippy --workspace -- -D warnings` — clean",
+    "`cargo fmt --check` — clean",
+    "`cargo doc -p ucil-core --no-deps` — no `^warning` or `^error` lines (incremental rustdoc fix is already on main, so this should stay green)",
+    "`SymbolResolution` and `resolve_symbol` each carry a rustdoc block with at least one master-plan citation",
+    "test_symbol_resolution is a module-root `#[test]` (not inside `mod tests { }`) per DEC-0005",
+    "Ready-for-review marker at `ucil-build/work-orders/0031-ready-for-review.md` is written and pushed"
+  ],
+  "acceptance_criteria": [
+    "cargo fmt --check",
+    "cargo clippy --workspace -- -D warnings",
+    "cargo nextest run -p ucil-core knowledge_graph::test_symbol_resolution",
+    "cargo nextest run -p ucil-core knowledge_graph::",
+    "cargo doc -p ucil-core --no-deps 2>&1 | { ! grep -qE '^(warning|error)'; }",
+    "test -f ucil-build/work-orders/0031-ready-for-review.md",
+    "git log origin/feat/WO-0031-symbol-resolution --format=%H | wc -l | awk '{ exit ($1 >= 4) ? 0 : 1 }'"
+  ],
+  "forbidden_paths": [
+    "ucil-build/feature-list.json",
+    "ucil-build/feature-list.schema.json",
+    "ucil-master-plan-v2.1-final.md",
+    "tests/fixtures/**",
+    "scripts/gate/**",
+    "scripts/flip-feature.sh",
+    "crates/ucil-core/src/incremental.rs"
+  ],
+  "context_refs": [
+    "master-plan:§12.1 Knowledge graph schema — entities table (name, qualified_name, file_path, start_line, signature, doc_comment, t_ingested_at)",
+    "master-plan:§18 Phase 1 Week 4 line 1749 — 'Implement knowledge_graph.rs: CRUD, bi-temporal queries, symbol resolution'",
+    "master-plan:§15.2 — tracing span naming convention (ucil.<layer>.<op>)",
+    "decision:DEC-0005-WO-0006-module-coherence-commits — tests live at module root, not inside `mod tests { }`",
+    "decision:DEC-0001-WO-0002-large-commits — ≤50 LoC per commit soft target, with test commits allowed slightly larger",
+    "decision:DEC-0007-remove-cargo-mutants-per-wo-gate — verifier does NOT run cargo-mutants per WO; just nextest + clippy + doc + fmt",
+    "rules:.claude/rules/rust-style.md — thiserror in libs, #![deny(rustdoc::broken_intra_doc_links)], no .unwrap() outside cfg(test)",
+    "rules:.claude/rules/commit-style.md — Conventional Commits with Phase/Feature/Work-order trailers",
+    "prior-art:WO-0030 (merged 8ae802f) — the F02 CRUD surface this WO builds on; Entity struct field order and method patterns to mirror",
+    "prior-art:crates/ucil-core/src/knowledge_graph.rs existing methods `get_entity_by_qualified_name` and `list_entities_by_file` — follow their read-only shape (no `&mut self`, no transaction wrapper)"
+  ],
+  "dependencies_met": true,
+  "estimated_commits": 4,
+  "estimated_complexity": "low",
+  "created_at": "2026-04-18T19:20:00Z",
+  "created_by": "planner"
+}
