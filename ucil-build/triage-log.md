@@ -30,3 +30,9 @@ Moved 1 work-order(s) to `ucil-build/work-orders/broken-20260416T202258Z/`:
 - ../ucil-wt/WO-0012/ :: auto-stash-on-resume-20260417T180907Z
 
 Inspect with: `git -C <wt> stash list` — pop or drop per executor's judgement.
+
+## 2026-04-18T05:18:25Z resume auto-stash
+
+- ../ucil-wt/WO-0020/ :: auto-stash-on-resume-20260418T051825Z
+
+Inspect with: `git -C <wt> stash list` — pop or drop per executor's judgement.
