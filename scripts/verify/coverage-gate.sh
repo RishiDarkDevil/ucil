@@ -78,17 +78,51 @@ echo "[coverage-gate] Running cargo llvm-cov on '$CRATE' (min_line=${MIN_LINE}%,
 # `totals` object.
 JSON_OUT="$(mktemp -t coverage-gate-XXXXXX.json)"
 LOG_OUT="$(mktemp -t coverage-gate-XXXXXX.log)"
-trap 'rm -f "$JSON_OUT" "$LOG_OUT"' EXIT
+TEST_LOG="$(mktemp -t coverage-gate-test-XXXXXX.log)"
+trap 'rm -f "$JSON_OUT" "$LOG_OUT" "$TEST_LOG"' EXIT
 
-# Try branch coverage first; fall back to line-only if the toolchain
-# can't produce branch info (some nightly flips).
-if ! cargo llvm-cov --package "$CRATE" --summary-only --json >"$JSON_OUT" 2>"$LOG_OUT"; then
-  write_report "FAIL" "\`cargo llvm-cov\` failed. Tail of log:
+# Staged execution to allow pruning between the test-run and the merge:
+# crates that spawn detached threads (notify / notify-debouncer-full
+# watchers) sometimes exit without flushing their instrumentation
+# buffer, leaving zero-byte .profraw files that share fingerprints with
+# complete ones. llvm-profdata merge refuses the set with "no profile
+# can be merged", so the one-shot `cargo llvm-cov ... --summary-only
+# --json` call fails. The canonical fix is the three-step workflow
+# documented at github.com/taiki-e/cargo-llvm-cov#get-coverage-of-external-tests :
+#   1. show-env to set LLVM_PROFILE_FILE & rustflags
+#   2. cargo test to produce .profraw
+#   3. cargo llvm-cov report to merge + summarise
+# We slot a find/-size 0 -delete between (2) and (3).
+
+# shellcheck disable=SC1090
+source <(cargo llvm-cov show-env --export-prefix 2>/dev/null || true)
+
+if ! cargo test --package "$CRATE" >"$TEST_LOG" 2>&1; then
+  write_report "FAIL" "\`cargo test -p $CRATE\` failed under coverage instrumentation. Tail of log:
+
+\`\`\`
+$(tail -40 "$TEST_LOG")
+\`\`\`"
+  echo "[coverage-gate] FAIL — cargo test under coverage errored for $CRATE" >&2
+  exit 1
+fi
+
+# Prune zero-byte .profraw files (orphans from detached threads that
+# exited without flushing). Without this the merge step below fails on
+# fingerprint-collision groups. Scope the prune to the directory
+# cargo-llvm-cov actually writes to.
+PROFRAW_DIR="${CARGO_LLVM_COV_TARGET_DIR:-$REPO_ROOT/target/llvm-cov-target}"
+if [[ -d "$PROFRAW_DIR" ]]; then
+  find "$PROFRAW_DIR" -name '*.profraw' -size 0 -delete 2>/dev/null || true
+fi
+
+if ! cargo llvm-cov report --package "$CRATE" --summary-only --json >"$JSON_OUT" 2>"$LOG_OUT"; then
+  write_report "FAIL" "\`cargo llvm-cov report\` failed after profraw prune. Tail of log:
 
 \`\`\`
 $(tail -40 "$LOG_OUT")
 \`\`\`"
-  echo "[coverage-gate] FAIL — cargo llvm-cov errored for $CRATE" >&2
+  echo "[coverage-gate] FAIL — cargo llvm-cov report errored for $CRATE" >&2
   exit 1
 fi
 
