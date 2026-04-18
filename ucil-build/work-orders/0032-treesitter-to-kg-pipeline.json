@@ -1,0 +1,78 @@
+{
+  "id": "WO-0032",
+  "slug": "treesitter-to-kg-pipeline",
+  "phase": 1,
+  "week": 4,
+  "features": ["P1-W4-F04"],
+  "feature_ids": ["P1-W4-F04"],
+  "branch": "feat/WO-0032-treesitter-to-kg-pipeline",
+  "worktree_branch": "feat/WO-0032-treesitter-to-kg-pipeline",
+  "executor_agent": "executor",
+  "goal": "Wire the tree-sitter parser/extractor into knowledge_graph persistence so a file-change event produces a WAL-batched upsert of all extracted symbols as entities.",
+  "plan_summary": "Add a new `executor` module in `ucil-daemon` that consumes file paths (abstracted so the test can call it without a live file watcher), parses each file with `ucil_treesitter::Parser`, extracts symbols with `ucil_treesitter::SymbolExtractor`, maps each `ExtractedSymbol` to a `ucil_core::knowledge_graph::Entity` with `source_tool=\"tree-sitter\"`, and upserts the whole batch inside a single `KnowledgeGraph::execute_in_transaction(|tx| …)` so every file's symbols land under one WAL transaction (master-plan §18 Phase 1 Week 4 line 1759). The frozen acceptance-test selector `executor::test_treesitter_to_kg_pipeline` exercises the pipeline on one or more files under `tests/fixtures/rust-project/` and asserts that (a) entities are present in the KG after the run (via `list_entities_by_file`), (b) they carry the tree-sitter provenance, (c) re-running the pipeline on the same file is idempotent (uses the existing `upsert_entity` `ON CONFLICT DO UPDATE` path), and (d) the whole batch is atomic (one transaction per file).",
+  "scope_in": [
+    "New module `crates/ucil-daemon/src/executor.rs` (or `executor/mod.rs`) — public surface restricted to what the acceptance test + future `find_definition` caller need.",
+    "Pipeline function: given one or more file paths on disk, parse + extract + batch-upsert into `KnowledgeGraph` in one transaction per file.",
+    "Mapping `ExtractedSymbol` → `Entity` (kind from `SymbolKind`, qualified_name from `ExtractedSymbol::qualified_name` when present, file_path, start_line/end_line, signature, doc_comment, language, source_tool=\"tree-sitter\", source_hash from a content-hash of the span so re-indexing the same file is a no-op by invariant).",
+    "Unit test `executor::test_treesitter_to_kg_pipeline` in `crates/ucil-daemon/src/executor.rs` under `#[cfg(test)]`, hitting the fixture `tests/fixtures/rust-project/src/lib.rs` (or another already-shipped rust-project file) and asserting entities are reachable via `KnowledgeGraph::list_entities_by_file`.",
+    "Exported item(s) in `ucil-daemon/src/lib.rs` via a `pub mod executor;` + minimal `pub use` so the test selector compiles.",
+    "Rustdoc on every public item, referencing master-plan §18 Phase 1 Week 4 line 1759 and CLAUDE.md invariants about WAL batching and no mocks.",
+    "Errors surfaced via a crate-local `ExecutorError` enum with `#[derive(thiserror::Error)]` and `#[non_exhaustive]`."
+  ],
+  "scope_out": [
+    "`find_definition` MCP tool (P1-W4-F05) — separate WO.",
+    "`understand_code` MCP tool (P1-W4-F09) — separate WO.",
+    "`search_code` MCP tool (P1-W5-F09) — separate WO.",
+    "Wiring the pipeline into the live `FileWatcher` loop — next WO can wire watcher → executor once the pipeline itself is green.",
+    "Relation edges (`calls`, `imports`) — F04 scope is entities only; edges belong to later W4/W5 features.",
+    "Serena / LSP enrichment — scope of P1-W5-*.",
+    "Multi-file concurrency / Salsa integration — Salsa skeleton P1-W3-F04 already passes; integration with executor is not required to flip F04.",
+    "Any change to `feature-list.json`, `flip-feature.sh`, `scripts/gate/**`, or the master plan."
+  ],
+  "acceptance": [
+    "`executor` module exists with real implementation (no `todo!`, `unimplemented!`, stub Default::default or bare-literal returns).",
+    "Pipeline runs end-to-end against a real fixture rust file and inserts entities the test retrieves via `KnowledgeGraph::list_entities_by_file`.",
+    "Pipeline upserts within a single `execute_in_transaction` per file (WAL batching invariant).",
+    "Running the pipeline twice on an unchanged file is idempotent (entity count in KG stable).",
+    "`source_tool = \"tree-sitter\"` on every inserted entity.",
+    "All public items carry rustdoc.",
+    "Workspace clippy clean under `-D warnings`; fmt clean; cargo doc clean."
+  ],
+  "acceptance_criteria": [
+    "cargo fmt --all --check",
+    "cargo clippy --workspace --all-targets -- -D warnings",
+    "cargo nextest run -p ucil-daemon executor::test_treesitter_to_kg_pipeline",
+    "cargo nextest run -p ucil-daemon executor::",
+    "cargo nextest run -p ucil-daemon (no regression)",
+    "cargo nextest run -p ucil-core knowledge_graph:: (no regression in F02/F03)",
+    "cargo nextest run -p ucil-treesitter (no regression)",
+    "cargo doc -p ucil-daemon --no-deps produces zero warning/error lines",
+    "test -f ucil-build/work-orders/0032-ready-for-review.md"
+  ],
+  "forbidden_paths": [
+    "ucil-build/feature-list.json",
+    "ucil-build/feature-list.schema.json",
+    "ucil-master-plan-v2.1-final.md",
+    "tests/fixtures/**",
+    "scripts/gate/**",
+    "scripts/flip-feature.sh"
+  ],
+  "context_refs": [
+    "master-plan:§18 Phase 1 Week 4 line 1759 (\"Wire tree-sitter extraction → knowledge graph population\")",
+    "master-plan:§12.1 lines 1130-1145 (entities schema)",
+    "master-plan:§2.1 Layer 1 — Daemon core",
+    "phase-log:ucil-build/phase-log/01-phase-1/CLAUDE.md (invariants 1, 7, 8)",
+    "crate:crates/ucil-core/src/knowledge_graph.rs (Entity, execute_in_transaction, upsert_entity, list_entities_by_file)",
+    "crate:crates/ucil-treesitter/src/symbols.rs (ExtractedSymbol, SymbolExtractor, SymbolKind)",
+    "crate:crates/ucil-treesitter/src/parser.rs (Parser)",
+    "rules:.claude/rules/rust-style.md",
+    "rules:.claude/rules/commit-style.md",
+    "decision:DEC-0005-WO-0006-module-coherence-commits.md",
+    "decision:DEC-0007-remove-cargo-mutants-per-wo-gate.md"
+  ],
+  "dependencies_met": true,
+  "estimated_commits": 6,
+  "estimated_complexity": "medium",
+  "created_at": "2026-04-18T13:46:21Z",
+  "created_by": "planner"
+}
