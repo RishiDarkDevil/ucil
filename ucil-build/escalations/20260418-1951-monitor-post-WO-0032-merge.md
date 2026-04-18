@@ -54,3 +54,15 @@ PATH guard) continue to self-heal transients.
   bypass fires this turn. Triage pass-1 will close cleanly (lesson
   from 1812 heartbeat: unresolved + pass-3 = halt; unresolved + pass-1
   auto-resolve = clean).
+
+## Resolution
+
+**Resolved at**: 2026-04-18T20:30:00+05:30 (post triage pass-3 force-halt)
+**Bucket**: A — admin heartbeat, condition demonstrably closed in HEAD.
+
+WO-0032 merge at 2a17e91 (flipping P1-W4-F04) long since superseded:
+WO-0033 merged at cd381da flipping P1-W4-F05, features now 42/234.
+Monitor self-resolving post pass-3 halt per triage-log user action
+instruction.
+
+resolved: true

@@ -46,3 +46,16 @@ This race closes within 1-2 minutes of this heartbeat being filed.
 - Intentionally NO `resolved: true` line so stop-hook bypass fires this
   turn. Triage pass-1 will close cleanly once verifier's commit lands.
 - Do not touch the untracked report — verifier owns it.
+
+## Resolution
+
+**Resolved at**: 2026-04-18T20:30:00+05:30 (post triage pass-3 force-halt)
+**Bucket**: A — race demonstrably closed in HEAD.
+
+Verifier committed flip at `3a33056 chore(verifier): WO-0033 PASS —
+flip P1-W4-F05 to passes=true`, merged at `cd381da merge: WO-0033
+find-definition-tool (feat → main)`. Features 42/234, P1-W4-F05
+flipped. Verification-report tracked in main. Monitor self-resolving
+post pass-3 halt per triage-log user action instruction.
+
+resolved: true
