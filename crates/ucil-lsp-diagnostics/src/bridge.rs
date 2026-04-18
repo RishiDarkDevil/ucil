@@ -29,6 +29,7 @@ use std::sync::Arc;
 use thiserror::Error;
 
 use crate::diagnostics::{DiagnosticsClient, SerenaClient};
+use crate::server_sharing::FallbackSpawner;
 use crate::types::{Diagnostic, Language, LspEndpoint};
 
 // ── Errors ───────────────────────────────────────────────────────────────────
@@ -142,6 +143,16 @@ pub struct LspDiagnosticsBridge {
     /// per-session `DiagnosticsClient`s from the same bridge.  The
     /// `Send + Sync` bounds are required for `tokio::spawn`.
     serena_client: Option<Arc<dyn SerenaClient + Send + Sync>>,
+    /// Optional degraded-mode LSP-subprocess spawner.
+    ///
+    /// Populated via [`Self::with_fallback_spawner`] (the `P1-W5-F07`
+    /// additive constructor per `DEC-0008` §Consequences); always
+    /// `None` for bridges constructed via [`Self::new`] or
+    /// [`Self::with_serena_client`].  Owning the spawner here ties
+    /// the spawned subprocesses' lifecycle to the bridge — when the
+    /// bridge is dropped, the spawner's [`Drop`] best-effort kills
+    /// every surviving child via tokio's `kill_on_drop(true)`.
+    fallback_spawner: Option<FallbackSpawner>,
 }
 
 impl LspDiagnosticsBridge {
@@ -164,6 +175,7 @@ impl LspDiagnosticsBridge {
             endpoints: HashMap::new(),
             diagnostics_cache: HashMap::new(),
             serena_client: None,
+            fallback_spawner: None,
         }
     }
 
@@ -192,7 +204,59 @@ impl LspDiagnosticsBridge {
             endpoints: HashMap::new(),
             diagnostics_cache: HashMap::new(),
             serena_client: Some(serena_client),
+            fallback_spawner: None,
         }
+    }
+
+    /// Construct a degraded-mode bridge that owns a
+    /// [`FallbackSpawner`] and pre-installs every spawned subprocess
+    /// as a [`crate::types::LspTransport::Standalone`] endpoint.
+    ///
+    /// This is the additive `P1-W5-F07` constructor per `DEC-0008`
+    /// §Consequences: [`Self::new`]'s `(serena_managed: bool) -> Self`
+    /// signature stays byte-for-byte unchanged.  Returned bridge has
+    /// `serena_managed = false` and no [`SerenaClient`] — the
+    /// spawner's [`crate::server_sharing::FallbackSpawner::install_into`]
+    /// has already been invoked so callers can immediately
+    /// [`Self::endpoint_for`] any spawned language.
+    ///
+    /// The spawner is moved into the bridge so its lifecycle (and
+    /// the lifecycle of every spawned LSP subprocess) is tied to the
+    /// bridge — when the bridge is dropped, the spawner's
+    /// best-effort [`Drop`] runs and tokio's `kill_on_drop(true)`
+    /// reaps every surviving child.
+    #[must_use]
+    pub fn with_fallback_spawner(spawner: FallbackSpawner) -> Self {
+        let mut bridge = Self::new(false);
+        spawner.install_into(&mut bridge);
+        bridge.fallback_spawner = Some(spawner);
+        bridge
+    }
+
+    /// Borrow the optional [`FallbackSpawner`] owned by this bridge,
+    /// or `None` if the bridge was not constructed via
+    /// [`Self::with_fallback_spawner`].
+    ///
+    /// Exposed as a shared reference so callers can read spawner
+    /// state (PIDs, last-used timestamps) without taking ownership.
+    /// The spawner's mutating operations
+    /// ([`crate::server_sharing::FallbackSpawner::touch`],
+    /// [`crate::server_sharing::FallbackSpawner::shutdown_all`])
+    /// require `&mut FallbackSpawner` — see
+    /// [`Self::fallback_spawner_mut`] for the mutable accessor.
+    #[must_use]
+    pub const fn fallback_spawner(&self) -> Option<&FallbackSpawner> {
+        self.fallback_spawner.as_ref()
+    }
+
+    /// Mutably borrow the optional [`FallbackSpawner`] owned by this
+    /// bridge, or `None` if the bridge was not constructed via
+    /// [`Self::with_fallback_spawner`].
+    ///
+    /// Required for `touch`, `shutdown_all`, and `is_alive`, which
+    /// take `&mut FallbackSpawner`.
+    pub const fn fallback_spawner_mut(&mut self) -> Option<&mut FallbackSpawner> {
+        self.fallback_spawner.as_mut()
     }
 
     /// Returns `true` when this bridge was constructed with Serena in

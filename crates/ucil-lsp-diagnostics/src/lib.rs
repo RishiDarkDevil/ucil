@@ -20,6 +20,7 @@ pub mod bridge;
 pub mod call_hierarchy;
 pub mod diagnostics;
 pub mod quality_pipeline;
+pub mod server_sharing;
 pub mod types;
 
 // ── Re-exports ────────────────────────────────────────────────────────────────
@@ -36,4 +37,5 @@ pub use quality_pipeline::{
     category_from_severity, language_default_server, persist_diagnostics, severity_to_quality,
     QualityPipelineError,
 };
+pub use server_sharing::{FallbackSpawner, ServerSharingError};
 pub use types::{Diagnostic, DiagnosticSeverity, Language, LspEndpoint, LspTransport};
