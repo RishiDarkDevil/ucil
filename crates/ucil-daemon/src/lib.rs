@@ -21,6 +21,13 @@
 //! crash-recovery [`Checkpoint`] (WO-0022 for P1-W3-F09) lives in the
 //! `lifecycle` module and persists the daemon's last-indexed commit to
 //! `.ucil/checkpoint.json` so a restart skips already-indexed prefixes.
+//!
+//! The `watcher` module (introduced in WO-0026 for P1-W3-F02) owns the
+//! two-path file-change detector described in master-plan §18 Phase 1
+//! Week 3 line 1741 and §14 lines 1024-1025: editor/filesystem events
+//! arrive via `notify-debouncer-full` with a 100 ms debounce window,
+//! while `PostToolUse` hook invocations bypass the debouncer and emit
+//! a [`watcher::FileEvent`] immediately — see [`watcher::FileWatcher`].
 
 #![deny(warnings)]
 #![warn(clippy::all, clippy::pedantic, clippy::nursery)]
@@ -32,6 +39,7 @@ pub mod server;
 pub mod session_manager;
 pub mod session_ttl;
 pub mod storage;
+pub mod watcher;
 
 #[rustfmt::skip]
 pub use lifecycle::{Checkpoint, CheckpointError, Lifecycle, PidFile, PidFileError, ShutdownReason};
@@ -51,3 +59,6 @@ pub use session_manager::{
 };
 pub use session_ttl::{compute_expires_at, is_expired};
 pub use storage::{StorageError, StorageLayout};
+pub use watcher::{
+    EventSource, FileEvent, FileEventKind, FileWatcher, WatcherError, DEBOUNCE_WINDOW,
+};

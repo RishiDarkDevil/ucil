@@ -28,6 +28,8 @@ serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
 uuid.workspace = true
+notify = { workspace = true }
+notify-debouncer-full = { workspace = true }
 ucil-core = { path = "../ucil-core" }
 
 [dev-dependencies]
