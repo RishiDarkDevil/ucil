@@ -47,6 +47,17 @@
 //! → knowledge graph population"): [`executor::IngestPipeline::ingest_file`]
 //! parses a file with `ucil_treesitter`, extracts symbols, and upserts
 //! the whole batch inside one `BEGIN IMMEDIATE` transaction per file.
+//!
+//! The `server` module (introduced in WO-0010 for `P1-W3-F07`) owns
+//! the MCP JSON-RPC 2.0 skeleton.  WO-0033 for `P1-W4-F05` (master-plan
+//! §3.2 row 2 + §18 Phase 1 Week 4 line 1751) promoted the
+//! `find_definition` tool from the 22-tool stub catalog to a real
+//! handler: [`server::McpServer::with_knowledge_graph`] builds a
+//! server that, on `tools/call` for `find_definition`, resolves the
+//! symbol through [`ucil_core::KnowledgeGraph::resolve_symbol`] and
+//! projects inbound `calls`-kind relations onto a `_meta.callers`
+//! list.  The 21 remaining tools keep the phase-1 `_meta.not_yet_
+//! implemented: true` stub so phase-log invariant #9 stays satisfied.
 
 #![deny(warnings)]
 #![warn(clippy::all, clippy::pedantic, clippy::nursery)]
