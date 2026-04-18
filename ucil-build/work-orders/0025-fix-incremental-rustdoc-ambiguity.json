@@ -1,0 +1,61 @@
+{
+  "id": "WO-0025",
+  "slug": "fix-incremental-rustdoc-ambiguity",
+  "phase": 1,
+  "week": 1,
+  "features": [],
+  "feature_ids": [],
+  "branch": "feat/WO-0025-fix-incremental-rustdoc-ambiguity",
+  "worktree_branch": "feat/WO-0025-fix-incremental-rustdoc-ambiguity",
+  "executor_agent": "executor",
+  "goal": "Fix two ambiguous intra-doc links in crates/ucil-core/src/incremental.rs (introduced silently by WO-0009 commit 5c2739a) that cause cargo doc -p ucil-core --no-deps to emit hard errors. These regressions block the WO-0024 verifier gate (acceptance criterion #5 cargo doc). Bucket-D micro-WO synthesized by triage cap-rescue pass in response to escalation ucil-build/escalations/20260418-0820-pre-existing-incremental-rustdoc-bug.md.",
+  "plan_summary": "Two 4-character edits in crates/ucil-core/src/incremental.rs lines 5-6. Replace `[`symbol_count`]` with `[`symbol_count()`]` and `[`dependent_metric`]` with `[`dependent_metric()`]`. rustdoc cannot disambiguate the unadorned intra-doc links because salsa::tracked fn <name> macro-expands to both a function AND a same-named struct; the `()` suffix is rustdoc's suggested fix (function form) and matches the surrounding prose (`query functions`). Verify no other ambiguous intra-doc link remains in the crate by running the cargo doc check before committing.",
+  "scope_in": [
+    "crates/ucil-core/src/incremental.rs lines 5-6 — change `[`symbol_count`]` to `[`symbol_count()`]` and `[`dependent_metric`]` to `[`dependent_metric()`]`"
+  ],
+  "scope_out": [
+    "any other file",
+    "any other line in incremental.rs",
+    "any new rustdoc content",
+    "any code/logic change",
+    "any ADR",
+    "any change under tests/fixtures/",
+    "any change under ucil-build/"
+  ],
+  "acceptance": [
+    "cargo doc -p ucil-core --no-deps 2>&1 | { ! grep -qE '^(warning|error)'; } exits 0",
+    "cargo nextest run -p ucil-core incremental:: all pass (regression guard; the existing 5 tests must still work)",
+    "cargo clippy -p ucil-core --all-targets -- -D warnings exits 0",
+    "cargo build --workspace exits 0",
+    "git diff origin/main..HEAD --name-only touches only crates/ucil-core/src/incremental.rs"
+  ],
+  "acceptance_criteria": [
+    "cargo doc -p ucil-core --no-deps 2>&1 | { ! grep -qE '^(warning|error)'; } exits 0",
+    "cargo nextest run -p ucil-core incremental:: all pass (regression guard; the existing 5 tests must still work)",
+    "cargo clippy -p ucil-core --all-targets -- -D warnings exits 0",
+    "cargo build --workspace exits 0",
+    "git diff origin/main..HEAD --name-only touches only crates/ucil-core/src/incremental.rs"
+  ],
+  "forbidden_paths": [
+    "ucil-build/feature-list.json",
+    "ucil-master-plan-v2.1-final.md",
+    "tests/fixtures/**",
+    "scripts/gate/**",
+    "scripts/flip-feature.sh",
+    "ucil-build/decisions/**",
+    ".claude/agents/**",
+    ".claude/settings.json"
+  ],
+  "context_refs": [
+    "escalation:20260418-0820-pre-existing-incremental-rustdoc-bug.md",
+    "escalation:20260418-0848-wo-WO-0024-attempts-exhausted.md",
+    "verification-report:root-cause-WO-0024.md",
+    "rejection:WO-0024.md",
+    "parent-WO:WO-0024 (blocked on this fix; features P1-W4-F02, P1-W4-F08)"
+  ],
+  "dependencies_met": true,
+  "estimated_commits": 1,
+  "estimated_complexity": "low",
+  "created_at": "2026-04-18T14:30:00Z",
+  "created_by": "triage"
+}
