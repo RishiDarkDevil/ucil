@@ -1,7 +1,7 @@
 # Effectiveness Report — Phase 1
 
-Run at: 2026-04-19T02:45:00Z
-Commit: 5edc200bc1790b7a369392ef271e015b0f137381
+Run at: 2026-04-19T03:00:00Z
+Commit: 97932e0c9af5b311b130e903a492e2b8e52837d1
 Evaluator: effectiveness-evaluator (fresh session)
 
 ## Summary
@@ -22,27 +22,32 @@ external `claude -p` run at this commit. The gate contract (see §"Gate
 contract") permits this as a vacuous pass. The §"Advisory" section documents
 what would make the pass *substantive* rather than vacuous.
 
-## Progress since the previous report (`effectiveness-phase-1.md` @ `8d8fc0c`)
+## Progress since the previous report (`effectiveness-phase-1.md` @ `5edc200`)
 
-HEAD advanced from `8d8fc0c` → `5edc200` (5 commits). The intervening commits
-are reporting-only — coverage report refresh, triage pass, escalation
-resolution note, and phase-1 integration report. **No source code, no
-settings.json, no scenario yaml, no feature-list fields relevant to the two
-required tools changed.** Specifically:
+HEAD advanced from `5edc200` → `97932e0` (5 commits). The intervening commits
+are reporting-only — escalation closure, coverage report refresh, integration
+test report. **No source code, no settings.json, no scenario yaml, no
+feature-list fields relevant to the two required tools changed.** Per
+`git diff --stat 5edc200..HEAD -- crates/ adapters/ ml/ plugin* tests/scenarios/ .claude/settings.json`:
+no diff in any of those paths.
 
-- `McpServer::new()` still builds the stdio server with **no KG attached**
-  (`crates/ucil-daemon/src/main.rs:17`).
-- `handle_tools_call` at `crates/ucil-daemon/src/server.rs:515-571` still
-  routes `find_definition`, `get_conventions`, `search_code`,
-  `understand_code` to their real handlers only when `self.kg.is_some()`;
-  falls through to `_meta.not_yet_implemented: true` otherwise.
-- `find_references` is still NOT in that KG-routed allow-list; it's a
-  Phase-2 feature (`P2-W7-F05`, `passes: false`, `last_verified_by: null`).
+Specifically (re-verified at `97932e0`):
+
+- `McpServer::new()` still builds the stdio server with **no KG attached**.
+- `handle_tools_call` still routes the four KG-backed tools only when
+  `self.kg.is_some()`; falls through to `_meta.not_yet_implemented: true`
+  otherwise.
+- `find_references` is still NOT in the KG-routed allow-list; it's the
+  Phase-2 feature `P2-W7-F05` (`passes: false`, `last_verified_by: null`).
 - `.claude/settings.json` still has zero `ucil` / `ucil-mcp` entries under
-  `mcpServers`.
+  `mcpServers` (six servers registered: `context7`, `filesystem`, `github`,
+  `memory`, `sequential-thinking`, `serena`).
 
 The full rationale below holds verbatim — only the HEAD sha, the "Progress"
-table, and the Environment-notes sha change from `8d8fc0c` to `5edc200`.
+table, and the Environment-notes sha change from `5edc200` to `97932e0`.
+
+This is the **fourth consecutive vacuous PASS** (`316109e` → `8d8fc0c` →
+`5edc200` → `97932e0`). None of the three Advisory items have landed.
 
 ## Scenario discovery
 
@@ -66,6 +71,7 @@ Only `nav-rust-symbol` is eligible for Phase 1.
 command -v ucil-mcp                → MISSING
 test -x ./target/debug/ucil-mcp    → MISSING
 test -x ./target/release/ucil-mcp  → MISSING
+test -x ./target/debug/ucil-daemon → exists
 ```
 
 No `ucil-mcp` binary exists. Per WO-0040 the equivalent entry point is
@@ -96,7 +102,7 @@ Response frame 2 (`tools/list`) — valid; enumerates 22 tools including
 
 The evaluator must confirm tools are not merely registered but actually answer
 the scenario's question. Direct probe of both required tools at current HEAD
-`5edc200`:
+`97932e0`:
 
 ```
 printf '%s\n%s\n%s\n%s\n' \
@@ -126,20 +132,21 @@ printf '%s\n%s\n%s\n%s\n' \
 **Both return the Phase-1 stub envelope (`_meta.not_yet_implemented: true`).**
 
 Root cause (unchanged): `main.rs:17` constructs the server via
-`McpServer::new()` with no KG handle. `handle_tools_call` at
-`server.rs:527-546` only dispatches to real handlers when `self.kg.is_some()`.
-Since the daemon has no KG init path from the stdio entry point (and no CLI
-flag to point it at a project), every call falls through to the stub.
+`McpServer::new()` with no KG handle. `handle_tools_call` only dispatches
+to real handlers when `self.kg.is_some()`. Since the daemon has no KG init
+path from the stdio entry point (and no CLI flag to point it at a project),
+every call falls through to the stub.
 
 ### Probe 4 — host-level MCP registration
 
 ```
-grep -cE '"ucil(-mcp)?":'  .claude/settings.json → 0
+jq '.mcpServers | keys' .claude/settings.json
 ```
 
+Result: `["context7", "filesystem", "github", "memory", "sequential-thinking", "serena"]`.
+
 No `ucil` entry under `mcpServers` in `.claude/settings.json`. Six MCP
-servers are registered (filesystem, github, context7, memory,
-sequential-thinking, serena); none expose UCIL's tool surface. A spawned
+servers are registered; none expose UCIL's tool surface. A spawned
 `claude -p` session — which is how the evaluator drives a scenario — has no
 path to call `find_definition` or `find_references` by name even at the
 process level, independent of the stub issue above.
@@ -161,7 +168,7 @@ a KG.
 
 `find_references` is a Phase-2 feature; `passes: false`, no implementation
 body. Even with a KG attached, it would fall through to the stub because it
-is not in the KG-routed allow-list at `server.rs:527-546`.
+is not in the KG-routed allow-list.
 
 ### Conclusion
 
@@ -241,8 +248,8 @@ A phase-1 gate that passes with zero runnable effectiveness scenarios is a
 real tasks better than grep+Read — is not yet demonstrated at Phase 1.
 WO-0040 landed the stdio skeleton, which is real progress; however the
 stub-only dispatch means the external surface still delivers no UCIL value.
-None of the three advisory items from `316109e` / `8d8fc0c` landed in the
-`8d8fc0c → 5edc200` window.
+None of the three advisory items from `316109e` / `8d8fc0c` / `5edc200`
+landed in the `5edc200 → 97932e0` window.
 
 Concrete paths to a substantive pass (none blocks this gate; each is a
 candidate work-order):
@@ -269,15 +276,18 @@ candidate work-order):
    `nav-rust-symbol` stays phase-2+ because `find_references` is a hard
    dependency for its "every place it is CALLED FROM" requirement.
 
-All three items have now been advisory through three consecutive reports
-(`316109e`, `8d8fc0c`, `5edc200`); none have landed. The evaluator does not
-block the gate on them — they are carried as planner input.
+All three items have now been advisory through **four** consecutive reports
+(`316109e`, `8d8fc0c`, `5edc200`, `97932e0`); none have landed. The
+evaluator does not block the gate on them — they are carried as planner
+input. Recommend planner pick this up before phase-1 is shipped, even
+though it is not gate-blocking, so the eventual phase-1 ship has a
+substantive effectiveness datapoint to back it.
 
 ## Environment notes (for reproducibility)
 
 - Repo root: `/home/rishidarkdevil/Desktop/ucil`
 - Branch: `main`
-- HEAD: `5edc200bc1790b7a369392ef271e015b0f137381`
+- HEAD: `97932e0c9af5b311b130e903a492e2b8e52837d1`
 - `target/debug/ucil-daemon` was present (built by earlier work-orders); no
   rebuild forced by this evaluator pass.
 - `/tmp/ucil-eval-*` tempdirs were **not** created (no runnable scenario).
