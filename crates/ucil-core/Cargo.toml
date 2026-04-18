@@ -17,6 +17,11 @@ rusqlite.workspace = true
 opentelemetry.workspace = true
 opentelemetry_sdk.workspace = true
 opentelemetry-stdout.workspace = true
+# Timestamps for bi-temporal queries — RFC-3339 encoded `t_valid_from` /
+# `t_valid_to` so SQLite TEXT string-comparison is lexicographic.  Used
+# by `knowledge_graph::KnowledgeGraph::get_entity_as_of`.  Phase 1 Week
+# 4 (WO-0024).
+chrono = { workspace = true }
 # Incremental computation framework — dependency DAG, invalidation,
 # automatic early cutoff. Skeleton lands in this WO-0009; subsequent
 # Phase-1 work will wire the file-watcher layer through it.
