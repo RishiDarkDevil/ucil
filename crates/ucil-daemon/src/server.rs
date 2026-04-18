@@ -39,6 +39,7 @@
 #![allow(clippy::module_name_repetitions)]
 
 use std::{
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -50,6 +51,8 @@ use tokio::{
     time::timeout,
 };
 use ucil_core::KnowledgeGraph;
+
+use crate::text_search::{self, TextMatch, TextSearchError};
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -78,6 +81,24 @@ const WRITE_TIMEOUT: Duration = Duration::from_millis(WRITE_TIMEOUT_MS);
 
 /// The number of UCIL tools exposed over MCP, per master-plan §3.2.
 pub const TOOL_COUNT: usize = 22;
+
+/// Default value for `search_code`'s `arguments.max_results`.
+///
+/// Chosen to keep the default response envelope well under an MCP
+/// host's context window while still covering the common "show me
+/// every hit in a small tree" use case.  Paired with
+/// [`SEARCH_CODE_MAX_RESULTS`], which caps whatever the caller asks
+/// for so a pathological query cannot flood the response.
+pub const SEARCH_CODE_DEFAULT_MAX_RESULTS: usize = 50;
+
+/// Saturating cap on `search_code`'s `arguments.max_results`.
+///
+/// `search_code` (`P1-W5-F09`, master-plan §3.2 row 4) merges symbol
+/// and text matches; a pathological query such as `.` against a large
+/// tree would otherwise produce megabytes of JSON.  The handler clamps
+/// the caller's request at this ceiling and emits `tracing::warn!` so
+/// the agent can see the clamp in its own logs.
+pub const SEARCH_CODE_MAX_RESULTS: usize = 500;
 
 // ── Errors ───────────────────────────────────────────────────────────────────
 
@@ -317,8 +338,9 @@ pub struct McpServer {
     /// Optional handle onto the bi-temporal knowledge graph populated by
     /// the `P1-W4-F04` tree-sitter → KG ingest pipeline.  When present,
     /// `tools/call` dispatches the `find_definition` tool
-    /// (`P1-W4-F05`, master-plan §3.2 row 2) and the
-    /// `get_conventions` tool (`P1-W4-F10`, master-plan §3.2 row 7) to
+    /// (`P1-W4-F05`, master-plan §3.2 row 2), the `get_conventions`
+    /// tool (`P1-W4-F10`, master-plan §3.2 row 7), and the
+    /// `search_code` tool (`P1-W5-F09`, master-plan §3.2 row 4) to
     /// real handlers that pull from the graph; when absent, each tool
     /// falls through to the `_meta.not_yet_implemented: true` stub path
     /// every other tool still uses (phase-1 invariant #9).
@@ -348,24 +370,28 @@ impl McpServer {
         }
     }
 
-    /// Construct a server that routes `find_definition` (`P1-W4-F05`)
-    /// **and** `get_conventions` (`P1-W4-F10`) to their real handlers
-    /// backed by the supplied knowledge graph.
+    /// Construct a server that routes `find_definition` (`P1-W4-F05`),
+    /// `get_conventions` (`P1-W4-F10`), and `search_code` (`P1-W5-F09`)
+    /// to their real handlers backed by the supplied knowledge graph.
     ///
     /// The handle is `Arc<Mutex<_>>` so the caller can keep a second
     /// reference (e.g. the ingest pipeline) and mutate the graph
     /// concurrently; each handler takes the lock for the duration of a
-    /// single read and releases it before encoding the response.  Every
-    /// tool **other** than `find_definition` and `get_conventions`
-    /// still falls through to the stub path — the 22-tool catalog is
-    /// unchanged and phase-1 invariant #9 is preserved for the
-    /// remaining 20 tools.
+    /// single read and releases it before encoding the response.
+    /// `search_code` additionally runs an in-process `ripgrep` walk
+    /// (see `ucil-daemon::text_search`) with the KG lock released so
+    /// the filesystem scan does not block concurrent KG writes.  Every
+    /// tool **other** than `find_definition`, `get_conventions`, and
+    /// `search_code` still falls through to the stub path — the
+    /// 22-tool catalog is unchanged and phase-1 invariant #9 is
+    /// preserved for the remaining 19 tools.
     ///
     /// See master-plan §3.2 row 2 (`find_definition` —
     /// go-to-definition with full context), §3.2 row 7
     /// (`get_conventions` — project coding style, naming conventions,
-    /// patterns in use), and §18 Phase 1 Week 4 line 1751 ("Implement
-    /// first working tool: `find_definition`").
+    /// patterns in use), §3.2 row 4 (`search_code` — hybrid search:
+    /// text + structural + semantic), and §18 Phase 1 Week 4 line 1751
+    /// ("Implement first working tool: `find_definition`").
     #[must_use]
     pub fn with_knowledge_graph(kg: Arc<Mutex<KnowledgeGraph>>) -> Self {
         Self {
@@ -506,6 +532,11 @@ impl McpServer {
         if name == "get_conventions" {
             if let Some(kg) = self.kg.as_ref() {
                 return Self::handle_get_conventions(id, params, kg);
+            }
+        }
+        if name == "search_code" {
+            if let Some(kg) = self.kg.as_ref() {
+                return Self::handle_search_code(id, params, kg);
             }
         }
 
@@ -652,6 +683,110 @@ impl McpServer {
             }
             Err(e) => jsonrpc_error(id, e.code, &e.message),
         }
+    }
+
+    /// Handle the `search_code` MCP tool (`P1-W5-F09`, master-plan
+    /// §3.2 row 4 / §18 Phase 1 Week 5 line 1765, DEC-0009).
+    ///
+    /// Extracts `arguments.query` (required non-empty string),
+    /// `arguments.root` (optional string; defaults to the daemon's
+    /// current working directory), and `arguments.max_results`
+    /// (optional unsigned integer; defaults to
+    /// [`SEARCH_CODE_DEFAULT_MAX_RESULTS`] and is saturating-clamped to
+    /// [`SEARCH_CODE_MAX_RESULTS`]) from `params`.  Two reads run back
+    /// to back:
+    ///
+    /// 1. **Symbol** — [`ucil_core::KnowledgeGraph::search_entities_by_name`]
+    ///    returns the tree-sitter-indexed entities whose `name` or
+    ///    `qualified_name` contain `query` as a substring.  The
+    ///    KG mutex is held only for the duration of this call and
+    ///    released before the filesystem scan begins.
+    /// 2. **Text** — [`crate::text_search::text_search`] walks `root`
+    ///    with an `ignore::WalkBuilder`, running the query through an
+    ///    in-process `grep_regex` matcher against every `.gitignore`-
+    ///    permitted file.  Results stream into a bounded vector capped
+    ///    at `max_results`.
+    ///
+    /// The two match lists are merged by [`merge_search_results`]
+    /// (pure function, unit-tested separately) using
+    /// `(file_path, line_number)` as the dedup key: symbol hits win
+    /// collisions and get `source: "both"` when the same line also
+    /// showed up in the text walk.  Symbol-only hits carry `source:
+    /// "symbol"`, text-only hits carry `source: "text"`.
+    ///
+    /// The response envelope's `_meta` carries:
+    ///
+    /// * `tool`: `"search_code"`.
+    /// * `source`: `"tree-sitter+ripgrep"` — advertises the dual data
+    ///   lineage so downstream G1/G2 fusion layers know both indices
+    ///   have been consulted.
+    /// * `count`: length of `results`.
+    /// * `query`: echoes the caller's query verbatim.
+    /// * `root`: absolute-or-as-supplied path string for the search root.
+    /// * `symbol_match_count`: raw number of KG hits (pre-merge, pre-cap).
+    /// * `text_match_count`: raw number of ripgrep hits (pre-merge,
+    ///   post-cap inside the searcher).
+    /// * `results`: the merged array of [`SearchCodeResult`] objects.
+    ///
+    /// Empty result is a non-error response (`isError: false`,
+    /// `content[0].text == "no matches for …"`).
+    ///
+    /// # Error codes
+    ///
+    /// * `-32602` — missing/non-string `query`, empty `query`,
+    ///   non-string `root`, non-u64 `max_results`, nonexistent-or-
+    ///   non-directory `root`, or a regex-compilation failure inside
+    ///   the text searcher (the caller supplied an invalid regex).
+    /// * `-32603` — internal KG or I/O failure (mutex poisoned,
+    ///   per-file I/O errors aggregating past the walker).
+    fn handle_search_code(id: &Value, params: &Value, kg: &Arc<Mutex<KnowledgeGraph>>) -> Value {
+        let args = params
+            .get("arguments")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+
+        let SearchCodeArgs {
+            query,
+            root,
+            max_results,
+        } = match parse_search_code_args(&args) {
+            Ok(a) => a,
+            Err(e) => return jsonrpc_error(id, e.code, &e.message),
+        };
+
+        // ── Symbol half ─────────────────────────────────────────────
+        let symbols = match read_symbol_matches(kg, &query, max_results) {
+            Ok(rows) => rows,
+            Err(e) => return jsonrpc_error(id, e.code, &e.message),
+        };
+
+        // ── Text half (KG mutex already released inside the helper) ──
+        let text_hits = match text_search::text_search(&root, &query, max_results) {
+            Ok(hits) => hits,
+            Err(TextSearchError::BuildMatcher(e)) => {
+                return jsonrpc_error(
+                    id,
+                    -32602,
+                    &format!("search_code: invalid query regex: {e}"),
+                );
+            }
+            Err(e) => {
+                tracing::error!("search_code: text_search failed: {e}");
+                return jsonrpc_error(id, -32603, &format!("search_code: text search failed: {e}"));
+            }
+        };
+
+        let symbol_match_count = symbols.len();
+        let text_match_count = text_hits.len();
+        let merged = merge_search_results(&symbols, &text_hits, max_results);
+        search_code_response(
+            id,
+            &query,
+            &root,
+            symbol_match_count,
+            text_match_count,
+            &merged,
+        )
     }
 }
 
@@ -933,6 +1068,345 @@ fn get_conventions_found_response(
                 "count": count,
                 "category": category_json,
                 "conventions": conventions_json,
+            },
+            "content": [
+                { "type": "text", "text": text }
+            ],
+            "isError": false
+        }
+    })
+}
+
+// ── search_code helpers (P1-W5-F09) ──────────────────────────────────────────
+
+/// Internal error shape for the `search_code` read pipeline — mirrors
+/// [`FindDefinitionReadError`] and [`GetConventionsReadError`] so the
+/// outer handler can build the JSON-RPC error envelope with the mutex
+/// guard already released.
+#[derive(Debug)]
+struct SearchCodeReadError {
+    /// JSON-RPC 2.0 error code (`-32603` internal, `-32602` invalid
+    /// params).
+    code: i64,
+    /// Human-readable error message propagated up to the caller.
+    message: String,
+}
+
+/// Parsed, validated `search_code` arguments.  Produced by
+/// [`parse_search_code_args`] so the outer [`McpServer::handle_search_code`]
+/// stays under the `clippy::too_many_lines` threshold.
+#[derive(Debug)]
+struct SearchCodeArgs {
+    /// Caller's non-empty query string.  Passed verbatim to
+    /// [`ucil_core::KnowledgeGraph::search_entities_by_name`] (substring
+    /// match) and to [`grep_regex::RegexMatcherBuilder`] (regex match).
+    query: String,
+    /// Filesystem root for the text half of the search.  Guaranteed to
+    /// be an existing directory at this point.
+    root: PathBuf,
+    /// Per-half hit cap — already saturating-clamped to
+    /// [`SEARCH_CODE_MAX_RESULTS`].
+    max_results: usize,
+}
+
+/// Extract and validate the three `search_code` arguments — `query`
+/// (required non-empty string), `root` (optional string; defaults to
+/// `std::env::current_dir`), and `max_results` (optional non-negative
+/// integer; defaults to [`SEARCH_CODE_DEFAULT_MAX_RESULTS`] and is
+/// saturating-clamped at [`SEARCH_CODE_MAX_RESULTS`]).
+///
+/// Missing-or-wrong-type arguments map to a [`SearchCodeReadError`]
+/// with code `-32602` (Invalid params).  Caller converts that into the
+/// JSON-RPC error envelope via [`jsonrpc_error`].
+fn parse_search_code_args(args: &Value) -> Result<SearchCodeArgs, SearchCodeReadError> {
+    // `arguments.query` — required, non-empty string.
+    let query: String = match args.get("query") {
+        Some(Value::String(s)) if !s.is_empty() => s.clone(),
+        Some(Value::String(_)) => {
+            return Err(SearchCodeReadError {
+                code: -32602,
+                message: "search_code: `arguments.query` must not be empty".to_owned(),
+            });
+        }
+        _ => {
+            return Err(SearchCodeReadError {
+                code: -32602,
+                message: "search_code: `arguments.query` is required and must be a string"
+                    .to_owned(),
+            });
+        }
+    };
+
+    // `arguments.root` — optional string; default to cwd.  Missing
+    // key, explicit `null`, and an empty string all fall back to the
+    // daemon's current working directory.
+    let root: PathBuf = match args.get("root") {
+        None | Some(Value::Null) => cwd_or_dot(),
+        Some(Value::String(s)) if s.is_empty() => cwd_or_dot(),
+        Some(Value::String(s)) => PathBuf::from(s),
+        Some(_) => {
+            return Err(SearchCodeReadError {
+                code: -32602,
+                message: "search_code: `arguments.root` must be a string (or omitted/null)"
+                    .to_owned(),
+            });
+        }
+    };
+    if !root.is_dir() {
+        return Err(SearchCodeReadError {
+            code: -32602,
+            message: format!(
+                "search_code: `arguments.root` does not exist or is not a directory: {}",
+                root.display(),
+            ),
+        });
+    }
+
+    // `arguments.max_results` — optional non-negative integer.
+    let max_results: usize = match args.get("max_results") {
+        None | Some(Value::Null) => SEARCH_CODE_DEFAULT_MAX_RESULTS,
+        Some(v) => match v.as_u64() {
+            Some(n) => clamp_max_results(n),
+            None => {
+                return Err(SearchCodeReadError {
+                    code: -32602,
+                    message:
+                        "search_code: `arguments.max_results` must be a non-negative integer (or omitted)"
+                            .to_owned(),
+                });
+            }
+        },
+    };
+
+    Ok(SearchCodeArgs {
+        query,
+        root,
+        max_results,
+    })
+}
+
+/// Return the process's current working directory, falling back to
+/// `"."` (relative, resolved against whatever the downstream walker
+/// decides) if the syscall fails.  The fallback is logged at `WARN`.
+fn cwd_or_dot() -> PathBuf {
+    std::env::current_dir().unwrap_or_else(|e| {
+        tracing::warn!("search_code: current_dir() failed: {e}; falling back to '.'");
+        PathBuf::from(".")
+    })
+}
+
+/// Clamp a caller-supplied `max_results` value to
+/// [`SEARCH_CODE_MAX_RESULTS`], logging at `WARN` when the clamp
+/// actually fires so the agent can see the cap in its own logs.
+fn clamp_max_results(n: u64) -> usize {
+    let requested = usize::try_from(n).unwrap_or(SEARCH_CODE_MAX_RESULTS);
+    if requested > SEARCH_CODE_MAX_RESULTS {
+        tracing::warn!(
+            requested,
+            cap = SEARCH_CODE_MAX_RESULTS,
+            "search_code: `arguments.max_results` clamped to cap",
+        );
+        SEARCH_CODE_MAX_RESULTS
+    } else {
+        requested
+    }
+}
+
+/// One merged row emitted by [`handle_search_code`] — the JSON
+/// serialisation is the `_meta.results[]` element shape advertised on
+/// the wire (WO-0035 `scope_in` point 7 / acceptance-test field spec).
+///
+/// `source` is the discriminant:
+///
+/// * `"symbol"` — only the KG half reported this `(file, line)`.
+/// * `"text"` — only the `ripgrep` half reported this `(file, line)`.
+/// * `"both"` — both halves reported it; the symbol metadata is
+///   preserved and `preview` carries the `ripgrep` line text so the
+///   caller sees the raw matched source line.
+///
+/// `qualified_name` / `signature` are symbol-only; text-only rows
+/// omit them via `#[serde(skip_serializing_if = "Option::is_none")]`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+struct SearchCodeResult {
+    /// Origin discriminant: `"symbol"`, `"text"`, or `"both"`.
+    source: String,
+    /// Path of the file the hit came from — absolute when produced by
+    /// the text walker (walker yields absolute paths), and as-stored
+    /// on the KG row when produced by the symbol half.
+    file_path: String,
+    /// 1-indexed line number.  For symbol rows this is the KG's
+    /// `start_line`; for text rows it is `grep_searcher`'s reported
+    /// line number.
+    line_number: u64,
+    /// Human-readable preview for the hit.  Symbol rows use the
+    /// entity's `qualified_name` (falling back to `name` when the
+    /// entity has no qualified name); text rows use the matching line
+    /// with its trailing terminator stripped.  On a `"both"`
+    /// collision, the raw text line wins so the caller sees the
+    /// source line rather than the qualified name.
+    preview: String,
+    /// Fully qualified symbol name — present on `"symbol"` and
+    /// `"both"` rows only, and only when the entity row carried one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    qualified_name: Option<String>,
+    /// Tree-sitter-extracted symbol signature — present on `"symbol"`
+    /// and `"both"` rows only, and only when the entity row carried
+    /// one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    signature: Option<String>,
+}
+
+/// Execute the symbol half of the `search_code` pipeline: acquire the
+/// KG lock, call [`KnowledgeGraph::search_entities_by_name`], and
+/// release the lock before returning.
+///
+/// Kept out of the `McpServer` impl so `handle_search_code` stays
+/// below the `clippy::too_many_lines` threshold; the outer method owns
+/// the argument parsing and JSON envelope construction.
+fn read_symbol_matches(
+    kg: &Arc<Mutex<KnowledgeGraph>>,
+    query: &str,
+    limit: usize,
+) -> Result<Vec<ucil_core::Entity>, SearchCodeReadError> {
+    let guard = kg.lock().map_err(|poisoned| {
+        tracing::error!("knowledge graph mutex is poisoned: {poisoned}");
+        SearchCodeReadError {
+            code: -32603,
+            message: "search_code: internal error (knowledge graph mutex poisoned)".to_owned(),
+        }
+    })?;
+    let rows = guard.search_entities_by_name(query, limit).map_err(|e| {
+        tracing::error!("search_entities_by_name failed: {e}");
+        SearchCodeReadError {
+            code: -32603,
+            message: format!("search_code: search failed: {e}"),
+        }
+    })?;
+    drop(guard);
+    Ok(rows)
+}
+
+/// Merge the symbol-half hits (from the KG) with the text-half hits
+/// (from `ripgrep`) into a single [`SearchCodeResult`] list, capped at
+/// `max_results`.  Pure function — no IO, no locks — so it is unit-
+/// tested independently via [`test_merge_search_results_*`].
+///
+/// **Dedup key:** `(file_path, line_number)`.  When both halves
+/// report the same key, the row is kept at its symbol-produced index
+/// (the symbol row is pushed first) and its `source` is flipped from
+/// `"symbol"` to `"both"`; the text row's `line_text` overwrites the
+/// symbol row's so the caller sees the raw matched line.
+///
+/// **Ordering:** symbols come first (in the order
+/// [`ucil_core::KnowledgeGraph::search_entities_by_name`] returned
+/// them — ingest-time DESC), then text hits (walker order, typically
+/// filesystem-natural).  The merge preserves this partial order so
+/// callers can visually scan "all structural hits first, then the rest
+/// of the text walk".
+fn merge_search_results(
+    symbols: &[ucil_core::Entity],
+    texts: &[TextMatch],
+    max_results: usize,
+) -> Vec<SearchCodeResult> {
+    use std::collections::HashMap;
+
+    let cap = max_results.min(symbols.len() + texts.len());
+    let mut out: Vec<SearchCodeResult> = Vec::with_capacity(cap);
+    let mut seen: HashMap<(String, u64), usize> = HashMap::with_capacity(cap);
+
+    for e in symbols {
+        if out.len() >= max_results {
+            break;
+        }
+        let line = e
+            .start_line
+            .and_then(|n| u64::try_from(n).ok())
+            .unwrap_or(0);
+        let key = (e.file_path.clone(), line);
+        if seen.contains_key(&key) {
+            // Duplicate symbol row (same file+line already pushed) —
+            // keep the first, drop the second.  Should not happen with
+            // the current ingest pipeline but is cheap to guard.
+            continue;
+        }
+        let preview = e.qualified_name.clone().unwrap_or_else(|| e.name.clone());
+        let idx = out.len();
+        out.push(SearchCodeResult {
+            source: "symbol".to_owned(),
+            file_path: e.file_path.clone(),
+            line_number: line,
+            preview,
+            qualified_name: e.qualified_name.clone(),
+            signature: e.signature.clone(),
+        });
+        seen.insert(key, idx);
+    }
+
+    for t in texts {
+        if out.len() >= max_results {
+            break;
+        }
+        let key = (t.file_path.display().to_string(), t.line_number);
+        if let Some(&idx) = seen.get(&key) {
+            if let Some(slot) = out.get_mut(idx) {
+                "both".clone_into(&mut slot.source);
+                slot.preview.clone_from(&t.line_text);
+            }
+            continue;
+        }
+        let idx = out.len();
+        out.push(SearchCodeResult {
+            source: "text".to_owned(),
+            file_path: t.file_path.display().to_string(),
+            line_number: t.line_number,
+            preview: t.line_text.clone(),
+            qualified_name: None,
+            signature: None,
+        });
+        seen.insert(key, idx);
+    }
+
+    out
+}
+
+/// Build the JSON-RPC 2.0 response envelope for a successful
+/// `search_code` read.
+///
+/// Empty `results` is a valid shape — the response carries
+/// `_meta.count == 0`, `_meta.results == []`, `isError == false`, and
+/// a human-readable `"no matches for <query>"` text, mirroring
+/// `get_conventions_found_response`'s empty-table contract.
+fn search_code_response(
+    id: &Value,
+    query: &str,
+    root: &Path,
+    symbol_match_count: usize,
+    text_match_count: usize,
+    results: &[SearchCodeResult],
+) -> Value {
+    let count = results.len();
+    let results_json: Vec<Value> = results
+        .iter()
+        .map(|r| serde_json::to_value(r).unwrap_or(Value::Null))
+        .collect();
+    let text = if count == 0 {
+        format!("no matches for `{query}`")
+    } else {
+        format!("{count} match{}", if count == 1 { "" } else { "es" })
+    };
+    json!({
+        "jsonrpc": JSONRPC_VERSION,
+        "id": id.clone(),
+        "result": {
+            "_meta": {
+                "tool": "search_code",
+                "source": "tree-sitter+ripgrep",
+                "count": count,
+                "query": query,
+                "root": root.display().to_string(),
+                "symbol_match_count": symbol_match_count,
+                "text_match_count": text_match_count,
+                "results": results_json,
             },
             "content": [
                 { "type": "text", "text": text }
@@ -1347,6 +1821,181 @@ async fn test_progressive_startup() {
         .expect("server task must finish within 3 s of EOF")
         .expect("server task must not panic");
     serve_result.expect("server loop must return Ok after clean EOF");
+}
+
+// ── merge_search_results unit tests (P1-W5-F09, pure function) ───────────
+//
+// `merge_search_results` is a pure function (no IO, no locks, no
+// system calls), so it is unit-tested independently of the full
+// `search_code` MCP dispatch — the acceptance test
+// `test_search_code_basic` exercises the same function end-to-end.
+
+#[cfg(test)]
+fn mk_symbol_entity(
+    name: &str,
+    kind: &str,
+    qualified_name: Option<&str>,
+    file_path: &str,
+    start_line: i64,
+) -> ucil_core::Entity {
+    ucil_core::Entity {
+        id: None,
+        kind: kind.to_owned(),
+        name: name.to_owned(),
+        qualified_name: qualified_name.map(str::to_owned),
+        file_path: file_path.to_owned(),
+        start_line: Some(start_line),
+        end_line: Some(start_line + 2),
+        signature: None,
+        doc_comment: None,
+        language: Some("rust".to_owned()),
+        t_valid_from: None,
+        t_valid_to: None,
+        importance: 0.5,
+        source_tool: Some("tree-sitter".to_owned()),
+        source_hash: Some("synthetic".to_owned()),
+    }
+}
+
+#[cfg(test)]
+fn mk_text_match(file_path: &str, line_number: u64, line_text: &str) -> TextMatch {
+    TextMatch {
+        file_path: PathBuf::from(file_path),
+        line_number,
+        line_text: line_text.to_owned(),
+    }
+}
+
+/// Symbol-only path: when only the KG half produces hits,
+/// `merge_search_results` returns one row per symbol, each marked
+/// `source == "symbol"`, and the order mirrors the input.
+#[cfg(test)]
+#[test]
+fn test_merge_search_results_symbol_only() {
+    let symbols = vec![
+        mk_symbol_entity(
+            "banana_split",
+            "function",
+            Some("util::banana_split"),
+            "/tmp/src/util.rs",
+            10,
+        ),
+        mk_symbol_entity(
+            "banana_peel",
+            "function",
+            Some("util::banana_peel"),
+            "/tmp/src/util.rs",
+            20,
+        ),
+    ];
+    let texts: Vec<TextMatch> = Vec::new();
+
+    let merged = merge_search_results(&symbols, &texts, 50);
+    assert_eq!(
+        merged.len(),
+        2,
+        "symbol-only merge keeps all rows: {merged:?}"
+    );
+    assert_eq!(merged[0].source, "symbol");
+    assert_eq!(
+        merged[0].qualified_name.as_deref(),
+        Some("util::banana_split")
+    );
+    assert_eq!(merged[0].preview, "util::banana_split");
+    assert_eq!(merged[1].source, "symbol");
+    assert_eq!(
+        merged[1].qualified_name.as_deref(),
+        Some("util::banana_peel")
+    );
+}
+
+/// Text-only path: when only the `ripgrep` half produces hits,
+/// `merge_search_results` returns one row per text match, each
+/// marked `source == "text"` with `qualified_name` / `signature`
+/// both `None` (and therefore absent from the JSON encoding).
+#[cfg(test)]
+#[test]
+fn test_merge_search_results_text_only() {
+    let symbols: Vec<ucil_core::Entity> = Vec::new();
+    let texts = vec![
+        mk_text_match("/tmp/src/util.rs", 42, "fn banana_split() {}"),
+        mk_text_match("/tmp/README.md", 3, "  banana_split — split a banana"),
+    ];
+
+    let merged = merge_search_results(&symbols, &texts, 50);
+    assert_eq!(merged.len(), 2);
+    assert_eq!(merged[0].source, "text");
+    assert_eq!(merged[0].file_path, "/tmp/src/util.rs");
+    assert_eq!(merged[0].line_number, 42);
+    assert_eq!(merged[0].preview, "fn banana_split() {}");
+    assert!(merged[0].qualified_name.is_none());
+    assert!(merged[0].signature.is_none());
+    assert_eq!(merged[1].source, "text");
+    assert_eq!(merged[1].file_path, "/tmp/README.md");
+}
+
+/// Collision path: the same `(file_path, line_number)` reported by
+/// both halves collapses to a single row whose `source` flips to
+/// `"both"`, `qualified_name` / `signature` are retained, and
+/// `preview` is overwritten with the `ripgrep` line text so the
+/// caller sees the raw matched line.
+#[cfg(test)]
+#[test]
+fn test_merge_search_results_collision_flips_to_both() {
+    let symbols = vec![mk_symbol_entity(
+        "banana_split",
+        "function",
+        Some("util::banana_split"),
+        "/tmp/src/util.rs",
+        10,
+    )];
+    let texts = vec![
+        mk_text_match("/tmp/src/util.rs", 10, "fn banana_split() { /* ... */ }"),
+        mk_text_match("/tmp/README.md", 3, "  banana_split"),
+    ];
+
+    let merged = merge_search_results(&symbols, &texts, 50);
+    assert_eq!(merged.len(), 2, "collision collapses to 2 rows: {merged:?}");
+    assert_eq!(merged[0].source, "both");
+    assert_eq!(merged[0].preview, "fn banana_split() { /* ... */ }");
+    assert_eq!(
+        merged[0].qualified_name.as_deref(),
+        Some("util::banana_split")
+    );
+    assert_eq!(merged[1].source, "text");
+    assert_eq!(merged[1].file_path, "/tmp/README.md");
+}
+
+/// Cap path: when `symbols.len() + texts.len()` exceeds
+/// `max_results`, `merge_search_results` stops pushing rows as soon
+/// as the cap is reached.  Symbol rows are pushed first, so caps
+/// below the symbol count return only symbols; caps inside the text
+/// range return all symbols plus a prefix of texts.
+#[cfg(test)]
+#[test]
+fn test_merge_search_results_respects_max_results() {
+    let symbols = vec![
+        mk_symbol_entity("banana_split", "function", None, "/tmp/a.rs", 1),
+        mk_symbol_entity("banana_peel", "function", None, "/tmp/b.rs", 2),
+    ];
+    let texts = vec![
+        mk_text_match("/tmp/c.rs", 1, "banana_split"),
+        mk_text_match("/tmp/d.rs", 1, "banana_peel"),
+    ];
+
+    // Cap below symbol count → only the first symbol comes back.
+    let merged_1 = merge_search_results(&symbols, &texts, 1);
+    assert_eq!(merged_1.len(), 1);
+    assert_eq!(merged_1[0].source, "symbol");
+    assert_eq!(merged_1[0].file_path, "/tmp/a.rs");
+
+    // Cap inside the text range → both symbols + one text.
+    let merged_3 = merge_search_results(&symbols, &texts, 3);
+    assert_eq!(merged_3.len(), 3);
+    assert_eq!(merged_3[0].source, "symbol");
+    assert_eq!(merged_3[1].source, "symbol");
+    assert_eq!(merged_3[2].source, "text");
+    assert_eq!(merged_3[2].file_path, "/tmp/c.rs");
 }
 
 // ── find_definition acceptance tests (P1-W4-F05) ─────────────────────────
@@ -2039,4 +2688,501 @@ fn test_get_conventions_tool_non_string_category() {
         response.get("result").is_none(),
         "JSON-RPC error response must not also carry `result`: {response}"
     );
+}
+
+// ── search_code acceptance tests (P1-W5-F09) ─────────────────────────────
+//
+// Per DEC-0005 / DEC-0007 and the WO-0006 test-selector lesson, these
+// acceptance tests live at module root (NOT under `mod tests { … }`) so
+// the frozen acceptance selector `server::test_search_code_basic` resolves
+// to `ucil_daemon::server::test_search_code_basic` for
+// `cargo nextest run -p ucil-daemon server::test_search_code_basic`
+// without an intermediate `tests::` segment.
+
+/// Build a `search_code` test fixture.
+///
+/// Creates two `tempfile::TempDir` trees: one hosting the `SQLite`
+/// knowledge graph (`.db`) and one hosting the source-tree that the
+/// in-process `ripgrep` walker will scan.  Writes `src/util.rs` with
+/// the `banana_split` function so both halves of the handler (symbol
+/// and text) have a real hit to report.  Returns
+/// `(server, _kg_arc, _kg_tmp, project_tmp, project_root_string)` so
+/// callers can build request JSON against the project path.
+///
+/// The KG is deliberately kept in a separate tempdir so the scanner
+/// does NOT walk over the `.db` file (the walker would happily recurse
+/// into it, but the `.db` is binary and gets dropped by
+/// `BinaryDetection::quit(0x00)` — still, segregating avoids surprises
+/// for future maintainers).
+#[cfg(test)]
+#[allow(clippy::type_complexity)]
+fn build_search_code_fixture() -> (
+    McpServer,
+    Arc<Mutex<ucil_core::KnowledgeGraph>>,
+    tempfile::TempDir,
+    tempfile::TempDir,
+    String,
+    String,
+) {
+    use std::fs;
+
+    use ucil_core::{Entity, KnowledgeGraph};
+
+    let kg_tmp = tempfile::TempDir::new().expect("kg tempdir must be creatable");
+    let project_tmp = tempfile::TempDir::new().expect("project tempdir must be creatable");
+
+    // Write a real Rust source file so `grep-searcher` has something
+    // to match on a banana_split query.
+    let src_dir = project_tmp.path().join("src");
+    fs::create_dir_all(&src_dir).expect("src/ must be creatable under project root");
+    let util_rs = src_dir.join("util.rs");
+    fs::write(&util_rs, "pub fn banana_split(x: u32) -> u32 { x + 1 }\n")
+        .expect("util.rs must be writable");
+
+    // Open the KG and upsert a matching entity row so the symbol half
+    // also hits on `banana_split`.  `file_path` is the absolute path
+    // to `util.rs` so the merged record shares its `(file_path, line)`
+    // key with the text walker's hit.
+    let util_abs = util_rs
+        .canonicalize()
+        .expect("util.rs path must canonicalize");
+    let util_abs_str = util_abs.display().to_string();
+    let mut kg = KnowledgeGraph::open(&kg_tmp.path().join("knowledge.db"))
+        .expect("KnowledgeGraph::open must succeed");
+    let entity = Entity {
+        id: None,
+        kind: "function".to_owned(),
+        name: "banana_split".to_owned(),
+        qualified_name: Some("project::util::banana_split".to_owned()),
+        file_path: util_abs_str.clone(),
+        start_line: Some(1),
+        end_line: Some(1),
+        signature: Some("fn banana_split(x: u32) -> u32".to_owned()),
+        doc_comment: None,
+        language: Some("rust".to_owned()),
+        t_valid_from: Some(crate::executor::TREE_SITTER_VALID_FROM.to_owned()),
+        t_valid_to: None,
+        importance: 0.5,
+        source_tool: Some(crate::executor::SOURCE_TOOL.to_owned()),
+        source_hash: Some("synthetic".to_owned()),
+    };
+    kg.upsert_entity(&entity)
+        .expect("banana_split entity upsert must succeed");
+
+    let project_root_str = project_tmp.path().display().to_string();
+    let kg_arc = Arc::new(Mutex::new(kg));
+    let server = McpServer::with_knowledge_graph(Arc::clone(&kg_arc));
+    (
+        server,
+        kg_arc,
+        kg_tmp,
+        project_tmp,
+        project_root_str,
+        util_abs_str,
+    )
+}
+
+/// Frozen acceptance selector for feature `P1-W5-F09` — see
+/// `ucil-build/feature-list.json` entry
+/// `-p ucil-daemon server::test_search_code_basic`.
+///
+/// Exercises the full `tools/call` dispatch for `search_code` against a
+/// real `KnowledgeGraph::open` + `upsert_entity` on a temp `SQLite` file
+/// AND a real in-process `ignore` + `grep-searcher` + `grep-regex`
+/// walker pass on a `tempfile::TempDir` populated with a Rust source
+/// file.  No mocks of `SQLite`, `ignore`, or `grep-searcher` — both
+/// halves run against real state per the anti-laziness contract.
+///
+/// Asserts (per WO-0035 `scope_in` bullet 9):
+///
+/// 1. JSON-RPC envelope is well-formed (`jsonrpc == "2.0"`, matching
+///    `id`, no `error`).
+/// 2. `_meta.tool == "search_code"` and
+///    `_meta.source == "tree-sitter+ripgrep"`.
+/// 3. `_meta.count >= 1` (at least one merged result).
+/// 4. `_meta.symbol_match_count == 1` (one KG row hit).
+/// 5. `_meta.text_match_count >= 1` (at least one `ripgrep` hit).
+/// 6. At least one result has `source == "both"` (the symbol row at
+///    `util.rs:1` and the text row at `util.rs:1` collapsed).
+/// 7. `_meta.results[0].preview` contains `"banana_split"`.
+/// 8. `result.isError == false`.
+/// 9. The phase-1 stub marker `_meta.not_yet_implemented` is absent.
+#[cfg(test)]
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn test_search_code_basic() {
+    let (server, _kg, _kg_tmp, _project_tmp, project_root, _util_abs) = build_search_code_fixture();
+
+    let request = json!({
+        "jsonrpc": JSONRPC_VERSION,
+        "id": 101,
+        "method": "tools/call",
+        "params": {
+            "name": "search_code",
+            "arguments": {
+                "query": "banana_split",
+                "root": project_root,
+                "max_results": 50
+            }
+        }
+    })
+    .to_string();
+    let response = server.handle_line(&request);
+
+    assert_eq!(
+        response.get("jsonrpc").and_then(Value::as_str),
+        Some(JSONRPC_VERSION),
+        "response must carry jsonrpc == \"2.0\": {response}"
+    );
+    assert_eq!(
+        response.get("id").and_then(Value::as_i64),
+        Some(101),
+        "response id must echo request id: {response}"
+    );
+    assert!(
+        response.get("error").is_none(),
+        "response must not carry an error envelope: {response}"
+    );
+
+    let meta = response
+        .pointer("/result/_meta")
+        .expect("response must carry result._meta");
+    assert_eq!(
+        meta.get("tool").and_then(Value::as_str),
+        Some("search_code"),
+        "_meta.tool must be \"search_code\": {response}"
+    );
+    assert_eq!(
+        meta.get("source").and_then(Value::as_str),
+        Some("tree-sitter+ripgrep"),
+        "_meta.source must be \"tree-sitter+ripgrep\": {response}"
+    );
+
+    let count = meta
+        .get("count")
+        .and_then(Value::as_i64)
+        .expect("_meta.count must be an integer");
+    assert!(
+        count >= 1,
+        "_meta.count must be >= 1 (symbol + text merged): got {count} — {response}"
+    );
+    assert_eq!(
+        meta.get("symbol_match_count").and_then(Value::as_i64),
+        Some(1),
+        "_meta.symbol_match_count must be 1 (one KG row hit): {response}"
+    );
+    let text_match_count = meta
+        .get("text_match_count")
+        .and_then(Value::as_i64)
+        .expect("_meta.text_match_count must be an integer");
+    assert!(
+        text_match_count >= 1,
+        "_meta.text_match_count must be >= 1 (ripgrep hit): got {text_match_count} — {response}"
+    );
+
+    let results = meta
+        .get("results")
+        .and_then(Value::as_array)
+        .expect("_meta.results must be a JSON array");
+    assert!(
+        !results.is_empty(),
+        "_meta.results must contain at least one row: {response}"
+    );
+    let any_both = results
+        .iter()
+        .any(|r| r.get("source").and_then(Value::as_str) == Some("both"));
+    assert!(
+        any_both,
+        "at least one result must have source == \"both\" (symbol + text merge at util.rs:1): {results:?}"
+    );
+    let first_preview = results[0]
+        .get("preview")
+        .and_then(Value::as_str)
+        .expect("_meta.results[0].preview must be a string");
+    assert!(
+        first_preview.contains("banana_split"),
+        "_meta.results[0].preview must mention banana_split: got {first_preview:?}"
+    );
+
+    assert_eq!(
+        response.pointer("/result/isError").and_then(Value::as_bool),
+        Some(false),
+        "result.isError must be false on the happy path: {response}"
+    );
+    assert!(
+        response
+            .pointer("/result/_meta/not_yet_implemented")
+            .is_none(),
+        "result._meta.not_yet_implemented must be ABSENT — the handler \
+         must have escaped the phase-1 stub path: {response}"
+    );
+}
+
+/// Negative path: `arguments.query` is an empty string — the handler
+/// must return a JSON-RPC error envelope with `code == -32602` (Invalid
+/// params), per WO-0035 `scope_in` bullet 6.  Empty queries would match
+/// every line in every file and are therefore not a useful operation.
+#[cfg(test)]
+#[tokio::test]
+async fn test_search_code_tool_empty_query() {
+    let (server, _kg, _kg_tmp, _project_tmp, project_root, _util_abs) = build_search_code_fixture();
+
+    let request = json!({
+        "jsonrpc": JSONRPC_VERSION,
+        "id": 201,
+        "method": "tools/call",
+        "params": {
+            "name": "search_code",
+            "arguments": { "query": "", "root": project_root }
+        }
+    })
+    .to_string();
+    let response = server.handle_line(&request);
+
+    let error = response
+        .get("error")
+        .expect("empty query must produce a JSON-RPC error envelope");
+    assert_eq!(
+        error.get("code").and_then(Value::as_i64),
+        Some(-32602),
+        "empty-query error code must be -32602 (Invalid params): {response}"
+    );
+    assert!(
+        response.get("result").is_none(),
+        "JSON-RPC error response must not also carry `result`: {response}"
+    );
+}
+
+/// Stub-path regression: a `search_code` call on a server built via
+/// `McpServer::new()` (no KG attached) must still return the phase-1
+/// `_meta.not_yet_implemented: true` stub envelope — preserving
+/// invariant #9 from `ucil-build/phase-log/01-phase-1/CLAUDE.md`.
+#[cfg(test)]
+#[tokio::test]
+async fn test_search_code_tool_no_kg_returns_stub() {
+    let server = McpServer::new();
+
+    let request = json!({
+        "jsonrpc": JSONRPC_VERSION,
+        "id": 202,
+        "method": "tools/call",
+        "params": {
+            "name": "search_code",
+            "arguments": { "query": "banana_split" }
+        }
+    })
+    .to_string();
+    let response = server.handle_line(&request);
+
+    assert!(
+        response.get("error").is_none(),
+        "stub path must not return JSON-RPC error: {response}"
+    );
+    assert_eq!(
+        response
+            .pointer("/result/_meta/not_yet_implemented")
+            .and_then(Value::as_bool),
+        Some(true),
+        "no-KG call must return _meta.not_yet_implemented == true \
+         (phase-1 invariant #9): {response}"
+    );
+    assert_eq!(
+        response
+            .pointer("/result/_meta/tool")
+            .and_then(Value::as_str),
+        Some("search_code"),
+        "stub envelope must echo tool name: {response}"
+    );
+}
+
+/// Negative path: `arguments.query` is a non-string JSON value (number)
+/// — must produce a `-32602` Invalid-params error.
+#[cfg(test)]
+#[tokio::test]
+async fn test_search_code_tool_non_string_query() {
+    let (server, _kg, _kg_tmp, _project_tmp, project_root, _util_abs) = build_search_code_fixture();
+
+    let request = json!({
+        "jsonrpc": JSONRPC_VERSION,
+        "id": 203,
+        "method": "tools/call",
+        "params": {
+            "name": "search_code",
+            "arguments": { "query": 42, "root": project_root }
+        }
+    })
+    .to_string();
+    let response = server.handle_line(&request);
+
+    let error = response
+        .get("error")
+        .expect("non-string query must produce a JSON-RPC error envelope");
+    assert_eq!(
+        error.get("code").and_then(Value::as_i64),
+        Some(-32602),
+        "non-string-query error code must be -32602 (Invalid params): {response}"
+    );
+    assert!(
+        response.get("result").is_none(),
+        "JSON-RPC error response must not also carry `result`: {response}"
+    );
+}
+
+/// Negative path: `arguments.root` points at a path that does not
+/// exist on disk — must produce a `-32602` Invalid-params error.
+#[cfg(test)]
+#[tokio::test]
+async fn test_search_code_tool_nonexistent_root() {
+    let (server, _kg, _kg_tmp, _project_tmp, _project_root, _util_abs) =
+        build_search_code_fixture();
+
+    let request = json!({
+        "jsonrpc": JSONRPC_VERSION,
+        "id": 204,
+        "method": "tools/call",
+        "params": {
+            "name": "search_code",
+            "arguments": {
+                "query": "banana_split",
+                "root": "/this/path/does/not/exist/anywhere-on-disk"
+            }
+        }
+    })
+    .to_string();
+    let response = server.handle_line(&request);
+
+    let error = response
+        .get("error")
+        .expect("nonexistent root must produce a JSON-RPC error envelope");
+    assert_eq!(
+        error.get("code").and_then(Value::as_i64),
+        Some(-32602),
+        "nonexistent-root error code must be -32602 (Invalid params): {response}"
+    );
+    assert!(
+        response.get("result").is_none(),
+        "JSON-RPC error response must not also carry `result`: {response}"
+    );
+}
+
+/// Cap path: `arguments.max_results = 10_000` — the handler must clamp
+/// the count to [`SEARCH_CODE_MAX_RESULTS`] (500) rather than returning
+/// 10 000 rows.  We assert the property at the result-count level: the
+/// text walker can't emit more than 500 hits even if the repo had more
+/// matches, and the merged list must stay under the cap.
+#[cfg(test)]
+#[tokio::test]
+async fn test_search_code_tool_max_results_clamp() {
+    let (server, _kg, _kg_tmp, _project_tmp, project_root, _util_abs) = build_search_code_fixture();
+
+    let request = json!({
+        "jsonrpc": JSONRPC_VERSION,
+        "id": 205,
+        "method": "tools/call",
+        "params": {
+            "name": "search_code",
+            "arguments": {
+                "query": "banana_split",
+                "root": project_root,
+                "max_results": 10_000_i64
+            }
+        }
+    })
+    .to_string();
+    let response = server.handle_line(&request);
+
+    assert!(
+        response.get("error").is_none(),
+        "max_results > cap must be clamped, not rejected: {response}"
+    );
+    let count = response
+        .pointer("/result/_meta/count")
+        .and_then(Value::as_i64)
+        .expect("_meta.count must be present on happy path");
+    let cap = i64::try_from(SEARCH_CODE_MAX_RESULTS).expect("cap fits in i64");
+    assert!(
+        count <= cap,
+        "merged count ({count}) must be <= SEARCH_CODE_MAX_RESULTS ({cap}): {response}"
+    );
+}
+
+/// Text-only path: query matches file contents but has no matching KG
+/// entity — `_meta.symbol_match_count` must be 0,
+/// `_meta.text_match_count >= 1`, and every result must carry
+/// `source == "text"`.
+#[cfg(test)]
+#[tokio::test]
+async fn test_search_code_tool_only_text_no_symbol() {
+    use std::fs;
+
+    use ucil_core::KnowledgeGraph;
+
+    let kg_tmp = tempfile::TempDir::new().expect("kg tempdir must be creatable");
+    let project_tmp = tempfile::TempDir::new().expect("project tempdir must be creatable");
+
+    // Write a file containing "mango_marker" — no matching KG entity
+    // will be inserted for this token.
+    let src_dir = project_tmp.path().join("src");
+    fs::create_dir_all(&src_dir).expect("src/ must be creatable");
+    fs::write(
+        src_dir.join("only_text.rs"),
+        "// mango_marker appears here but no entity row points at it\n",
+    )
+    .expect("only_text.rs must be writable");
+
+    let kg = KnowledgeGraph::open(&kg_tmp.path().join("knowledge.db"))
+        .expect("KnowledgeGraph::open must succeed");
+    let kg_arc = Arc::new(Mutex::new(kg));
+    let server = McpServer::with_knowledge_graph(Arc::clone(&kg_arc));
+
+    let request = json!({
+        "jsonrpc": JSONRPC_VERSION,
+        "id": 206,
+        "method": "tools/call",
+        "params": {
+            "name": "search_code",
+            "arguments": {
+                "query": "mango_marker",
+                "root": project_tmp.path().display().to_string()
+            }
+        }
+    })
+    .to_string();
+    let response = server.handle_line(&request);
+
+    assert!(
+        response.get("error").is_none(),
+        "text-only path must not return JSON-RPC error: {response}"
+    );
+    let meta = response
+        .pointer("/result/_meta")
+        .expect("response must carry result._meta");
+    assert_eq!(
+        meta.get("symbol_match_count").and_then(Value::as_i64),
+        Some(0),
+        "_meta.symbol_match_count must be 0 (no matching KG entity): {response}"
+    );
+    let text_match_count = meta
+        .get("text_match_count")
+        .and_then(Value::as_i64)
+        .expect("_meta.text_match_count must be an integer");
+    assert!(
+        text_match_count >= 1,
+        "_meta.text_match_count must be >= 1 (ripgrep hit): got {text_match_count} — {response}"
+    );
+    let results = meta
+        .get("results")
+        .and_then(Value::as_array)
+        .expect("_meta.results must be a JSON array");
+    assert!(
+        !results.is_empty(),
+        "_meta.results must contain at least one row: {response}"
+    );
+    for r in results {
+        assert_eq!(
+            r.get("source").and_then(Value::as_str),
+            Some("text"),
+            "every result must have source == \"text\" (no symbol half): got {r:?}"
+        );
+    }
 }

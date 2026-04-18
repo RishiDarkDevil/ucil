@@ -1064,10 +1064,10 @@
         "P1-W4-F04",
         "P1-W3-F07"
       ],
-      "passes": false,
-      "last_verified_ts": null,
-      "last_verified_by": null,
-      "last_verified_commit": null,
+      "passes": true,
+      "last_verified_ts": "2026-04-18T16:20:20Z",
+      "last_verified_by": "verifier-dfb1badb-085a-457a-a9c9-bdb6bfa65c29",
+      "last_verified_commit": "0ce203ec04ea135146498e3c08abbca282ab5d67",
       "attempts": 0,
       "blocked_reason": null
     },

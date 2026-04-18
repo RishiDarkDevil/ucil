@@ -3,13 +3,13 @@
 - **Verdict**: PASS
 - **Min line coverage**: 85%
 - **Min branch coverage**: 75%
-- **Generated**: 2026-04-18T15:28:24Z
+- **Generated**: 2026-04-18T16:18:27Z
 
 ## Summary
 
 | Metric       | Value |
 |--------------|-------|
-| Line         | 97.66977363515313% (floor 85%) |
+| Line         | 97.81950333131435% (floor 85%) |
 | Branch       | _unavailable (toolchain)_ |
 
 ## Raw JSON
@@ -23,19 +23,19 @@
     "percent": 0
   },
   "functions": {
-    "count": 121,
-    "covered": 119,
-    "percent": 98.34710743801655
+    "count": 129,
+    "covered": 127,
+    "percent": 98.44961240310077
   },
   "instantiations": {
-    "count": 250,
-    "covered": 163,
-    "percent": 65.2
+    "count": 260,
+    "covered": 172,
+    "percent": 66.15384615384615
   },
   "lines": {
-    "count": 1502,
-    "covered": 1467,
-    "percent": 97.66977363515313
+    "count": 1651,
+    "covered": 1615,
+    "percent": 97.81950333131435
   },
   "mcdc": {
     "count": 0,
@@ -44,10 +44,10 @@
     "percent": 0
   },
   "regions": {
-    "count": 2332,
-    "covered": 2214,
-    "notcovered": 118,
-    "percent": 94.93996569468268
+    "count": 2561,
+    "covered": 2440,
+    "notcovered": 121,
+    "percent": 95.27528309254197
   }
 }
 ```

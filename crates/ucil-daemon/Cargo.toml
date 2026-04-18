@@ -38,6 +38,13 @@ ucil-core = { path = "../ucil-core" }
 # `ucil-treesitter` drives the tree-sitter → knowledge-graph executor
 # pipeline (P1-W4-F04, master-plan §18 Phase 1 Week 4 line 1759).
 ucil-treesitter = { path = "../ucil-treesitter" }
+# In-process `ripgrep` libraries back the `search_code` MCP tool's
+# text-search half (`P1-W5-F09`, WO-0035 / DEC-0009).  Only the
+# `ucil-daemon::text_search` module consumes them.
+ignore.workspace = true
+grep-searcher.workspace = true
+grep-regex.workspace = true
+grep-matcher.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

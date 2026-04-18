@@ -923,6 +923,62 @@ impl KnowledgeGraph {
         Ok(out)
     }
 
+    /// Substring-search the `entities` table by `name` or `qualified_name`.
+    ///
+    /// Backs the symbol-index half of the `search_code` MCP tool
+    /// (`P1-W5-F09`, master-plan §3.2 row 4 / §18 Phase 1 Week 5
+    /// line 1765).  The query is wrapped as `%query%` by the helper and
+    /// bound as a single `LIKE` parameter applied to both `name` and
+    /// `qualified_name`, so a caller searching for `"foo"` matches both
+    /// `name = "foo_bar"` and `qualified_name = "mod::foo::bar"`.
+    ///
+    /// Rows are returned newest-ingested-first (`ORDER BY t_ingested_at
+    /// DESC`) and capped at `limit`.  Empty result is `Ok(vec![])`, not
+    /// an error.  The returned [`Entity`] rows carry the same column
+    /// projection as [`Self::get_entity_by_qualified_name`] —
+    /// §12.1 entities schema, columns 1-15.
+    ///
+    /// # Errors
+    ///
+    /// * [`KnowledgeGraphError::Sqlite`] — statement prepare, bind, or
+    ///   iteration failure.
+    #[tracing::instrument(
+        level = "debug",
+        skip(self),
+        fields(query_len = query.len(), limit),
+        name = "ucil.core.kg.search_entities_by_name",
+    )]
+    pub fn search_entities_by_name(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<Entity>, KnowledgeGraphError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, kind, name, qualified_name, file_path, start_line, end_line, \
+                    signature, doc_comment, language, t_valid_from, t_valid_to, \
+                    importance, source_tool, source_hash \
+             FROM entities \
+             WHERE name LIKE ?1 OR qualified_name LIKE ?1 \
+             ORDER BY t_ingested_at DESC \
+             LIMIT ?2",
+        )?;
+        let like = format!("%{query}%");
+        // Cast `limit` to i64 for SQLite's integer parameter binding; `usize`
+        // on 64-bit platforms can exceed i64::MAX in pathological cases but
+        // SQLite's LIMIT argument is an i64 on the wire regardless.  Values
+        // above i64::MAX wrap to negative, which SQLite interprets as "no
+        // limit" — harmless in practice because the caller already clamps
+        // to the handler's own `SEARCH_CODE_MAX_RESULTS` ceiling.
+        #[allow(clippy::cast_possible_wrap)]
+        let limit_i64 = limit as i64;
+        let rows = stmt.query_map(rusqlite::params![like, limit_i64], entity_from_row)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
     // ── Relation CRUD ────────────────────────────────────────────────
     //
     // `relations` has NO UNIQUE constraint in §12.1 — each call to
@@ -1896,6 +1952,204 @@ fn test_list_entities_by_file() {
         .list_entities_by_file("does/not/exist.rs")
         .expect("list for absent file must succeed");
     assert!(none.is_empty(), "absent file yields empty vec");
+}
+
+#[cfg(test)]
+fn mk_search_fixture_entity(name: &str, qualified_name: Option<&str>, file_path: &str) -> Entity {
+    Entity {
+        id: None,
+        kind: "function".to_owned(),
+        name: name.to_owned(),
+        qualified_name: qualified_name.map(str::to_owned),
+        file_path: file_path.to_owned(),
+        start_line: Some(1),
+        end_line: Some(10),
+        signature: None,
+        doc_comment: None,
+        language: Some("rust".to_owned()),
+        t_valid_from: Some("2026-04-18T00:00:00+00:00".to_owned()),
+        t_valid_to: None,
+        importance: 0.5,
+        source_tool: None,
+        source_hash: None,
+    }
+}
+
+/// `test_search_entities_by_name_exact` — insert two entities with
+/// different names, query one substring, assert only the matching row
+/// returns.
+#[cfg(test)]
+#[test]
+fn test_search_entities_by_name_exact() {
+    use tempfile::TempDir;
+
+    let tmp = TempDir::new().expect("tempdir must be creatable");
+    let mut kg =
+        KnowledgeGraph::open(&tmp.path().join("kg.db")).expect("KnowledgeGraph::open must succeed");
+
+    kg.upsert_entity(&mk_search_fixture_entity(
+        "banana_split",
+        Some("project::banana_split"),
+        "src/banana.rs",
+    ))
+    .expect("upsert banana_split");
+    kg.upsert_entity(&mk_search_fixture_entity(
+        "apple_pie",
+        Some("project::apple_pie"),
+        "src/apple.rs",
+    ))
+    .expect("upsert apple_pie");
+
+    let hits = kg
+        .search_entities_by_name("banana_split", 10)
+        .expect("search must succeed");
+    assert_eq!(hits.len(), 1, "exactly one row must match");
+    assert_eq!(hits[0].name, "banana_split");
+}
+
+/// `test_search_entities_by_name_substring` — insert `foo_bar`, query
+/// `foo`, assert the row matches via `LIKE '%foo%'`.
+#[cfg(test)]
+#[test]
+fn test_search_entities_by_name_substring() {
+    use tempfile::TempDir;
+
+    let tmp = TempDir::new().expect("tempdir must be creatable");
+    let mut kg =
+        KnowledgeGraph::open(&tmp.path().join("kg.db")).expect("KnowledgeGraph::open must succeed");
+
+    kg.upsert_entity(&mk_search_fixture_entity(
+        "foo_bar",
+        Some("project::foo_bar"),
+        "src/util.rs",
+    ))
+    .expect("upsert foo_bar");
+
+    let hits = kg
+        .search_entities_by_name("foo", 10)
+        .expect("substring search must succeed");
+    assert_eq!(hits.len(), 1, "foo_bar must be a substring match for foo");
+    assert_eq!(hits[0].name, "foo_bar");
+}
+
+/// `test_search_entities_by_name_qualified_name_match` — insert an
+/// entity whose `name` does NOT contain the query but whose
+/// `qualified_name` does; assert the row still returns.
+#[cfg(test)]
+#[test]
+fn test_search_entities_by_name_qualified_name_match() {
+    use tempfile::TempDir;
+
+    let tmp = TempDir::new().expect("tempdir must be creatable");
+    let mut kg =
+        KnowledgeGraph::open(&tmp.path().join("kg.db")).expect("KnowledgeGraph::open must succeed");
+
+    kg.upsert_entity(&mk_search_fixture_entity(
+        "foo",
+        Some("crate::module::foo"),
+        "src/lib.rs",
+    ))
+    .expect("upsert foo");
+
+    let hits = kg
+        .search_entities_by_name("module::foo", 10)
+        .expect("qualified-name search must succeed");
+    assert_eq!(
+        hits.len(),
+        1,
+        "qualified_name `crate::module::foo` must match query `module::foo`",
+    );
+    assert_eq!(
+        hits[0].qualified_name.as_deref(),
+        Some("crate::module::foo"),
+    );
+}
+
+/// `test_search_entities_by_name_limit` — insert 5 matching entities,
+/// query with limit=3, assert exactly 3 rows return.
+#[cfg(test)]
+#[test]
+fn test_search_entities_by_name_limit() {
+    use tempfile::TempDir;
+
+    let tmp = TempDir::new().expect("tempdir must be creatable");
+    let mut kg =
+        KnowledgeGraph::open(&tmp.path().join("kg.db")).expect("KnowledgeGraph::open must succeed");
+
+    for i in 0..5 {
+        let name = format!("foo_{i}");
+        kg.upsert_entity(&mk_search_fixture_entity(
+            &name,
+            Some(&format!("m::{name}")),
+            &format!("src/f{i}.rs"),
+        ))
+        .expect("upsert must succeed");
+    }
+
+    let hits = kg
+        .search_entities_by_name("foo", 3)
+        .expect("search must succeed");
+    assert_eq!(hits.len(), 3, "limit must cap result set to 3");
+}
+
+/// `test_search_entities_by_name_ordering` — insert two matching rows
+/// with strictly distinct `t_ingested_at` (>1s apart so the
+/// second-precision schema default resolves the tie) and assert the
+/// newer row comes first under the `ORDER BY t_ingested_at DESC`
+/// clause.
+#[cfg(test)]
+#[test]
+fn test_search_entities_by_name_ordering() {
+    use tempfile::TempDir;
+
+    let tmp = TempDir::new().expect("tempdir must be creatable");
+    let mut kg =
+        KnowledgeGraph::open(&tmp.path().join("kg.db")).expect("KnowledgeGraph::open must succeed");
+
+    kg.upsert_entity(&mk_search_fixture_entity(
+        "alpha_fn",
+        Some("mod::alpha_fn"),
+        "src/a.rs",
+    ))
+    .expect("upsert alpha (older)");
+
+    // Schema default is `datetime('now')` (1 s precision) — sleep long
+    // enough for the next insert to land in a strictly-later timestamp.
+    std::thread::sleep(std::time::Duration::from_millis(1_100));
+
+    kg.upsert_entity(&mk_search_fixture_entity(
+        "alpha_new_fn",
+        Some("mod::alpha_new_fn"),
+        "src/b.rs",
+    ))
+    .expect("upsert alpha_new (newer)");
+
+    let hits = kg
+        .search_entities_by_name("alpha", 10)
+        .expect("search must succeed");
+    assert_eq!(hits.len(), 2, "both rows must match");
+    assert_eq!(
+        hits[0].name, "alpha_new_fn",
+        "newest-ingested row must be first (DESC order)",
+    );
+    assert_eq!(hits[1].name, "alpha_fn");
+}
+
+/// `test_search_entities_by_name_empty_table` — freshly-opened KG,
+/// query anything, assert `Ok(vec![])`.
+#[cfg(test)]
+#[test]
+fn test_search_entities_by_name_empty_table() {
+    use tempfile::TempDir;
+
+    let tmp = TempDir::new().expect("tempdir must be creatable");
+    let kg =
+        KnowledgeGraph::open(&tmp.path().join("kg.db")).expect("KnowledgeGraph::open must succeed");
+
+    let hits = kg
+        .search_entities_by_name("anything", 10)
+        .expect("empty-table search must succeed");
+    assert!(hits.is_empty(), "empty table yields empty result set");
 }
 
 /// `test_entity_unique_constraint_updates` — inserting the same
