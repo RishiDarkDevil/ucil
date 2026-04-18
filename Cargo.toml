@@ -50,6 +50,16 @@ toml = "0.8"
 # Test helpers
 tempfile = "3"
 
+# Filesystem change notifications + debouncer — backs the `ucil-daemon`
+# file watcher (master-plan §18 Phase 1 Week 3 line 1741, feature
+# `P1-W3-F02`). Editor/filesystem writes flow through
+# `notify-debouncer-full` with a 100 ms debounce window; PostToolUse hook
+# events bypass the debouncer entirely (master-plan §14 lines 1024-1025).
+# `notify` 6 and `notify-debouncer-full` 0.3 are a compatible pair
+# maintained by the notify-rs org.
+notify = "6"
+notify-debouncer-full = "0.3"
+
 # tree-sitter — multi-language parser (Phase 1 Week 2)
 # Grammar crates at 0.23–0.25 use grammar ABI version 15 which requires
 # tree-sitter >= 0.25 (0.24.x only supports up to ABI 14).
