@@ -7,6 +7,7 @@ blocks_loop: false
 session_role: monitor
 session_work: resolved-triage-pass-3-halt-at-40520fe; cleared-pass-marker; resumed-run-phase-PID-1773554
 auto_resolve_on_next_triage: bucket-A
+resolved: true
 ---
 
 # Phase 1 gate incomplete — monitor session (post triage pass-3 recovery)
@@ -51,3 +52,19 @@ anti-thrashing misclassification, not actual pipeline failure.
 - Lesson reinforced: pass-3 force-halt can misclassify benign heartbeats
   as Bucket-E even when conditions are resolved; manual resolve +
   marker clear + resume is the recovery path.
+
+## Resolution
+
+Bucket A auto-resolve by triage pass-1 on 2026-04-18.
+
+Evidence the condition has advanced since this heartbeat was written:
+- Feature count: 42/234 at write time → **43/234** at HEAD (`ce168ab`,
+  merge of WO-0034 flipping P1-W4-F10 to `passes=true`).
+- Two additional clean cycles landed post-recovery: WO-0033 merge and
+  WO-0034 merge (`95dda78` verifier flip + `ce168ab` fast-forward).
+- `progress.json` still phase=1, week=1 — normal mid-phase state.
+- Working tree clean, branch `main`, no unpushed commits.
+- Author's stated condition ("`auto_resolve_on_next_triage: bucket-A`",
+  `blocks_loop: false`, `severity: low`) is exactly the Bucket A rubric.
+
+Closing in place.
