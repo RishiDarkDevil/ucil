@@ -298,6 +298,73 @@ pub struct SymbolResolution {
     pub parent_module: Option<String>,
 }
 
+/// A row in the §12.1 `conventions` table — a cold-tier record of a
+/// project-specific coding convention the team has committed to.
+///
+/// Fields mirror the `INIT_SQL` `conventions` declaration verbatim so a
+/// round trip through [`KnowledgeGraph::insert_convention`] ↔
+/// [`KnowledgeGraph::list_conventions`] preserves every user-supplied
+/// column.  `id` is `None` before insert and `Some(rowid)` after.
+/// `t_ingested_at` is managed by the schema default
+/// (`DEFAULT (datetime('now'))`) so inserters never supply it — the
+/// `insert_convention` helper omits the column from its INSERT list,
+/// and the read back value returned through `list_conventions` is the
+/// string `SQLite` wrote.
+///
+/// The `category` column is unconstrained TEXT at the schema level but
+/// master-plan §12.1 lines 1172-1182 enumerate the expected values:
+/// `"naming"`, `"structure"`, `"error_handling"`, `"testing"`,
+/// `"style"`, `"security"`.  The `get_conventions` tool filter
+/// (`P1-W4-F10`) passes the caller-supplied string through to
+/// `WHERE category = ?1` verbatim; unknown categories yield an empty
+/// result set.
+///
+/// See master-plan §12.1 lines 1172-1182 for the schema and
+/// `get_conventions` in master-plan §3.2 row 7 for the consumer.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Convention {
+    /// `conventions.id` — `None` until inserted; `Some(rowid)` after
+    /// [`KnowledgeGraph::insert_convention`] returns.
+    pub id: Option<i64>,
+    /// `conventions.category` — one of the six enum values at
+    /// master-plan §12.1 lines 1172-1182
+    /// (`"naming"` / `"structure"` / `"error_handling"` / `"testing"` /
+    /// `"style"` / `"security"`).  Free-form text at the schema level;
+    /// the filter on [`KnowledgeGraph::list_conventions`] is a literal
+    /// `WHERE category = ?1` so callers are expected to pass one of
+    /// the master-plan values verbatim.
+    pub category: String,
+    /// `conventions.pattern` — the convention description / rule text
+    /// the convention-learner layer will match against source spans.
+    /// Required (NOT NULL at the schema level).
+    pub pattern: String,
+    /// `conventions.examples` — free-form text block (typically a
+    /// newline-delimited list) of code fragments that **conform** to
+    /// the convention.  Nullable because early-ingested signals may
+    /// only know the pattern.
+    pub examples: Option<String>,
+    /// `conventions.counter_examples` — free-form text block of code
+    /// fragments that **violate** the convention.
+    pub counter_examples: Option<String>,
+    /// `conventions.confidence` — 0.0..=1.0 fusion-layer hint; the
+    /// schema default is `0.5`.
+    pub confidence: f64,
+    /// `conventions.evidence_count` — count of source spans that
+    /// produced the convention.  The schema default is `1` (a single
+    /// observation).
+    pub evidence_count: i64,
+    /// `conventions.t_ingested_at` — RFC-3339-ish timestamp written by
+    /// the schema default `DEFAULT (datetime('now'))`.  Inserters
+    /// leave this unset and read back the schema-managed value.
+    pub t_ingested_at: String,
+    /// `conventions.last_verified` — free-form timestamp of the most
+    /// recent confirmation the convention still holds.  Nullable.
+    pub last_verified: Option<String>,
+    /// `conventions.scope` — `"project"` (default) or a coarser scope
+    /// (e.g. `"workspace"`, `"global"`) in a later phase's taxonomy.
+    pub scope: String,
+}
+
 /// Checkpoint mode for [`KnowledgeGraph::checkpoint_wal`] — wraps
 /// `SQLite`'s `PRAGMA wal_checkpoint(<MODE>)`.
 ///
