@@ -1176,3 +1176,316 @@ async fn test_progressive_startup() {
         .expect("server task must not panic");
     serve_result.expect("server loop must return Ok after clean EOF");
 }
+
+// ── find_definition acceptance tests (P1-W4-F05) ─────────────────────────
+//
+// Per DEC-0005, these live at module root (NOT under `mod tests { … }`)
+// so the frozen acceptance selector `server::test_find_definition_tool`
+// resolves to `ucil_daemon::server::test_find_definition_tool` for
+// `cargo nextest run -p ucil-daemon server::test_find_definition_tool`
+// without an intermediate `tests::` segment.
+
+/// Build an `McpServer::with_knowledge_graph`-backed server populated
+/// by running the real tree-sitter → KG pipeline on the fixture
+/// `tests/fixtures/rust-project/src/util.rs`, then upsert a synthetic
+/// `calls`-kind relation whose target is the fixture's `evaluate`
+/// function so the happy-path response carries a non-empty callers
+/// list.
+///
+/// Returns `(server, kg_arc, tmp_dir, fixture_file_str, evaluate_id,
+/// caller_qualified_name)` so the caller can assert the response
+/// envelope against known-good values.
+#[cfg(test)]
+#[allow(clippy::type_complexity)]
+fn build_find_definition_fixture() -> (
+    McpServer,
+    Arc<Mutex<ucil_core::KnowledgeGraph>>,
+    tempfile::TempDir,
+    String,
+    i64,
+    String,
+) {
+    use ucil_core::{Entity, KnowledgeGraph, Relation};
+
+    use crate::executor::{
+        rust_project_fixture, IngestPipeline, SOURCE_TOOL, TREE_SITTER_VALID_FROM,
+    };
+
+    let tmp = tempfile::TempDir::new().expect("tempdir must be creatable");
+    let kg_path = tmp.path().join("knowledge.db");
+    let mut kg = KnowledgeGraph::open(&kg_path).expect("KnowledgeGraph::open must succeed");
+
+    // Ingest the fixture so the KG holds a real `evaluate` symbol row.
+    let fixture = rust_project_fixture();
+    let util_rs = fixture.join("src/util.rs");
+    assert!(util_rs.is_file(), "fixture {util_rs:?} must exist");
+    let mut pipeline = IngestPipeline::new();
+    let inserted = pipeline
+        .ingest_file(&mut kg, &util_rs)
+        .expect("ingest_file must succeed");
+    assert!(
+        inserted > 0,
+        "fixture ingest must produce ≥1 symbol (got {inserted})"
+    );
+
+    let file_path_str = util_rs.display().to_string();
+
+    // Locate the `evaluate` row id (function kind at line 128 in the
+    // fixture — the ingest pipeline upserts one row per extracted
+    // symbol).
+    let evaluate_id: i64 = {
+        let rows = kg
+            .list_entities_by_file(&file_path_str)
+            .expect("list_entities_by_file must succeed");
+        rows.iter()
+            .find(|e| e.name == "evaluate" && e.kind == "function")
+            .and_then(|e| e.id)
+            .expect("fixture must contain an `evaluate` function row")
+    };
+
+    // Upsert a synthetic caller entity and `calls` relation targeting
+    // `evaluate` so the happy-path response has a non-empty callers
+    // list — this is the "immediate callers" field from the P1-W4-F05
+    // description.
+    let caller_qualified_name = "tests::synthetic::caller_of_evaluate@1:1".to_owned();
+    let caller = Entity {
+        id: None,
+        kind: "function".to_owned(),
+        name: "caller_of_evaluate".to_owned(),
+        qualified_name: Some(caller_qualified_name.clone()),
+        file_path: "tests/synthetic.rs".to_owned(),
+        start_line: Some(1),
+        end_line: Some(3),
+        signature: Some("fn caller_of_evaluate()".to_owned()),
+        doc_comment: None,
+        language: Some("rust".to_owned()),
+        t_valid_from: Some(TREE_SITTER_VALID_FROM.to_owned()),
+        t_valid_to: None,
+        importance: 0.5,
+        source_tool: Some(SOURCE_TOOL.to_owned()),
+        source_hash: Some("synthetic".to_owned()),
+    };
+    let caller_id = kg
+        .upsert_entity(&caller)
+        .expect("synthetic caller upsert must succeed");
+    let relation = Relation {
+        id: None,
+        source_id: caller_id,
+        target_id: evaluate_id,
+        kind: "calls".to_owned(),
+        weight: 1.0,
+        t_valid_from: Some(TREE_SITTER_VALID_FROM.to_owned()),
+        t_valid_to: None,
+        source_tool: Some(SOURCE_TOOL.to_owned()),
+        source_evidence: Some("synthetic test edge".to_owned()),
+        confidence: 1.0,
+    };
+    kg.upsert_relation(&relation)
+        .expect("synthetic calls relation upsert must succeed");
+
+    let kg_arc = Arc::new(Mutex::new(kg));
+    let server = McpServer::with_knowledge_graph(Arc::clone(&kg_arc));
+    (
+        server,
+        kg_arc,
+        tmp,
+        file_path_str,
+        evaluate_id,
+        caller_qualified_name,
+    )
+}
+
+/// Frozen acceptance selector for feature `P1-W4-F05` — see
+/// `ucil-build/feature-list.json` entry for
+/// `-p ucil-daemon server::test_find_definition_tool`.
+///
+/// Exercises the full `tools/call` dispatch for `find_definition`
+/// against a real tree-sitter → KG pipeline-populated database, with
+/// a synthetic `calls` edge in place so the response's callers list
+/// is non-empty.  Asserts:
+///
+/// 1. The JSON-RPC envelope is well-formed (`jsonrpc == "2.0"`,
+///    matching `id`, no `error` field).
+/// 2. `result._meta.found == true`.
+/// 3. `result._meta.tool == "find_definition"` and
+///    `result._meta.source == "tree-sitter+kg"`.
+/// 4. `result._meta.file_path` matches the ingested fixture path.
+/// 5. `result._meta.start_line` is Some positive integer (tree-sitter
+///    reports 1-based line numbers).
+/// 6. `result._meta.callers` contains an entry whose `qualified_name`
+///    matches the synthetic caller seeded in the fixture helper.
+/// 7. `result.isError == false`.
+/// 8. The phase-1 stub marker `_meta.not_yet_implemented` is
+///    **absent** — proving the handler escaped the stub path.
+#[cfg(test)]
+#[test]
+fn test_find_definition_tool() {
+    let (server, _kg, _tmp, file_path_str, _evaluate_id, caller_qualified_name) =
+        build_find_definition_fixture();
+
+    let request = json!({
+        "jsonrpc": JSONRPC_VERSION,
+        "id": 42,
+        "method": "tools/call",
+        "params": {
+            "name": "find_definition",
+            "arguments": { "name": "evaluate", "reason": "acceptance test" }
+        }
+    })
+    .to_string();
+    let response = server.handle_line(&request);
+
+    assert_eq!(
+        response.get("jsonrpc").and_then(Value::as_str),
+        Some(JSONRPC_VERSION),
+        "response must carry jsonrpc == \"2.0\": {response}"
+    );
+    assert_eq!(
+        response.get("id").and_then(Value::as_i64),
+        Some(42),
+        "response id must echo request id: {response}"
+    );
+    assert!(
+        response.get("error").is_none(),
+        "response must not carry an error envelope: {response}"
+    );
+
+    let meta = response
+        .pointer("/result/_meta")
+        .expect("response must carry result._meta");
+    assert_eq!(
+        meta.get("found").and_then(Value::as_bool),
+        Some(true),
+        "_meta.found must be true for a resolved symbol: {response}"
+    );
+    assert_eq!(
+        meta.get("tool").and_then(Value::as_str),
+        Some("find_definition"),
+        "_meta.tool must be \"find_definition\": {response}"
+    );
+    assert_eq!(
+        meta.get("source").and_then(Value::as_str),
+        Some("tree-sitter+kg"),
+        "_meta.source must be \"tree-sitter+kg\": {response}"
+    );
+    assert_eq!(
+        meta.get("file_path").and_then(Value::as_str),
+        Some(file_path_str.as_str()),
+        "_meta.file_path must match the ingested fixture path: {response}"
+    );
+    let start_line = meta
+        .get("start_line")
+        .and_then(Value::as_i64)
+        .expect("_meta.start_line must be a positive integer");
+    assert!(
+        start_line > 0,
+        "_meta.start_line must be 1-based positive: got {start_line}"
+    );
+
+    let callers = meta
+        .get("callers")
+        .and_then(Value::as_array)
+        .expect("_meta.callers must be a JSON array");
+    assert!(
+        callers.iter().any(|c| {
+            c.get("qualified_name").and_then(Value::as_str) == Some(caller_qualified_name.as_str())
+        }),
+        "_meta.callers must contain synthetic caller {caller_qualified_name:?}: got {callers:?}"
+    );
+
+    assert_eq!(
+        response.pointer("/result/isError").and_then(Value::as_bool),
+        Some(false),
+        "result.isError must be false on the happy path: {response}"
+    );
+    assert!(
+        response
+            .pointer("/result/_meta/not_yet_implemented")
+            .is_none(),
+        "result._meta.not_yet_implemented must be ABSENT — the handler \
+         must have escaped the phase-1 stub path: {response}"
+    );
+}
+
+/// Negative path: a `find_definition` call for a symbol absent from
+/// the knowledge graph must return a well-formed JSON-RPC response
+/// envelope with `_meta.found == false` and `isError == false` — NOT
+/// a JSON-RPC error, because "symbol not found" is a successful
+/// lookup that returned zero rows.
+#[cfg(test)]
+#[test]
+fn test_find_definition_tool_unknown_symbol() {
+    let (server, _kg, _tmp, _file_path, _id, _caller) = build_find_definition_fixture();
+
+    let request = json!({
+        "jsonrpc": JSONRPC_VERSION,
+        "id": 7,
+        "method": "tools/call",
+        "params": {
+            "name": "find_definition",
+            "arguments": { "name": "this_symbol_does_not_exist_anywhere" }
+        }
+    })
+    .to_string();
+    let response = server.handle_line(&request);
+
+    assert!(
+        response.get("error").is_none(),
+        "unknown-symbol path must not return JSON-RPC error: {response}"
+    );
+    assert_eq!(
+        response
+            .pointer("/result/_meta/found")
+            .and_then(Value::as_bool),
+        Some(false),
+        "_meta.found must be false for unresolved symbol: {response}"
+    );
+    assert_eq!(
+        response.pointer("/result/isError").and_then(Value::as_bool),
+        Some(false),
+        "result.isError must be false (this is a well-formed zero-row \
+         result, not an error): {response}"
+    );
+}
+
+/// Negative path: a `find_definition` call missing the required
+/// `name` argument must return a JSON-RPC error envelope with
+/// `code == -32602` (Invalid params).
+#[cfg(test)]
+#[test]
+fn test_find_definition_tool_missing_name_param() {
+    let (server, _kg, _tmp, _file_path, _id, _caller) = build_find_definition_fixture();
+
+    let request = json!({
+        "jsonrpc": JSONRPC_VERSION,
+        "id": 99,
+        "method": "tools/call",
+        "params": {
+            "name": "find_definition",
+            "arguments": {}
+        }
+    })
+    .to_string();
+    let response = server.handle_line(&request);
+
+    let error = response
+        .get("error")
+        .expect("missing `name` arg must produce JSON-RPC error envelope");
+    assert_eq!(
+        error.get("code").and_then(Value::as_i64),
+        Some(-32602),
+        "missing param error code must be -32602 (Invalid params): {response}"
+    );
+    let message = error
+        .get("message")
+        .and_then(Value::as_str)
+        .expect("error envelope must carry a string message");
+    assert!(
+        message.contains("name"),
+        "error message should reference missing `name` argument: {message:?}"
+    );
+    assert!(
+        response.get("result").is_none(),
+        "JSON-RPC error response must not also carry `result`: {response}"
+    );
+}
