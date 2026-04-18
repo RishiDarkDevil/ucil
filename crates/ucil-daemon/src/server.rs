@@ -1826,6 +1826,181 @@ async fn test_progressive_startup() {
     serve_result.expect("server loop must return Ok after clean EOF");
 }
 
+// ── merge_search_results unit tests (P1-W5-F09, pure function) ───────────
+//
+// `merge_search_results` is a pure function (no IO, no locks, no
+// system calls), so it is unit-tested independently of the full
+// `search_code` MCP dispatch — the acceptance test
+// `test_search_code_basic` exercises the same function end-to-end.
+
+#[cfg(test)]
+fn mk_symbol_entity(
+    name: &str,
+    kind: &str,
+    qualified_name: Option<&str>,
+    file_path: &str,
+    start_line: i64,
+) -> ucil_core::Entity {
+    ucil_core::Entity {
+        id: None,
+        kind: kind.to_owned(),
+        name: name.to_owned(),
+        qualified_name: qualified_name.map(str::to_owned),
+        file_path: file_path.to_owned(),
+        start_line: Some(start_line),
+        end_line: Some(start_line + 2),
+        signature: None,
+        doc_comment: None,
+        language: Some("rust".to_owned()),
+        t_valid_from: None,
+        t_valid_to: None,
+        importance: 0.5,
+        source_tool: Some("tree-sitter".to_owned()),
+        source_hash: Some("synthetic".to_owned()),
+    }
+}
+
+#[cfg(test)]
+fn mk_text_match(file_path: &str, line_number: u64, line_text: &str) -> TextMatch {
+    TextMatch {
+        file_path: PathBuf::from(file_path),
+        line_number,
+        line_text: line_text.to_owned(),
+    }
+}
+
+/// Symbol-only path: when only the KG half produces hits,
+/// `merge_search_results` returns one row per symbol, each marked
+/// `source == "symbol"`, and the order mirrors the input.
+#[cfg(test)]
+#[test]
+fn test_merge_search_results_symbol_only() {
+    let symbols = vec![
+        mk_symbol_entity(
+            "banana_split",
+            "function",
+            Some("util::banana_split"),
+            "/tmp/src/util.rs",
+            10,
+        ),
+        mk_symbol_entity(
+            "banana_peel",
+            "function",
+            Some("util::banana_peel"),
+            "/tmp/src/util.rs",
+            20,
+        ),
+    ];
+    let texts: Vec<TextMatch> = Vec::new();
+
+    let merged = merge_search_results(&symbols, &texts, 50);
+    assert_eq!(
+        merged.len(),
+        2,
+        "symbol-only merge keeps all rows: {merged:?}"
+    );
+    assert_eq!(merged[0].source, "symbol");
+    assert_eq!(merged[0].name.as_deref(), Some("banana_split"));
+    assert_eq!(
+        merged[0].qualified_name.as_deref(),
+        Some("util::banana_split")
+    );
+    assert_eq!(merged[0].line_text, "util::banana_split");
+    assert_eq!(merged[1].source, "symbol");
+    assert_eq!(merged[1].name.as_deref(), Some("banana_peel"));
+}
+
+/// Text-only path: when only the `ripgrep` half produces hits,
+/// `merge_search_results` returns one row per text match, each
+/// marked `source == "text"` with `name` / `kind` / `qualified_name`
+/// all `None` (and therefore absent from the JSON encoding).
+#[cfg(test)]
+#[test]
+fn test_merge_search_results_text_only() {
+    let symbols: Vec<ucil_core::Entity> = Vec::new();
+    let texts = vec![
+        mk_text_match("/tmp/src/util.rs", 42, "fn banana_split() {}"),
+        mk_text_match("/tmp/README.md", 3, "  banana_split — split a banana"),
+    ];
+
+    let merged = merge_search_results(&symbols, &texts, 50);
+    assert_eq!(merged.len(), 2);
+    assert_eq!(merged[0].source, "text");
+    assert_eq!(merged[0].file_path, "/tmp/src/util.rs");
+    assert_eq!(merged[0].line_number, 42);
+    assert_eq!(merged[0].line_text, "fn banana_split() {}");
+    assert!(merged[0].name.is_none());
+    assert!(merged[0].kind.is_none());
+    assert!(merged[0].qualified_name.is_none());
+    assert_eq!(merged[1].source, "text");
+    assert_eq!(merged[1].file_path, "/tmp/README.md");
+}
+
+/// Collision path: the same `(file_path, line_number)` reported by
+/// both halves collapses to a single row whose `source` flips to
+/// `"both"`, symbol fields (`name` / `kind` / `qualified_name`) are
+/// retained, and `line_text` is overwritten with the `ripgrep` line
+/// text so the caller sees the raw matched line.
+#[cfg(test)]
+#[test]
+fn test_merge_search_results_collision_flips_to_both() {
+    let symbols = vec![mk_symbol_entity(
+        "banana_split",
+        "function",
+        Some("util::banana_split"),
+        "/tmp/src/util.rs",
+        10,
+    )];
+    let texts = vec![
+        mk_text_match("/tmp/src/util.rs", 10, "fn banana_split() { /* ... */ }"),
+        mk_text_match("/tmp/README.md", 3, "  banana_split"),
+    ];
+
+    let merged = merge_search_results(&symbols, &texts, 50);
+    assert_eq!(merged.len(), 2, "collision collapses to 2 rows: {merged:?}");
+    assert_eq!(merged[0].source, "both");
+    assert_eq!(merged[0].line_text, "fn banana_split() { /* ... */ }");
+    assert_eq!(merged[0].name.as_deref(), Some("banana_split"));
+    assert_eq!(
+        merged[0].qualified_name.as_deref(),
+        Some("util::banana_split")
+    );
+    assert_eq!(merged[1].source, "text");
+    assert_eq!(merged[1].file_path, "/tmp/README.md");
+}
+
+/// Cap path: when `symbols.len() + texts.len()` exceeds
+/// `max_results`, `merge_search_results` stops pushing rows as soon
+/// as the cap is reached.  Symbol rows are pushed first, so caps
+/// below the symbol count return only symbols; caps inside the text
+/// range return all symbols plus a prefix of texts.
+#[cfg(test)]
+#[test]
+fn test_merge_search_results_respects_max_results() {
+    let symbols = vec![
+        mk_symbol_entity("banana_split", "function", None, "/tmp/a.rs", 1),
+        mk_symbol_entity("banana_peel", "function", None, "/tmp/b.rs", 2),
+    ];
+    let texts = vec![
+        mk_text_match("/tmp/c.rs", 1, "banana_split"),
+        mk_text_match("/tmp/d.rs", 1, "banana_peel"),
+    ];
+
+    // Cap below symbol count → only the first symbol comes back.
+    let merged_1 = merge_search_results(&symbols, &texts, 1);
+    assert_eq!(merged_1.len(), 1);
+    assert_eq!(merged_1[0].source, "symbol");
+    assert_eq!(merged_1[0].file_path, "/tmp/a.rs");
+
+    // Cap inside the text range → both symbols + one text.
+    let merged_3 = merge_search_results(&symbols, &texts, 3);
+    assert_eq!(merged_3.len(), 3);
+    assert_eq!(merged_3[0].source, "symbol");
+    assert_eq!(merged_3[1].source, "symbol");
+    assert_eq!(merged_3[2].source, "text");
+    assert_eq!(merged_3[2].file_path, "/tmp/c.rs");
+}
+
 // ── find_definition acceptance tests (P1-W4-F05) ─────────────────────────
 //
 // Per DEC-0005, these live at module root (NOT under `mod tests { … }`)
