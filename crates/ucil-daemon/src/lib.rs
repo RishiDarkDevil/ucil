@@ -40,11 +40,19 @@
 //! [`startup::ReadyHandle`] that resolves once the server has emitted
 //! its first successful response, so callers can assert the 2 s
 //! startup budget end-to-end.
+//!
+//! The `executor` module (introduced in WO-0032 for `P1-W4-F04`) owns
+//! the tree-sitter → knowledge-graph ingestion pipeline described in
+//! master-plan §18 Phase 1 Week 4 line 1759 ("Wire tree-sitter extraction
+//! → knowledge graph population"): [`executor::IngestPipeline::ingest_file`]
+//! parses a file with `ucil_treesitter`, extracts symbols, and upserts
+//! the whole batch inside one `BEGIN IMMEDIATE` transaction per file.
 
 #![deny(warnings)]
 #![warn(clippy::all, clippy::pedantic, clippy::nursery)]
 #![deny(rustdoc::broken_intra_doc_links)]
 
+pub mod executor;
 pub mod lifecycle;
 pub mod plugin_manager;
 pub mod priority_queue;
@@ -55,6 +63,7 @@ pub mod startup;
 pub mod storage;
 pub mod watcher;
 
+pub use executor::{ExecutorError, IngestPipeline, SOURCE_TOOL, TREE_SITTER_VALID_FROM};
 #[rustfmt::skip]
 pub use lifecycle::{Checkpoint, CheckpointError, Lifecycle, PidFile, PidFileError, ShutdownReason};
 pub use plugin_manager::{
