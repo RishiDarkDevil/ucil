@@ -1061,3 +1061,240 @@ async fn test_watcher_shutdown_is_clean() {
     //   - `Ok(None)` — channel closed (ideal), OR
     //   - `Err(_)`   — 500 ms quiet (acceptable).
 }
+
+// ── WO-0027 F03 acceptance tests ─────────────────────────────────────────────
+//
+// Watchman detection + backend selection tests. Kept at module root per
+// DEC-0005 so the frozen F03 selector `watcher::test_watchman_detection`
+// resolves without a `tests::` prefix. The `PATH`-manipulating tests
+// serialise through a module-level mutex because `std::env::set_var`
+// / `remove_var` mutate a process-global; multi-thread nextest
+// execution could otherwise corrupt a concurrent test's environment.
+// See the `RestorePath` guard below for the save/restore pattern.
+
+#[cfg(test)]
+static ENV_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// RAII guard that captures the current `PATH` on construction and
+/// restores it on drop. The guard *also* holds a lock on
+/// [`ENV_GUARD`] so two `PATH`-mutating tests never interleave their
+/// `set_var` / `remove_var` calls. Lock is acquired before any
+/// mutation; released only after `PATH` has been restored to its
+/// original value (or cleared if it was unset).
+///
+/// Using `MutexGuard<'static, ()>` with `Mutex::lock().unwrap()` —
+/// poisoning would surface as a panic, which is acceptable here
+/// because a poisoned env-guard means a previous test panicked while
+/// holding the lock and any surviving `PATH` state is untrusted.
+#[cfg(test)]
+struct RestorePath {
+    original: Option<std::ffi::OsString>,
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+impl RestorePath {
+    fn new() -> Self {
+        // `Mutex::lock().unwrap()` panics on poison — intentional: a
+        // poisoned guard means the prior holder panicked while mutating
+        // PATH and the current state is untrusted.
+        let lock = ENV_GUARD
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let original = std::env::var_os("PATH");
+        Self {
+            original,
+            _lock: lock,
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for RestorePath {
+    fn drop(&mut self) {
+        if let Some(value) = &self.original {
+            std::env::set_var("PATH", value);
+        } else {
+            std::env::remove_var("PATH");
+        }
+    }
+}
+
+/// Create a fake executable `watchman` shim at `<dir>/watchman` with
+/// mode `0o755`. File contents are an empty-shebang shell script; the
+/// shim is never executed by WO-0027 tests (only located via
+/// `which::which`), so any readable+executable file suffices.
+#[cfg(all(test, unix))]
+fn create_watchman_shim(dir: &Path) -> PathBuf {
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+
+    let shim_path = dir.join("watchman");
+    let mut file = std::fs::File::create(&shim_path).expect("create watchman shim");
+    writeln!(file, "#!/bin/sh").expect("write shebang");
+    writeln!(file, "exit 0").expect("write body");
+    drop(file);
+    let mut perms = std::fs::metadata(&shim_path)
+        .expect("stat shim")
+        .permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&shim_path, perms).expect("chmod shim");
+    shim_path
+}
+
+/// F03 frozen acceptance selector: `watcher::test_watchman_detection`.
+///
+/// Two-phase probe on a tempdir: (1) empty `PATH` → `detect_watchman`
+/// returns `None`; (2) `PATH` pointing at a tempdir containing a
+/// `watchman` shim with mode `0o755` → `detect_watchman` returns
+/// `Some(WatchmanCapability { binary })` whose `binary` resolves to
+/// the shim path. The original `PATH` is restored on drop via
+/// [`RestorePath`] so other tests running concurrently (under the
+/// env-guard mutex) observe an unchanged environment.
+#[cfg(all(test, unix))]
+#[test]
+fn test_watchman_detection() {
+    let _guard = RestorePath::new();
+    let empty = tempfile::TempDir::new().expect("create empty tempdir");
+    std::env::set_var("PATH", empty.path());
+    assert!(
+        detect_watchman().is_none(),
+        "watchman should not be found on an empty PATH"
+    );
+
+    let shim_dir = tempfile::TempDir::new().expect("create shim tempdir");
+    let shim_path = create_watchman_shim(shim_dir.path());
+    std::env::set_var("PATH", shim_dir.path());
+
+    let capability = detect_watchman().expect("watchman should be detected via fake shim");
+
+    // `which` canonicalises the resolved path on some platforms.
+    // Compare against the canonical shim path too.
+    let expected_canonical = std::fs::canonicalize(&shim_path).expect("canonicalise shim");
+    let got_canonical =
+        std::fs::canonicalize(&capability.binary).expect("canonicalise detected binary");
+    assert_eq!(got_canonical, expected_canonical);
+}
+
+#[cfg(test)]
+#[test]
+fn test_count_files_capped_below_cap() {
+    let tempdir = tempfile::TempDir::new().expect("create tempdir");
+    for i in 0..3 {
+        std::fs::File::create(tempdir.path().join(format!("file-{i}.txt")))
+            .expect("create test file");
+    }
+    assert_eq!(count_files_capped(tempdir.path(), 10), 3);
+}
+
+#[cfg(test)]
+#[test]
+fn test_count_files_capped_stops_early() {
+    let tempdir = tempfile::TempDir::new().expect("create tempdir");
+    for i in 0..20 {
+        std::fs::File::create(tempdir.path().join(format!("file-{i}.txt")))
+            .expect("create test file");
+    }
+    let count = count_files_capped(tempdir.path(), 5);
+    // Walker early-exits after cap + 1 entries — actual value may be
+    // 6 or less depending on walkdir traversal order, but MUST NOT be
+    // 20 (the true file count) because that would indicate the
+    // `take(cap + 1)` short-circuit was not applied.
+    assert!(
+        count <= 6,
+        "expected count_files_capped to early-exit at cap+1=6, got {count}"
+    );
+}
+
+#[cfg(all(test, unix))]
+#[test]
+fn test_auto_select_backend_returns_notify_when_watchman_absent() {
+    let _guard = RestorePath::new();
+    let empty = tempfile::TempDir::new().expect("create empty tempdir");
+    std::env::set_var("PATH", empty.path());
+
+    let root = tempfile::TempDir::new().expect("create root tempdir");
+    assert_eq!(
+        auto_select_backend(root.path(), WATCHMAN_AUTO_SELECT_THRESHOLD),
+        WatcherBackend::NotifyDebounced,
+        "no watchman on PATH must yield NotifyDebounced regardless of threshold"
+    );
+}
+
+#[cfg(all(test, unix))]
+#[test]
+fn test_auto_select_backend_returns_watchman_when_available_and_above_threshold() {
+    let _guard = RestorePath::new();
+    let root = tempfile::TempDir::new().expect("create root tempdir");
+    for i in 0..11 {
+        std::fs::File::create(root.path().join(format!("file-{i}.rs"))).expect("create test file");
+    }
+
+    let shim_dir = tempfile::TempDir::new().expect("create shim tempdir");
+    let _shim = create_watchman_shim(shim_dir.path());
+    std::env::set_var("PATH", shim_dir.path());
+
+    assert_eq!(
+        auto_select_backend(root.path(), 10),
+        WatcherBackend::Watchman,
+        "watchman present AND count (11) > threshold (10) must select Watchman"
+    );
+}
+
+#[cfg(all(test, unix))]
+#[test]
+fn test_auto_select_backend_returns_notify_when_below_threshold() {
+    let _guard = RestorePath::new();
+    let root = tempfile::TempDir::new().expect("create root tempdir");
+    for i in 0..3 {
+        std::fs::File::create(root.path().join(format!("file-{i}.rs"))).expect("create test file");
+    }
+
+    let shim_dir = tempfile::TempDir::new().expect("create shim tempdir");
+    let _shim = create_watchman_shim(shim_dir.path());
+    std::env::set_var("PATH", shim_dir.path());
+
+    assert_eq!(
+        auto_select_backend(root.path(), 10),
+        WatcherBackend::NotifyDebounced,
+        "watchman present but count (3) <= threshold (10) must stay on NotifyDebounced"
+    );
+}
+
+#[cfg(test)]
+#[tokio::test(flavor = "multi_thread")]
+async fn test_poll_backend_delivers_events() {
+    let tempdir = tempfile::TempDir::new().expect("create tempdir");
+    let (tx, mut rx) = mpsc::channel::<FileEvent>(32);
+
+    let _watcher = FileWatcher::new_with_backend(tempdir.path(), tx, WatcherBackend::Poll)
+        .expect("create poll watcher");
+
+    // Give PollWatcher a moment to perform its initial scan so the
+    // subsequent write is observed as a *change* rather than the
+    // baseline.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let path = tempdir.path().join("poll-hello.txt");
+    std::fs::write(&path, b"poll").expect("write test file");
+
+    // Poll interval is POLL_WATCHER_INTERVAL (2 s); the debouncer
+    // adds up to DEBOUNCE_WINDOW (100 ms) of extra latency. Budget
+    // 10 s so the test stays green under CI jitter.
+    let ev = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+        .await
+        .expect("timed out waiting for poll event")
+        .expect("channel closed before event arrived");
+
+    assert_eq!(
+        ev.source,
+        EventSource::NotifyDebounced,
+        "Poll events flow through the same debouncer pipeline and \
+         carry EventSource::NotifyDebounced"
+    );
+    assert!(
+        ev.path.ends_with("poll-hello.txt"),
+        "expected path to end with poll-hello.txt, got {}",
+        ev.path.display()
+    );
+}
