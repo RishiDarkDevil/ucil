@@ -259,6 +259,22 @@ pub struct HotObservation {
 /// resolution") for the scope this projection satisfies.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SymbolResolution {
+    /// `entities.id` of the resolved row — the primary key the
+    /// `find_definition` handler (`P1-W4-F05`) feeds to
+    /// [`KnowledgeGraph::list_relations_by_target`] to enumerate
+    /// immediate callers.  Always `Some(rowid)` because the resolver
+    /// selects `id` explicitly and every persisted row has one; the
+    /// `Option` shape preserves column-symmetry with [`Entity::id`] so
+    /// callers that already handle the nullable case do not need a
+    /// special branch.
+    pub id: Option<i64>,
+    /// `entities.qualified_name` of the resolved row — fully-qualified
+    /// identifier (e.g. `"ucil_core::types::parse"`) when known.  The
+    /// handler uses this to disambiguate callers + callees in
+    /// response payloads that cross module boundaries.  `None` when
+    /// the underlying row has a `NULL` `qualified_name` (e.g.
+    /// `kind = "file"` entries per §12.1).
+    pub qualified_name: Option<String>,
     /// `entities.file_path` of the resolved row — absolute or
     /// project-relative source-file path.  Never `None` because the
     /// underlying column is `NOT NULL` at the schema level.
@@ -1085,13 +1101,13 @@ impl KnowledgeGraph {
         file_scope: Option<&str>,
     ) -> Result<Option<SymbolResolution>, KnowledgeGraphError> {
         let sql = if file_scope.is_some() {
-            "SELECT file_path, start_line, signature, doc_comment, qualified_name \
+            "SELECT id, file_path, start_line, signature, doc_comment, qualified_name \
              FROM entities \
              WHERE (name = ?1 OR qualified_name = ?1 OR qualified_name LIKE '%::' || ?1) \
                AND file_path = ?2 \
              ORDER BY t_ingested_at DESC LIMIT 1"
         } else {
-            "SELECT file_path, start_line, signature, doc_comment, qualified_name \
+            "SELECT id, file_path, start_line, signature, doc_comment, qualified_name \
              FROM entities \
              WHERE (name = ?1 OR qualified_name = ?1 OR qualified_name LIKE '%::' || ?1) \
              ORDER BY t_ingested_at DESC LIMIT 1"
@@ -1338,7 +1354,7 @@ fn relation_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Relation> {
     })
 }
 
-/// Read a [`SymbolResolution`] row from a `SELECT file_path,
+/// Read a [`SymbolResolution`] row from a `SELECT id, file_path,
 /// start_line, signature, doc_comment, qualified_name` statement
 /// (exact column order).
 ///
@@ -1347,15 +1363,18 @@ fn relation_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Relation> {
 /// `qualified_name` that is `NULL` or lacks a `::` separator yields
 /// `None`.
 fn resolution_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SymbolResolution> {
-    let file_path = row.get::<_, String>(0)?;
-    let start_line = row.get::<_, Option<i64>>(1)?;
-    let signature = row.get::<_, Option<String>>(2)?;
-    let doc_comment = row.get::<_, Option<String>>(3)?;
-    let qualified_name = row.get::<_, Option<String>>(4)?;
+    let id = row.get::<_, Option<i64>>(0)?;
+    let file_path = row.get::<_, String>(1)?;
+    let start_line = row.get::<_, Option<i64>>(2)?;
+    let signature = row.get::<_, Option<String>>(3)?;
+    let doc_comment = row.get::<_, Option<String>>(4)?;
+    let qualified_name = row.get::<_, Option<String>>(5)?;
     let parent_module = qualified_name
         .as_deref()
         .and_then(|qn| qn.rsplit_once("::").map(|(head, _tail)| head.to_owned()));
     Ok(SymbolResolution {
+        id,
+        qualified_name,
         file_path,
         start_line,
         signature,
