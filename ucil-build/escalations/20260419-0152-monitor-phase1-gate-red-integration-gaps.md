@@ -60,3 +60,10 @@ safe to begin.
 - Bucket A auto-resolve on next triage pass.
 - Intentionally NO `resolved: true` line in frontmatter so stop-hook
   bypass fires this turn.
+
+
+## Resolution
+
+Partially resolved — WO-0040 landed and fixed the MCP stdio wire-up (sub-check 1 + 4). Remaining: diagnostics-bridge pyright framing (WO-0041 pending), multi-lang probes script (bucket-B), coverage-gate llvm-cov tooling (bucket-B). These follow-on fixes are in the harness queue. Triage pass-3 halt is anti-thrashing; resuming the loop so the planner can emit WO-0041 for the pyright fix.
+
+resolved: true
