@@ -25,9 +25,10 @@
 //! # Idle-grace reaper
 //!
 //! On construction, [`FallbackSpawner::new`] spawns a background task
-//! ([`reap_idle`]) that wakes every [`REAP_INTERVAL`] and shuts down
-//! any subprocess whose `last_used + grace_period` has elapsed.  The
-//! grace period defaults to [`DEFAULT_GRACE_PERIOD_MINUTES`] (mirroring
+//! (the internal `reap_idle` helper) that wakes every
+//! [`REAP_INTERVAL`] and shuts down any subprocess whose
+//! `last_used + grace_period` has elapsed.  The grace period defaults
+//! to [`DEFAULT_GRACE_PERIOD_MINUTES`] (mirroring
 //! `[lsp_diagnostics] grace_period_minutes = 5`); tests use
 //! [`FallbackSpawner::with_grace_period`] to inject a faster value
 //! without exercising real five-minute waits.
@@ -37,12 +38,12 @@
 //! Every IO `.await` in this module is wrapped in
 //! [`tokio::time::timeout`] per `rust-style.md` Async §:
 //!
-//! * [`shutdown_handle`] wraps `child.wait()` in
+//! * The internal `shutdown_handle` helper wraps `child.wait()` in
 //!   [`tokio::time::timeout(SHUTDOWN_TIMEOUT, …)`](tokio::time::timeout).
-//! * [`reap_idle`]'s polling loop uses [`tokio::time::sleep`] (timer,
-//!   not IO) and [`tokio::sync::Notify::notified`] (sync primitive,
-//!   not IO) inside a [`tokio::select!`] — neither is wrapped because
-//!   neither is IO.
+//! * The internal `reap_idle` polling loop uses [`tokio::time::sleep`]
+//!   (timer, not IO) and [`tokio::sync::Notify::notified`] (sync
+//!   primitive, not IO) inside a [`tokio::select!`] — neither is
+//!   wrapped because neither is IO.
 //!
 //! # Out of scope (deferred)
 //!
@@ -477,17 +478,17 @@ impl FallbackSpawner {
     /// Returns the count of subprocesses that were drained from the
     /// handle map and shut down.  Each subprocess is given up to
     /// [`SHUTDOWN_TIMEOUT`] to exit after its stdin is closed; if it
-    /// does not, [`shutdown_handle`] follows up with SIGKILL and one
-    /// more bounded wait — exceeding that surfaces as
+    /// does not, the internal `shutdown_handle` helper follows up with
+    /// SIGKILL and one more bounded wait — exceeding that surfaces as
     /// [`ServerSharingError::ShutdownTimeout`].
     ///
     /// # Errors
     ///
     /// Returns the first [`ServerSharingError`] encountered while
-    /// shutting down a subprocess; remaining children in the drained
-    /// vector are dropped (and thus reaped via
-    /// [`tokio::process::Command::kill_on_drop`]) without further
-    /// reporting.
+    /// shutting down any subprocess.  All shutdowns are awaited
+    /// concurrently via [`tokio::task::JoinSet`] so the wall-clock
+    /// bound is `~SHUTDOWN_TIMEOUT + 1s` regardless of the number of
+    /// managed subprocesses.
     pub async fn shutdown_all(&mut self) -> Result<usize, ServerSharingError> {
         // Stop the reaper before draining so it does not race us on
         // the same handle map.
@@ -501,10 +502,34 @@ impl FallbackSpawner {
             handles.drain().collect()
         };
 
-        let mut count: usize = 0;
-        for (lang, handle) in drained {
-            shutdown_handle(lang, handle).await?;
-            count = count.saturating_add(1);
+        let count = drained.len();
+        let mut set: tokio::task::JoinSet<Result<(), ServerSharingError>> =
+            tokio::task::JoinSet::new();
+        for (language, handle) in drained {
+            set.spawn(async move { shutdown_handle(language, handle).await });
+        }
+
+        let mut first_err: Option<ServerSharingError> = None;
+        while let Some(joined) = set.join_next().await {
+            match joined {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    if first_err.is_none() {
+                        first_err = Some(error);
+                    }
+                }
+                Err(join_err) => {
+                    tracing::warn!(
+                        target: "ucil.lsp.fallback_spawner.shutdown_all",
+                        ?join_err,
+                        "shutdown task did not complete cleanly",
+                    );
+                }
+            }
+        }
+
+        if let Some(error) = first_err {
+            return Err(error);
         }
 
         tracing::info!(
