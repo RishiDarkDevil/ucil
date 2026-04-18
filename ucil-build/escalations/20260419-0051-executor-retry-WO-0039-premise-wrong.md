@@ -118,3 +118,37 @@ the latent split-state in place.
 Stopping cleanly without code edits. Tree is clean on main. The
 `../ucil-wt/WO-0039` worktree has an unrelated uncommitted coverage-report
 delta (verifier residue) that I did not touch.
+
+## Resolution
+
+**Resolved**: 2026-04-19T02:10:00Z
+**Resolved by**: verifier session vrf-3e90d088-1cc5-4332-ac16-80b1fe8dd63f (retry-1)
+
+Recommended **Option C** was completed. The missing
+`feat/WO-0039-watchman-backend-retry-with-pathguard → main`
+fast-forward merge now exists on main:
+
+```
+4b79394 chore(escalation): resolve WO-0039 merge-failure — manual conflict resolve at 17c49f1
+17c49f1 merge: WO-0039 watchman-backend-retry-with-pathguard (feat → main, manual conflict resolve)
+```
+
+`git merge-base --is-ancestor ce5ea6a origin/main` now returns YES —
+the 10 implementation commits (`4034bc3..ce5ea6a`) are reachable from
+main, and `main`'s tree contains `detect_watchman`, `count_files_capped`,
+`auto_select_backend`, `new_with_backend`, `test_support.rs`, and the
+frozen F03 selector `watcher::test_watchman_detection`.
+
+The retry-1 verifier re-verified all 22 acceptance criteria from a
+clean slate on the feat branch (see
+`ucil-build/verification-reports/WO-0039.md`, vrf-3e90d088), performed
+the manual `detect_watchman` body mutation check (stashed → FAIL,
+restored → PASS), and confirmed 89.28% line coverage clears the 85%
+floor. The feature-list flip (vrf-fb23f4aa, 9618fbd) was left
+unchanged — this session's role was merge completion, not
+re-attestation.
+
+The latent split-state hazard described in this escalation is closed.
+Bucket A auto-resolve conditions now hold.
+
+resolved: true
