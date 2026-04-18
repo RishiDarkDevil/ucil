@@ -1,27 +1,34 @@
 # Phase 1 Integration Report
 
-**Tester session**: itg-fed2e5de-fdad-42e7-8215-46535d3668f1
-**Verified at**: 2026-04-18T20:29:02Z
+**Tester session**: itg-06f04ce4-27a5-4b8a-bf22-707b1767e406
+**Verified at**: 2026-04-18T20:58:44Z
 **Phase**: 1 (Week 1, per `ucil-build/progress.json`)
-**HEAD commit**: 571789a
+**HEAD commit**: 7737d92b3076d60b0d71dc4da7cfe379c91a0ab3
 **Verdict**: FAIL
 
 ## Summary
 
 Phase-1 gate requires three live smoke scripts (no mocks of Serena, LSP,
-or the UCIL daemon). Two of the three failed:
+or the UCIL daemon). Two of the three pass in this run; one still fails:
 
-- `scripts/verify/e2e-mcp-smoke.sh` — exit 1 (daemon produces no MCP
-  responses: `mcp --stdio` subcommand still not wired in
-  `crates/ucil-daemon/src/main.rs`).
-- `scripts/verify/diagnostics-bridge.sh` — exit 1 (pyright via `npx`
-  fallback path emits no framed `publishDiagnostics`).
-- `scripts/verify/serena-live.sh` — exit 0 (Serena v1.0.0 up, 20 tools
-  advertised).
+- `scripts/verify/e2e-mcp-smoke.sh` — **exit 0** (PASS). Daemon binary
+  builds; `ucil-daemon mcp --stdio` returns `initialize` and
+  `tools/list`; all 22 frozen MCP tools are advertised with the four
+  CEQP universal params on every tool. This closes the regression
+  recorded in the prior integration report (2026-04-18T20:29:02Z),
+  delivered by WO-0040 (`merge: WO-0040 ucil-daemon-mcp-stdio-subcommand`,
+  commit `7737d92`).
+- `scripts/verify/serena-live.sh` — **exit 0** (PASS). Serena v1.0.0
+  spawned via `uvx` and advertised 20 tools including the three required
+  for G1 structural (`find_symbol`, `find_referencing_symbols`,
+  `get_symbols_overview`).
+- `scripts/verify/diagnostics-bridge.sh` — **exit 1** (FAIL). pyright via
+  the `npx -y pyright` fallback path still emits no framed
+  `textDocument/publishDiagnostics` response to the LSP `didOpen` probe
+  within the 15-second wait window. This is the same failure shape as
+  the previous integration report — nothing in this pass closed it.
 
-The failure shape is the same as the prior integration pass at
-2026-04-18T20:17:12Z (previous report). No source or script changes
-between the two runs closed either gap.
+Because one gate script fails, the overall verdict is **FAIL**.
 
 ## Services
 
@@ -31,24 +38,25 @@ via uvx as declared in the plugin manifest (master-plan §13)." No
 `docker/*-compose.yaml` files exist in the repository, consistent with
 that design. A `docker ps` at the start of this run returned
 `permission denied while trying to connect to the docker API at
-unix:///var/run/docker.sock`: the session user is not in the `docker`
+unix:///var/run/docker.sock` — the session user is not in the `docker`
 group on this host, so even if a compose file existed it could not be
-stood up without a sudo/docker-group reconfiguration. Phase 1 is
-designed to avoid that dependency entirely — services below run
-in-process / via uvx / via npx.
+stood up without sudo/group reconfiguration. Phase 1 is designed to
+avoid that dependency entirely — services below run in-process / via
+uvx / via npx. Docker-backed fixtures (Postgres/MySQL/Arc-Memory/DBHub)
+become relevant only in Phase 3+ per `.claude/agents/integration-tester.md`.
 
-| Service              | Source / Image                                                               | Up time | Healthy | Notes                                                                                                                                      |
-|----------------------|------------------------------------------------------------------------------|---------|---------|--------------------------------------------------------------------------------------------------------------------------------------------|
-| ucil-daemon (local)  | `cargo build -p ucil-daemon --bin ucil-daemon` (incremental cache warm)      | ~1s     | no      | Binary builds. `ucil-daemon mcp --stdio` produces no MCP responses — `McpServer::serve()` is not yet wired into `main.rs` (see §Failures). |
-| Serena (uvx)         | `uvx --from git+https://github.com/oraios/serena@v1.0.0 serena-mcp-server`   | ~4s     | yes     | MCP handshake OK; 20 tools advertised including `find_symbol`, `find_referencing_symbols`, `get_symbols_overview`.                         |
-| pyright-langserver   | `npx -y pyright` fallback                                                    | ~16s    | partial | Process starts; never emits a framed `textDocument/publishDiagnostics` response to the LSP didOpen probe within the 15s window.            |
+| Service              | Source / Image                                                               | Up time | Healthy | Notes                                                                                                                                        |
+|----------------------|------------------------------------------------------------------------------|---------|---------|----------------------------------------------------------------------------------------------------------------------------------------------|
+| ucil-daemon (local)  | `cargo build -p ucil-daemon --bin ucil-daemon` (incremental cache warm)      | ~1s     | yes     | Binary builds and answers MCP `initialize` + `tools/list` over stdio; 22 tools with CEQP params on all.                                      |
+| Serena (uvx)         | `uvx --from git+https://github.com/oraios/serena@v1.0.0 serena-mcp-server`   | ~3s     | yes     | MCP handshake OK; 20 tools advertised including `find_symbol`, `find_referencing_symbols`, `get_symbols_overview`.                           |
+| pyright-langserver   | `npx -y pyright` fallback (no `pyright-langserver` on PATH)                  | ~16s    | no      | Process starts; never emits a framed `textDocument/publishDiagnostics` response to the LSP `didOpen` probe within the 15s wait (see §Failures). |
 
 ## Tests
 
 | Suite                                    | Passed | Failed | Skipped | Duration | Exit |
 |------------------------------------------|--------|--------|---------|----------|------|
-| scripts/verify/e2e-mcp-smoke.sh          | 0      | 1      | 0       | 3s       | 1    |
-| scripts/verify/serena-live.sh            | 1      | 0      | 0       | 4s       | 0    |
+| scripts/verify/e2e-mcp-smoke.sh          | 1      | 0      | 0       | 1s       | 0    |
+| scripts/verify/serena-live.sh            | 1      | 0      | 0       | 3s       | 0    |
 | scripts/verify/diagnostics-bridge.sh     | 0      | 1      | 0       | 16s      | 1    |
 | cargo nextest integration (deferred)     | —      | —      | —       | —        | —    |
 | pnpm adapters integration (deferred)     | —      | —      | —       | —        | —    |
@@ -61,47 +69,46 @@ black-box wrapper that the three `scripts/verify/*.sh` entries cover
 for the phase-1 gate — they are deliberately not re-run here to avoid
 shadowing the gate's own invocation.
 
+## Passes
+
+### 1. `scripts/verify/e2e-mcp-smoke.sh` — exit 0 (1s)
+
+```
+[e2e-mcp-smoke] building ucil-daemon...
+[e2e-mcp-smoke] OK — 22 tools registered, CEQP params on all, daemon spoke MCP cleanly.
+```
+
+Daemon binary built on the incremental cargo cache (~1 s), answered
+both `initialize` and `tools/list` over `ucil-daemon mcp --stdio`; the
+22 frozen tool names from master-plan §3 are all present and every
+tool advertises the four CEQP universal params (`reason`,
+`current_task`, `files_in_context`, `token_budget`).
+
+Full logs: `phase-1-integration-logs/e2e-mcp-smoke.{stdout,stderr,rc,dur}`.
+
+### 2. `scripts/verify/serena-live.sh` — exit 0 (3s)
+
+```
+[serena-live] spawning Serena via uvx (pinned v1.0.0)...
+[serena-live] OK — Serena v1.0.0 alive, advertises 20 tools including find_symbol find_referencing_symbols get_symbols_overview.
+```
+
+Serena was spawned via `uvx --from git+https://github.com/oraios/serena@v1.0.0 serena-mcp-server --context ide-assistant --project <cwd>` and answered the MCP handshake plus a `tools/list` with 20 tools, including the three required by G1 structural.
+
+Full logs: `phase-1-integration-logs/serena-live.{stdout,stderr,rc,dur}`.
+
 ## Failures
 
-### 1. `scripts/verify/e2e-mcp-smoke.sh` — exit 1 (3s)
+### 1. `scripts/verify/diagnostics-bridge.sh` — exit 1 (16s)
 
-Daemon compiled cleanly (incremental build, cache warm), but no JSON-RPC
-response appeared on stdout after sending `initialize` + `tools/list`
-over `ucil-daemon mcp --stdio`.
-
-Log tail (stderr):
-
-```
-[e2e-mcp-smoke] FAIL: daemon produced no stdout responses
-
-  This usually means McpServer::serve() has not yet been wired
-  into ucil-daemon's main.rs as a subcommand. server.rs has
-  McpServer::serve(reader, writer) but main.rs only calls
-  tracing_subscriber::fmt::init() and exits. Wire it like:
-
-    match std::env::args().nth(1).as_deref() {
-        Some("mcp") => server::McpServer::new()
-            .serve(tokio::io::stdin(), tokio::io::stdout()).await?,
-        _ => { /* daemon mode */ }
-    }
-```
-
-Interpretation: the `mcp --stdio` subcommand is still not wired into
-`crates/ucil-daemon/src/main.rs`. The MCP handshake and the 22-tool
-inventory cannot be verified from the CLI surface until it is. This is
-the same symptom the script's own self-diagnostic text predicts.
-
-This is NOT a tester-side issue: fixing it is a source edit in
-`ucil-daemon` and therefore belongs to the planner/executor loop, not
-the integration tester.
-
-### 2. `scripts/verify/diagnostics-bridge.sh` — exit 1 (16s)
-
-Pyright was invoked through the `npx -y pyright` fallback path (system
-`pyright-langserver` is not on `PATH`). The script's LSP handshake was
-sent (process ran through its 15s inner wait), but no framed
-`textDocument/publishDiagnostics` message with a non-empty diagnostic
-list was extracted from the Content-Length stream.
+pyright is not installed as `pyright-langserver` on PATH, so the script
+takes the declared fallback `PYRIGHT=(npx -y pyright)`. The LSP probe
+sends `initialize` → `initialized` → `textDocument/didOpen` of a file
+with a deliberate type error and waits 15 s for a framed
+`textDocument/publishDiagnostics` reply. No such reply arrives; the
+Python framed-message extractor yields an empty `out.jsonl` and the
+script fails at the "no publishDiagnostics with a non-empty diagnostic
+list" assertion.
 
 Log tail (stderr):
 
@@ -110,77 +117,39 @@ Log tail (stderr):
 -- messages received --
 ```
 
-(No `method` entries were listed below the banner — the framed-message
-extractor produced an empty JSONL, suggesting pyright either never
-emitted any LSP frames or emitted output in a form the Content-Length
-extractor in the script didn't parse on this runtime.)
+(The follow-up "messages received" line is blank because `out.jsonl` is
+empty — pyright invoked via `npx -y pyright` runs the CLI entrypoint,
+which is not an LSP server. The `pyright-langserver` binary is the LSP
+server; it is shipped by the same npm package but as a separate bin.
+`npx -y pyright-langserver --stdio` is the LSP-capable invocation.
+Observation only — no source change performed.)
 
-Interpretation: either the `npx -y pyright` fallback invokes the
-pyright CLI (not the LSP server) under the installed npx/Node version,
-or pyright is emitting diagnostics to stderr / in a non-framed form
-that the probe doesn't capture. A system install of
-`pyright-langserver` on `PATH` (via `npm i -g pyright` or
-`pipx install pyright`) would take the happy path and is the cleanest
-next step; the script deliberately prefers `pyright-langserver --stdio`
-when present, so the fallback is not exercising the same binary the
-LSP bridge would talk to in production.
+This matches the failure recorded at 2026-04-18T20:29:02Z in the
+previous report; nothing between the two runs addressed it. The
+immediate environmental options to close the gap are:
 
-This is an environmental / invocation-shape issue, not a bug in
-`ucil-lsp-diagnostics` source that the integration tester should fix.
-Per the integration-tester contract the tester does not edit source or
-scripts — this failure is flagged and left for planner / executor
-triage.
+- install `pyright` globally on the host (`npm i -g pyright` places
+  both `pyright` and `pyright-langserver` on PATH), **or**
+- extend `scripts/verify/diagnostics-bridge.sh` to use
+  `npx -y pyright-langserver --stdio` as the fallback command instead
+  of `npx -y pyright` (ADR + script edit; outside this
+  integration-tester's scope).
 
-### 3. `scripts/verify/serena-live.sh` — exit 0 (4s) ✅
+Either path is a follow-up for the executor/planner; this report only
+observes.
 
-Passed. Serena v1.0.0 spawned via `uvx`, responded to MCP
-`initialize` + `tools/list`, advertised 20 tools including the three
-required by the G1 structural group (`find_symbol`,
-`find_referencing_symbols`, `get_symbols_overview`). Log:
+Full logs: `phase-1-integration-logs/diagnostics-bridge.{stdout,stderr,rc,dur}`.
 
-```
-[serena-live] spawning Serena via uvx (pinned v1.0.0)...
-[serena-live] OK — Serena v1.0.0 alive, advertises 20 tools including find_symbol find_referencing_symbols get_symbols_overview.
-```
+## Tear-down
+
+No Docker services were started (none required for Phase 1 and none
+possible on this host's current permissions), so no compose `down` was
+needed. All three verification scripts clean up their own tempdirs via
+`trap 'rm -rf "$TMP"' EXIT`.
 
 ## Artifacts
 
-Full logs captured at:
-
-```
-ucil-build/verification-reports/phase-1-integration-logs/
-├── e2e-mcp-smoke.stdout    e2e-mcp-smoke.stderr    e2e-mcp-smoke.rc    e2e-mcp-smoke.dur
-├── serena-live.stdout      serena-live.stderr      serena-live.rc      serena-live.dur
-├── diagnostics-bridge.stdout  diagnostics-bridge.stderr  diagnostics-bridge.rc  diagnostics-bridge.dur
-├── session.id              start.ts                 verified_at.ts
-```
-
-- Session id: `itg-fed2e5de-fdad-42e7-8215-46535d3668f1`
-- Start: `2026-04-18T20:28:10Z`
-- Verified at: `2026-04-18T20:29:02Z`
-- Duration: ~52s (all three scripts incl. per-script setup)
-
-## Docker teardown
-
-No `docker compose up` was performed — no compose files exist for
-phase 1, and the phase-1 scripts do not require Docker (see §Services).
-Nothing to tear down. No stray containers or networks from this
-tester session.
-
-## Verdict
-
-**FAIL.** Two of three phase-1 gate scripts failed (`e2e-mcp-smoke.sh`,
-`diagnostics-bridge.sh`). The phase-1 gate formula requires every
-`scripts/verify/*.sh` entry used by `scripts/gate-check.sh 1` to exit 0;
-two non-zero exits keep the gate red. `serena-live.sh` is green.
-
-Next-step recommendations (for planner, not this tester):
-
-1. Wire `ucil-daemon mcp --stdio` in `crates/ucil-daemon/src/main.rs`
-   so `McpServer::serve` receives stdio. This is already prescribed by
-   the `e2e-mcp-smoke.sh` self-diagnostic message.
-2. Make `pyright-langserver` available on the gate runner (install via
-   `npm i -g pyright` or `pipx install pyright`), or have
-   `diagnostics-bridge.sh` detect the `npx` fallback shape and invoke
-   pyright in a form that actually launches the language-server. Either
-   change is out-of-scope for the integration tester.
+- `phase-1-integration-logs/e2e-mcp-smoke.{stdout,stderr,rc,dur}`
+- `phase-1-integration-logs/serena-live.{stdout,stderr,rc,dur}`
+- `phase-1-integration-logs/diagnostics-bridge.{stdout,stderr,rc,dur}`
+- `phase-1-integration-logs/session.id`, `start.ts`, `verified_at.ts`
