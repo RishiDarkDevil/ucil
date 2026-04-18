@@ -7,6 +7,7 @@ blocks_loop: false
 session_role: monitor
 session_work: watched-WO-0024-full-cycle; verifier-rejected-retry1-on-pre-existing-rustdoc-bug-from-WO-0009; race-with-verifier-rejection-push
 auto_resolve_on_next_triage: bucket-A
+resolved: true
 ---
 
 # Phase 1 gate incomplete — monitor session (WO-0024 verifier REJECT retry 1)
@@ -38,3 +39,12 @@ companion escalation the verifier will write after push.
 - Bucket A auto-resolve on next triage pass (once rejection + companion
   escalation land).
 - Left unresolved in frontmatter for stop-hook bypass.
+
+## Resolution
+
+Resolved 2026-04-18 by triage cap-rescue pass. Author explicitly flagged
+`auto_resolve_on_next_triage: bucket-A` and `blocks_loop: false`. The
+rejection and companion escalations have since landed
+(`ucil-build/rejections/WO-0024.md`, the 0820 rustdoc-bug escalation, and
+the 0848 attempts-exhausted wrapper). Remediation is the Bucket-D micro-WO
+emitted in this triage pass. Bucket A — admin, auto-resolved.
