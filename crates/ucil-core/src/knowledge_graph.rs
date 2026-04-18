@@ -762,6 +762,90 @@ impl KnowledgeGraph {
         }
         Ok(out)
     }
+
+    // ── Relation CRUD ────────────────────────────────────────────────
+    //
+    // `relations` has NO UNIQUE constraint in §12.1 — each call to
+    // `upsert_relation` appends a fresh row.  Name is kept as
+    // `upsert_*` for API symmetry with `upsert_entity` and to leave
+    // room for a future dedup pass; today the implementation is a
+    // pure insert.
+
+    /// Insert a [`Relation`] row.
+    ///
+    /// Routes through [`Self::execute_in_transaction`] so the write
+    /// respects the `BEGIN IMMEDIATE` chokepoint (§11 line 1117).
+    /// Returns the new `relations.id` via `RETURNING id`.
+    ///
+    /// # Errors
+    ///
+    /// * [`KnowledgeGraphError::Sqlite`] — transaction open, statement
+    ///   prepare, parameter bind, or row return failed.  Foreign-key
+    ///   violations on `source_id` / `target_id` (the columns
+    ///   `REFERENCES entities(id)` per §12.1) also flow through this
+    ///   variant.
+    #[tracing::instrument(
+        level = "debug",
+        skip(self, relation),
+        fields(kind = %relation.kind, source_id = relation.source_id, target_id = relation.target_id),
+        name = "ucil.core.kg.upsert_relation",
+    )]
+    pub fn upsert_relation(&mut self, relation: &Relation) -> Result<i64, KnowledgeGraphError> {
+        self.execute_in_transaction(|tx| {
+            let mut stmt = tx.prepare(
+                "INSERT INTO relations (\
+                    source_id, target_id, kind, weight, \
+                    t_valid_from, t_valid_to, \
+                    source_tool, source_evidence, confidence\
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) \
+                 RETURNING id;",
+            )?;
+            let id: i64 = stmt.query_row(
+                rusqlite::params![
+                    relation.source_id,
+                    relation.target_id,
+                    relation.kind,
+                    relation.weight,
+                    relation.t_valid_from,
+                    relation.t_valid_to,
+                    relation.source_tool,
+                    relation.source_evidence,
+                    relation.confidence,
+                ],
+                |row| row.get::<_, i64>(0),
+            )?;
+            Ok(id)
+        })
+    }
+
+    /// List every [`Relation`] row with the given `source_id`.
+    ///
+    /// Read-only — no transaction.  Returns rows in insertion order
+    /// (`id ASC`) so callers can reason about append-only arrival.
+    ///
+    /// # Errors
+    ///
+    /// * [`KnowledgeGraphError::Sqlite`] — statement prepare, bind, or
+    ///   iteration failure.
+    pub fn list_relations_by_source(
+        &self,
+        source_id: i64,
+    ) -> Result<Vec<Relation>, KnowledgeGraphError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, source_id, target_id, kind, weight, \
+                    t_valid_from, t_valid_to, \
+                    source_tool, source_evidence, confidence \
+             FROM relations \
+             WHERE source_id = ?1 \
+             ORDER BY id ASC",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![source_id], relation_from_row)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
 }
 
 // ── Row decoders ─────────────────────────────────────────────────────────────
@@ -792,6 +876,24 @@ fn entity_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Entity> {
         importance: row.get::<_, f64>(12)?,
         source_tool: row.get::<_, Option<String>>(13)?,
         source_hash: row.get::<_, Option<String>>(14)?,
+    })
+}
+
+/// Read a [`Relation`] row from a `SELECT id, source_id, target_id,
+/// kind, weight, t_valid_from, t_valid_to, source_tool,
+/// source_evidence, confidence` statement (exact column order).
+fn relation_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Relation> {
+    Ok(Relation {
+        id: row.get::<_, Option<i64>>(0)?,
+        source_id: row.get::<_, i64>(1)?,
+        target_id: row.get::<_, i64>(2)?,
+        kind: row.get::<_, String>(3)?,
+        weight: row.get::<_, f64>(4)?,
+        t_valid_from: row.get::<_, Option<String>>(5)?,
+        t_valid_to: row.get::<_, Option<String>>(6)?,
+        source_tool: row.get::<_, Option<String>>(7)?,
+        source_evidence: row.get::<_, Option<String>>(8)?,
+        confidence: row.get::<_, f64>(9)?,
     })
 }
 
@@ -1178,4 +1280,98 @@ fn test_entity_unique_constraint_updates() {
         count3 > count,
         "access_count monotonic across conflicts (was {count}, now {count3})",
     );
+}
+
+/// `test_upsert_relation_and_list` — insert 2 entities + 1 relation
+/// between them, assert `list_relations_by_source` returns the single
+/// relation with all fields intact.
+#[cfg(test)]
+#[test]
+fn test_upsert_relation_and_list() {
+    use tempfile::TempDir;
+
+    let tmp = TempDir::new().expect("tempdir must be creatable");
+    let mut kg =
+        KnowledgeGraph::open(&tmp.path().join("kg.db")).expect("KnowledgeGraph::open must succeed");
+
+    let make_entity = |name: &str, qname: &str| Entity {
+        id: None,
+        kind: "function".to_owned(),
+        name: name.to_owned(),
+        qualified_name: Some(qname.to_owned()),
+        file_path: "src/graph.rs".to_owned(),
+        start_line: Some(1),
+        end_line: Some(10),
+        signature: None,
+        doc_comment: None,
+        language: Some("rust".to_owned()),
+        t_valid_from: Some("2026-04-18T00:00:00+00:00".to_owned()),
+        t_valid_to: None,
+        importance: 0.5,
+        source_tool: None,
+        source_hash: None,
+    };
+    let src_id = kg
+        .upsert_entity(&make_entity("caller", "graph::caller"))
+        .expect("source entity upsert must succeed");
+    let tgt_id = kg
+        .upsert_entity(&make_entity("callee", "graph::callee"))
+        .expect("target entity upsert must succeed");
+
+    let relation = Relation {
+        id: None,
+        source_id: src_id,
+        target_id: tgt_id,
+        kind: "calls".to_owned(),
+        weight: 0.9,
+        t_valid_from: Some("2026-04-18T00:00:00+00:00".to_owned()),
+        t_valid_to: None,
+        source_tool: Some("tree-sitter".to_owned()),
+        source_evidence: Some("src/graph.rs:7".to_owned()),
+        confidence: 0.95,
+    };
+    let rel_id = kg
+        .upsert_relation(&relation)
+        .expect("relation upsert must succeed");
+    assert!(rel_id > 0, "RETURNING id must be positive");
+
+    let listed = kg
+        .list_relations_by_source(src_id)
+        .expect("list_relations_by_source must succeed");
+    assert_eq!(listed.len(), 1, "exactly one relation was inserted");
+    let fetched = &listed[0];
+    assert_eq!(fetched.id, Some(rel_id));
+    assert_eq!(fetched.source_id, src_id);
+    assert_eq!(fetched.target_id, tgt_id);
+    assert_eq!(fetched.kind, relation.kind);
+    assert!(
+        (fetched.weight - relation.weight).abs() < 1e-9,
+        "weight round-trips as f64",
+    );
+    assert_eq!(fetched.t_valid_from, relation.t_valid_from);
+    assert_eq!(fetched.t_valid_to, relation.t_valid_to);
+    assert_eq!(fetched.source_tool, relation.source_tool);
+    assert_eq!(fetched.source_evidence, relation.source_evidence);
+    assert!(
+        (fetched.confidence - relation.confidence).abs() < 1e-9,
+        "confidence round-trips as f64",
+    );
+
+    // No UNIQUE constraint — a second insert appends a fresh row.
+    kg.upsert_relation(&relation)
+        .expect("second insert appends");
+    let listed2 = kg
+        .list_relations_by_source(src_id)
+        .expect("second list must succeed");
+    assert_eq!(
+        listed2.len(),
+        2,
+        "relations has no UNIQUE; second insert appends",
+    );
+
+    // A source id with no edges returns an empty vec.
+    let empty = kg
+        .list_relations_by_source(9_999_999)
+        .expect("empty list must be Ok");
+    assert!(empty.is_empty(), "absent source_id yields empty vec");
 }
