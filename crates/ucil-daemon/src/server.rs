@@ -2689,3 +2689,500 @@ fn test_get_conventions_tool_non_string_category() {
         "JSON-RPC error response must not also carry `result`: {response}"
     );
 }
+
+// ── search_code acceptance tests (P1-W5-F09) ─────────────────────────────
+//
+// Per DEC-0005 / DEC-0007 and the WO-0006 test-selector lesson, these
+// acceptance tests live at module root (NOT under `mod tests { … }`) so
+// the frozen acceptance selector `server::test_search_code_basic` resolves
+// to `ucil_daemon::server::test_search_code_basic` for
+// `cargo nextest run -p ucil-daemon server::test_search_code_basic`
+// without an intermediate `tests::` segment.
+
+/// Build a `search_code` test fixture.
+///
+/// Creates two `tempfile::TempDir` trees: one hosting the SQLite
+/// knowledge graph (`.db`) and one hosting the source-tree that the
+/// in-process `ripgrep` walker will scan.  Writes `src/util.rs` with
+/// the `banana_split` function so both halves of the handler (symbol
+/// and text) have a real hit to report.  Returns
+/// `(server, _kg_arc, _kg_tmp, project_tmp, project_root_string)` so
+/// callers can build request JSON against the project path.
+///
+/// The KG is deliberately kept in a separate tempdir so the scanner
+/// does NOT walk over the `.db` file (the walker would happily recurse
+/// into it, but the `.db` is binary and gets dropped by
+/// `BinaryDetection::quit(0x00)` — still, segregating avoids surprises
+/// for future maintainers).
+#[cfg(test)]
+#[allow(clippy::type_complexity)]
+fn build_search_code_fixture() -> (
+    McpServer,
+    Arc<Mutex<ucil_core::KnowledgeGraph>>,
+    tempfile::TempDir,
+    tempfile::TempDir,
+    String,
+    String,
+) {
+    use std::fs;
+
+    use ucil_core::{Entity, KnowledgeGraph};
+
+    let kg_tmp = tempfile::TempDir::new().expect("kg tempdir must be creatable");
+    let project_tmp = tempfile::TempDir::new().expect("project tempdir must be creatable");
+
+    // Write a real Rust source file so `grep-searcher` has something
+    // to match on a banana_split query.
+    let src_dir = project_tmp.path().join("src");
+    fs::create_dir_all(&src_dir).expect("src/ must be creatable under project root");
+    let util_rs = src_dir.join("util.rs");
+    fs::write(&util_rs, "pub fn banana_split(x: u32) -> u32 { x + 1 }\n")
+        .expect("util.rs must be writable");
+
+    // Open the KG and upsert a matching entity row so the symbol half
+    // also hits on `banana_split`.  `file_path` is the absolute path
+    // to `util.rs` so the merged record shares its `(file_path, line)`
+    // key with the text walker's hit.
+    let util_abs = util_rs
+        .canonicalize()
+        .expect("util.rs path must canonicalize");
+    let util_abs_str = util_abs.display().to_string();
+    let mut kg = KnowledgeGraph::open(&kg_tmp.path().join("knowledge.db"))
+        .expect("KnowledgeGraph::open must succeed");
+    let entity = Entity {
+        id: None,
+        kind: "function".to_owned(),
+        name: "banana_split".to_owned(),
+        qualified_name: Some("project::util::banana_split".to_owned()),
+        file_path: util_abs_str.clone(),
+        start_line: Some(1),
+        end_line: Some(1),
+        signature: Some("fn banana_split(x: u32) -> u32".to_owned()),
+        doc_comment: None,
+        language: Some("rust".to_owned()),
+        t_valid_from: Some(crate::executor::TREE_SITTER_VALID_FROM.to_owned()),
+        t_valid_to: None,
+        importance: 0.5,
+        source_tool: Some(crate::executor::SOURCE_TOOL.to_owned()),
+        source_hash: Some("synthetic".to_owned()),
+    };
+    kg.upsert_entity(&entity)
+        .expect("banana_split entity upsert must succeed");
+
+    let project_root_str = project_tmp.path().display().to_string();
+    let kg_arc = Arc::new(Mutex::new(kg));
+    let server = McpServer::with_knowledge_graph(Arc::clone(&kg_arc));
+    (
+        server,
+        kg_arc,
+        kg_tmp,
+        project_tmp,
+        project_root_str,
+        util_abs_str,
+    )
+}
+
+/// Frozen acceptance selector for feature `P1-W5-F09` — see
+/// `ucil-build/feature-list.json` entry
+/// `-p ucil-daemon server::test_search_code_basic`.
+///
+/// Exercises the full `tools/call` dispatch for `search_code` against a
+/// real `KnowledgeGraph::open` + `upsert_entity` on a temp SQLite file
+/// AND a real in-process `ignore` + `grep-searcher` + `grep-regex`
+/// walker pass on a `tempfile::TempDir` populated with a Rust source
+/// file.  No mocks of SQLite, `ignore`, or `grep-searcher` — both
+/// halves run against real state per the anti-laziness contract.
+///
+/// Asserts (per WO-0035 scope_in bullet 9):
+///
+/// 1. JSON-RPC envelope is well-formed (`jsonrpc == "2.0"`, matching
+///    `id`, no `error`).
+/// 2. `_meta.tool == "search_code"` and
+///    `_meta.source == "tree-sitter+ripgrep"`.
+/// 3. `_meta.count >= 1` (at least one merged result).
+/// 4. `_meta.symbol_match_count == 1` (one KG row hit).
+/// 5. `_meta.text_match_count >= 1` (at least one `ripgrep` hit).
+/// 6. At least one result has `source == "both"` (the symbol row at
+///    `util.rs:1` and the text row at `util.rs:1` collapsed).
+/// 7. `_meta.results[0].preview` contains `"banana_split"`.
+/// 8. `result.isError == false`.
+/// 9. The phase-1 stub marker `_meta.not_yet_implemented` is absent.
+#[cfg(test)]
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn test_search_code_basic() {
+    let (server, _kg, _kg_tmp, _project_tmp, project_root, _util_abs) = build_search_code_fixture();
+
+    let request = json!({
+        "jsonrpc": JSONRPC_VERSION,
+        "id": 101,
+        "method": "tools/call",
+        "params": {
+            "name": "search_code",
+            "arguments": {
+                "query": "banana_split",
+                "root": project_root,
+                "max_results": 50
+            }
+        }
+    })
+    .to_string();
+    let response = server.handle_line(&request);
+
+    assert_eq!(
+        response.get("jsonrpc").and_then(Value::as_str),
+        Some(JSONRPC_VERSION),
+        "response must carry jsonrpc == \"2.0\": {response}"
+    );
+    assert_eq!(
+        response.get("id").and_then(Value::as_i64),
+        Some(101),
+        "response id must echo request id: {response}"
+    );
+    assert!(
+        response.get("error").is_none(),
+        "response must not carry an error envelope: {response}"
+    );
+
+    let meta = response
+        .pointer("/result/_meta")
+        .expect("response must carry result._meta");
+    assert_eq!(
+        meta.get("tool").and_then(Value::as_str),
+        Some("search_code"),
+        "_meta.tool must be \"search_code\": {response}"
+    );
+    assert_eq!(
+        meta.get("source").and_then(Value::as_str),
+        Some("tree-sitter+ripgrep"),
+        "_meta.source must be \"tree-sitter+ripgrep\": {response}"
+    );
+
+    let count = meta
+        .get("count")
+        .and_then(Value::as_i64)
+        .expect("_meta.count must be an integer");
+    assert!(
+        count >= 1,
+        "_meta.count must be >= 1 (symbol + text merged): got {count} — {response}"
+    );
+    assert_eq!(
+        meta.get("symbol_match_count").and_then(Value::as_i64),
+        Some(1),
+        "_meta.symbol_match_count must be 1 (one KG row hit): {response}"
+    );
+    let text_match_count = meta
+        .get("text_match_count")
+        .and_then(Value::as_i64)
+        .expect("_meta.text_match_count must be an integer");
+    assert!(
+        text_match_count >= 1,
+        "_meta.text_match_count must be >= 1 (ripgrep hit): got {text_match_count} — {response}"
+    );
+
+    let results = meta
+        .get("results")
+        .and_then(Value::as_array)
+        .expect("_meta.results must be a JSON array");
+    assert!(
+        !results.is_empty(),
+        "_meta.results must contain at least one row: {response}"
+    );
+    let any_both = results
+        .iter()
+        .any(|r| r.get("source").and_then(Value::as_str) == Some("both"));
+    assert!(
+        any_both,
+        "at least one result must have source == \"both\" (symbol + text merge at util.rs:1): {results:?}"
+    );
+    let first_preview = results[0]
+        .get("preview")
+        .and_then(Value::as_str)
+        .expect("_meta.results[0].preview must be a string");
+    assert!(
+        first_preview.contains("banana_split"),
+        "_meta.results[0].preview must mention banana_split: got {first_preview:?}"
+    );
+
+    assert_eq!(
+        response.pointer("/result/isError").and_then(Value::as_bool),
+        Some(false),
+        "result.isError must be false on the happy path: {response}"
+    );
+    assert!(
+        response
+            .pointer("/result/_meta/not_yet_implemented")
+            .is_none(),
+        "result._meta.not_yet_implemented must be ABSENT — the handler \
+         must have escaped the phase-1 stub path: {response}"
+    );
+}
+
+/// Negative path: `arguments.query` is an empty string — the handler
+/// must return a JSON-RPC error envelope with `code == -32602` (Invalid
+/// params), per WO-0035 scope_in bullet 6.  Empty queries would match
+/// every line in every file and are therefore not a useful operation.
+#[cfg(test)]
+#[tokio::test]
+async fn test_search_code_tool_empty_query() {
+    let (server, _kg, _kg_tmp, _project_tmp, project_root, _util_abs) = build_search_code_fixture();
+
+    let request = json!({
+        "jsonrpc": JSONRPC_VERSION,
+        "id": 201,
+        "method": "tools/call",
+        "params": {
+            "name": "search_code",
+            "arguments": { "query": "", "root": project_root }
+        }
+    })
+    .to_string();
+    let response = server.handle_line(&request);
+
+    let error = response
+        .get("error")
+        .expect("empty query must produce a JSON-RPC error envelope");
+    assert_eq!(
+        error.get("code").and_then(Value::as_i64),
+        Some(-32602),
+        "empty-query error code must be -32602 (Invalid params): {response}"
+    );
+    assert!(
+        response.get("result").is_none(),
+        "JSON-RPC error response must not also carry `result`: {response}"
+    );
+}
+
+/// Stub-path regression: a `search_code` call on a server built via
+/// `McpServer::new()` (no KG attached) must still return the phase-1
+/// `_meta.not_yet_implemented: true` stub envelope — preserving
+/// invariant #9 from `ucil-build/phase-log/01-phase-1/CLAUDE.md`.
+#[cfg(test)]
+#[tokio::test]
+async fn test_search_code_tool_no_kg_returns_stub() {
+    let server = McpServer::new();
+
+    let request = json!({
+        "jsonrpc": JSONRPC_VERSION,
+        "id": 202,
+        "method": "tools/call",
+        "params": {
+            "name": "search_code",
+            "arguments": { "query": "banana_split" }
+        }
+    })
+    .to_string();
+    let response = server.handle_line(&request);
+
+    assert!(
+        response.get("error").is_none(),
+        "stub path must not return JSON-RPC error: {response}"
+    );
+    assert_eq!(
+        response
+            .pointer("/result/_meta/not_yet_implemented")
+            .and_then(Value::as_bool),
+        Some(true),
+        "no-KG call must return _meta.not_yet_implemented == true \
+         (phase-1 invariant #9): {response}"
+    );
+    assert_eq!(
+        response
+            .pointer("/result/_meta/tool")
+            .and_then(Value::as_str),
+        Some("search_code"),
+        "stub envelope must echo tool name: {response}"
+    );
+}
+
+/// Negative path: `arguments.query` is a non-string JSON value (number)
+/// — must produce a `-32602` Invalid-params error.
+#[cfg(test)]
+#[tokio::test]
+async fn test_search_code_tool_non_string_query() {
+    let (server, _kg, _kg_tmp, _project_tmp, project_root, _util_abs) = build_search_code_fixture();
+
+    let request = json!({
+        "jsonrpc": JSONRPC_VERSION,
+        "id": 203,
+        "method": "tools/call",
+        "params": {
+            "name": "search_code",
+            "arguments": { "query": 42, "root": project_root }
+        }
+    })
+    .to_string();
+    let response = server.handle_line(&request);
+
+    let error = response
+        .get("error")
+        .expect("non-string query must produce a JSON-RPC error envelope");
+    assert_eq!(
+        error.get("code").and_then(Value::as_i64),
+        Some(-32602),
+        "non-string-query error code must be -32602 (Invalid params): {response}"
+    );
+    assert!(
+        response.get("result").is_none(),
+        "JSON-RPC error response must not also carry `result`: {response}"
+    );
+}
+
+/// Negative path: `arguments.root` points at a path that does not
+/// exist on disk — must produce a `-32602` Invalid-params error.
+#[cfg(test)]
+#[tokio::test]
+async fn test_search_code_tool_nonexistent_root() {
+    let (server, _kg, _kg_tmp, _project_tmp, _project_root, _util_abs) =
+        build_search_code_fixture();
+
+    let request = json!({
+        "jsonrpc": JSONRPC_VERSION,
+        "id": 204,
+        "method": "tools/call",
+        "params": {
+            "name": "search_code",
+            "arguments": {
+                "query": "banana_split",
+                "root": "/this/path/does/not/exist/anywhere-on-disk"
+            }
+        }
+    })
+    .to_string();
+    let response = server.handle_line(&request);
+
+    let error = response
+        .get("error")
+        .expect("nonexistent root must produce a JSON-RPC error envelope");
+    assert_eq!(
+        error.get("code").and_then(Value::as_i64),
+        Some(-32602),
+        "nonexistent-root error code must be -32602 (Invalid params): {response}"
+    );
+    assert!(
+        response.get("result").is_none(),
+        "JSON-RPC error response must not also carry `result`: {response}"
+    );
+}
+
+/// Cap path: `arguments.max_results = 10_000` — the handler must clamp
+/// the count to [`SEARCH_CODE_MAX_RESULTS`] (500) rather than returning
+/// 10 000 rows.  We assert the property at the result-count level: the
+/// text walker can't emit more than 500 hits even if the repo had more
+/// matches, and the merged list must stay under the cap.
+#[cfg(test)]
+#[tokio::test]
+async fn test_search_code_tool_max_results_clamp() {
+    let (server, _kg, _kg_tmp, _project_tmp, project_root, _util_abs) = build_search_code_fixture();
+
+    let request = json!({
+        "jsonrpc": JSONRPC_VERSION,
+        "id": 205,
+        "method": "tools/call",
+        "params": {
+            "name": "search_code",
+            "arguments": {
+                "query": "banana_split",
+                "root": project_root,
+                "max_results": 10_000_i64
+            }
+        }
+    })
+    .to_string();
+    let response = server.handle_line(&request);
+
+    assert!(
+        response.get("error").is_none(),
+        "max_results > cap must be clamped, not rejected: {response}"
+    );
+    let count = response
+        .pointer("/result/_meta/count")
+        .and_then(Value::as_i64)
+        .expect("_meta.count must be present on happy path");
+    let cap = i64::try_from(SEARCH_CODE_MAX_RESULTS).expect("cap fits in i64");
+    assert!(
+        count <= cap,
+        "merged count ({count}) must be <= SEARCH_CODE_MAX_RESULTS ({cap}): {response}"
+    );
+}
+
+/// Text-only path: query matches file contents but has no matching KG
+/// entity — `_meta.symbol_match_count` must be 0,
+/// `_meta.text_match_count >= 1`, and every result must carry
+/// `source == "text"`.
+#[cfg(test)]
+#[tokio::test]
+async fn test_search_code_tool_only_text_no_symbol() {
+    use std::fs;
+
+    use ucil_core::KnowledgeGraph;
+
+    let kg_tmp = tempfile::TempDir::new().expect("kg tempdir must be creatable");
+    let project_tmp = tempfile::TempDir::new().expect("project tempdir must be creatable");
+
+    // Write a file containing "mango_marker" — no matching KG entity
+    // will be inserted for this token.
+    let src_dir = project_tmp.path().join("src");
+    fs::create_dir_all(&src_dir).expect("src/ must be creatable");
+    fs::write(
+        src_dir.join("only_text.rs"),
+        "// mango_marker appears here but no entity row points at it\n",
+    )
+    .expect("only_text.rs must be writable");
+
+    let kg = KnowledgeGraph::open(&kg_tmp.path().join("knowledge.db"))
+        .expect("KnowledgeGraph::open must succeed");
+    let kg_arc = Arc::new(Mutex::new(kg));
+    let server = McpServer::with_knowledge_graph(Arc::clone(&kg_arc));
+
+    let request = json!({
+        "jsonrpc": JSONRPC_VERSION,
+        "id": 206,
+        "method": "tools/call",
+        "params": {
+            "name": "search_code",
+            "arguments": {
+                "query": "mango_marker",
+                "root": project_tmp.path().display().to_string()
+            }
+        }
+    })
+    .to_string();
+    let response = server.handle_line(&request);
+
+    assert!(
+        response.get("error").is_none(),
+        "text-only path must not return JSON-RPC error: {response}"
+    );
+    let meta = response
+        .pointer("/result/_meta")
+        .expect("response must carry result._meta");
+    assert_eq!(
+        meta.get("symbol_match_count").and_then(Value::as_i64),
+        Some(0),
+        "_meta.symbol_match_count must be 0 (no matching KG entity): {response}"
+    );
+    let text_match_count = meta
+        .get("text_match_count")
+        .and_then(Value::as_i64)
+        .expect("_meta.text_match_count must be an integer");
+    assert!(
+        text_match_count >= 1,
+        "_meta.text_match_count must be >= 1 (ripgrep hit): got {text_match_count} — {response}"
+    );
+    let results = meta
+        .get("results")
+        .and_then(Value::as_array)
+        .expect("_meta.results must be a JSON array");
+    assert!(
+        !results.is_empty(),
+        "_meta.results must contain at least one row: {response}"
+    );
+    for r in results {
+        assert_eq!(
+            r.get("source").and_then(Value::as_str),
+            Some("text"),
+            "every result must have source == \"text\" (no symbol half): got {r:?}"
+        );
+    }
+}
