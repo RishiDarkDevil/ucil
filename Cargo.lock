@@ -2226,6 +2226,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "ucil-tests-integration"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "lsp-types",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "ucil-core",
+ "ucil-lsp-diagnostics",
+]
+
+[[package]]
 name = "ucil-treesitter"
 version = "0.1.0"
 dependencies = [
