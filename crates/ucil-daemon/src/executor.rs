@@ -1161,3 +1161,204 @@ fn test_compute_source_hash_deterministic_and_hex16() {
 fn test_ingest_pipeline_default_available() {
     let _p: IngestPipeline = IngestPipeline::default();
 }
+
+// ── Serena hover fusion: scripted fake + test ────────────────────────────
+
+/// Scripted [`SerenaHoverClient`] impl driving [`test_serena_g1_fusion`].
+///
+/// The pattern mirrors
+/// `ucil-lsp-diagnostics::call_hierarchy::fake_serena_client`
+/// (WO-0015, already live and verifier-passed): a `Mutex<Vec<_>>` of
+/// `(key, response)` tuples scripted at construction time and looked up
+/// on each call by matching `key` against the request.  This is NOT a
+/// mock of Serena's MCP wire format — per DEC-0008 §4 it implements
+/// UCIL's own [`SerenaHoverClient`] trait, which is the dependency-
+/// inversion seam, so "mocks of Serena critical deps" (root
+/// `CLAUDE.md`) does not apply.
+///
+/// Responses are wrapped in [`std::sync::Arc`] so the fake can return a
+/// clone for the matched entry — [`HoverFetchError`] is not `Clone` by
+/// design (transport errors carry strings that may be large), and the
+/// `Arc` sidesteps that restriction without widening `HoverFetchError`'s
+/// trait bounds.
+#[cfg(test)]
+mod fake_serena_hover_client {
+    use std::sync::{Arc, Mutex};
+
+    use async_trait::async_trait;
+    use ucil_core::knowledge_graph::SymbolResolution;
+
+    use super::{HoverDoc, HoverFetchError, SerenaHoverClient};
+
+    /// `(qualified_name, response)` tuples: the fake's `hover` method
+    /// finds the first tuple whose `qualified_name` matches the request
+    /// and returns a clone of its `response`; unscripted symbols resolve
+    /// to `Ok(None)` (mirroring LSP "no hover info" semantics).
+    pub(super) type HoverScript = Vec<(String, Arc<Result<Option<HoverDoc>, HoverFetchError>>)>;
+
+    /// Scripted fake [`SerenaHoverClient`] impl.  See module docs.
+    pub(super) struct ScriptedFakeSerenaHoverClient {
+        by_qname: Mutex<HoverScript>,
+    }
+
+    impl ScriptedFakeSerenaHoverClient {
+        /// Construct a fake pre-loaded with `script`.
+        pub(super) fn new(script: HoverScript) -> Self {
+            Self {
+                by_qname: Mutex::new(script),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl SerenaHoverClient for ScriptedFakeSerenaHoverClient {
+        async fn hover(
+            &self,
+            resolution: &SymbolResolution,
+        ) -> Result<Option<HoverDoc>, HoverFetchError> {
+            // Clone-out under the lock so the guard drops before any
+            // `await` point (there is none here but the discipline keeps
+            // `clippy::await_holding_lock` satisfied).
+            let script = self
+                .by_qname
+                .lock()
+                .expect("ScriptedFakeSerenaHoverClient mutex poisoned")
+                .clone();
+            let key = resolution.qualified_name.as_deref().unwrap_or("");
+            for (scripted_qname, response) in script {
+                if scripted_qname == key {
+                    // `Arc<Result<_, _>>` — clone-out the inner value
+                    // (the `Result` contents are `Clone` by virtue of
+                    // the per-variant derives; for `HoverFetchError`
+                    // we manually reconstruct the variant).
+                    return match response.as_ref() {
+                        Ok(opt) => Ok(opt.clone()),
+                        Err(HoverFetchError::Channel(s)) => {
+                            Err(HoverFetchError::Channel(s.clone()))
+                        }
+                        Err(HoverFetchError::Decode(s)) => Err(HoverFetchError::Decode(s.clone())),
+                        Err(HoverFetchError::Timeout(d)) => Err(HoverFetchError::Timeout(*d)),
+                    };
+                }
+            }
+            Ok(None)
+        }
+    }
+}
+
+/// Frozen acceptance selector for feature `P1-W5-F02` — see
+/// `ucil-build/feature-list.json` entry for
+/// `-p ucil-daemon executor::test_serena_g1_fusion`.
+///
+/// Exercises [`enrich_find_definition`] against three scripted
+/// scenarios to prove the DEC-0008 dependency-inversion seam and the
+/// master-plan §13.4 best-effort contract both hold:
+///
+/// 1. **Scenario A — Serena ACTIVE returns hover**: the scripted fake
+///    returns `Ok(Some(doc))` for a given `qualified_name`; the fused
+///    result carries that exact `HoverDoc` verbatim plus the original
+///    resolution + (empty) callers list untouched.
+/// 2. **Scenario B — Serena absent**: the caller passes `client = None`
+///    (Serena-degraded deployment); the fused result carries
+///    `hover = None` and a non-empty `callers` list threaded through
+///    unchanged, proving the fusion is a passthrough on the zero-
+///    upstream path.
+/// 3. **Scenario C — Serena returns Err**: the scripted fake returns
+///    `Err(HoverFetchError::Timeout(..))`; the fused result carries
+///    `hover = None` — errors are logged at `warn!` per the function's
+///    rustdoc contract but suppressed from the fused result so a
+///    Serena outage never breaks a G1 response.
+///
+/// The test does not assert on `tracing` output (`tracing-test` is not
+/// a workspace dependency and adding it is out of scope for this WO);
+/// the `warn!()` call is documented in the fusion function's rustdoc.
+#[cfg(test)]
+#[tokio::test(flavor = "current_thread")]
+async fn test_serena_g1_fusion() {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use ucil_core::knowledge_graph::SymbolResolution;
+
+    use self::fake_serena_hover_client::ScriptedFakeSerenaHoverClient;
+
+    // Shared fixture: the resolved definition under test.  Field shape
+    // matches `ucil_core::knowledge_graph::SymbolResolution`'s declared
+    // fields (no `Default` derive on that type, so we construct every
+    // field explicitly — the WO's `scope_out` forbids modifying
+    // `ucil-core`).
+    let resolution = SymbolResolution {
+        id: Some(42),
+        qualified_name: Some("mymod::foo".to_owned()),
+        file_path: "src/lib.rs".to_owned(),
+        start_line: Some(42),
+        signature: Some("fn foo() -> Bar".to_owned()),
+        doc_comment: None,
+        parent_module: Some("mymod".to_owned()),
+    };
+
+    // ── Scenario A: Serena ACTIVE returns hover ──────────────────────
+    let scripted_doc = HoverDoc {
+        markdown: "## foo\n\nReturns bar".to_owned(),
+        source: HoverSource::Serena,
+    };
+    let client_a = ScriptedFakeSerenaHoverClient::new(vec![(
+        "mymod::foo".to_owned(),
+        Arc::new(Ok(Some(scripted_doc.clone()))),
+    )]);
+    let result_a = enrich_find_definition(resolution.clone(), Vec::new(), Some(&client_a)).await;
+    assert_eq!(
+        result_a.hover,
+        Some(scripted_doc),
+        "Scenario A: Serena-active path must return the scripted HoverDoc verbatim",
+    );
+    assert_eq!(
+        result_a.resolution, resolution,
+        "Scenario A: resolution must thread through unchanged",
+    );
+    assert!(
+        result_a.callers.is_empty(),
+        "Scenario A: empty callers list must round-trip as empty",
+    );
+
+    // ── Scenario B: Serena absent (client = None) ────────────────────
+    let callers_b = vec![Caller {
+        qualified_name: Some("caller::one".to_owned()),
+        file_path: "src/caller.rs".to_owned(),
+        start_line: Some(10),
+    }];
+    let result_b = enrich_find_definition(
+        resolution.clone(),
+        callers_b.clone(),
+        None::<&ScriptedFakeSerenaHoverClient>,
+    )
+    .await;
+    assert!(
+        result_b.hover.is_none(),
+        "Scenario B: client=None (Serena-degraded) must yield hover=None",
+    );
+    assert_eq!(
+        result_b.resolution, resolution,
+        "Scenario B: resolution must thread through unchanged",
+    );
+    assert_eq!(
+        result_b.callers, callers_b,
+        "Scenario B: callers must thread through unchanged",
+    );
+
+    // ── Scenario C: Serena returns Err ───────────────────────────────
+    let client_c = ScriptedFakeSerenaHoverClient::new(vec![(
+        "mymod::foo".to_owned(),
+        Arc::new(Err(HoverFetchError::Timeout(Duration::from_millis(500)))),
+    )]);
+    let result_c = enrich_find_definition(resolution.clone(), Vec::new(), Some(&client_c)).await;
+    assert!(
+        result_c.hover.is_none(),
+        "Scenario C: Serena error path must suppress hover to None \
+         (best-effort fusion per master-plan §13.4)",
+    );
+    assert_eq!(
+        result_c.resolution, resolution,
+        "Scenario C: resolution must thread through unchanged even on Serena error",
+    );
+}
