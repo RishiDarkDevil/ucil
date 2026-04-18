@@ -53,6 +53,11 @@ grep-matcher.workspace = true
 # `StreamingIterator`, not `Iterator`.
 tree-sitter.workspace = true
 streaming-iterator.workspace = true
+# `async-trait` macro — allows the `SerenaHoverClient` trait in
+# `executor.rs` (WO-0037 for P1-W5-F02) to declare an `async fn hover`
+# method while remaining object-safe so downstream wiring can hold an
+# `Arc<dyn SerenaHoverClient>` against the live Serena MCP channel.
+async-trait = { workspace = true }
 
 [dev-dependencies]
 tempfile.workspace = true

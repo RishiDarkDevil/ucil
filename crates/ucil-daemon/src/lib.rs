@@ -48,6 +48,19 @@
 //! parses a file with `ucil_treesitter`, extracts symbols, and upserts
 //! the whole batch inside one `BEGIN IMMEDIATE` transaction per file.
 //!
+//! WO-0037 for `P1-W5-F02` (master-plan §18 Phase 1 Week 5 lines 1762-1770,
+//! "Serena integration → G1 structural fusion") extends [`executor`] with
+//! the [`executor::SerenaHoverClient`] dependency-inversion seam (per
+//! `DEC-0008`) and the [`executor::enrich_find_definition`] fusion
+//! function that enriches a
+//! [`ucil_core::knowledge_graph::SymbolResolution`] with optional
+//! [`executor::HoverDoc`] context.  Hover-fetch errors are logged at
+//! `warn!` and suppressed from the fused result so a Serena outage
+//! never breaks the G1 response — wiring into
+//! `server::McpServer::handle_find_definition` is deferred to a
+//! follow-up WO + ADR because the frozen `P1-W4-F05` acceptance
+//! selector asserts on the current `_meta` JSON shape.
+//!
 //! The `server` module (introduced in WO-0010 for `P1-W3-F07`) owns
 //! the MCP JSON-RPC 2.0 skeleton.  WO-0033 for `P1-W4-F05` (master-plan
 //! §3.2 row 2 + §18 Phase 1 Week 4 line 1751) promoted the
@@ -76,7 +89,8 @@ pub(crate) mod text_search;
 pub mod understand_code;
 pub mod watcher;
 
-pub use executor::{ExecutorError, IngestPipeline, SOURCE_TOOL, TREE_SITTER_VALID_FROM};
+#[rustfmt::skip]
+pub use executor::{enrich_find_definition, Caller, EnrichedFindDefinition, ExecutorError, HoverDoc, HoverFetchError, HoverSource, IngestPipeline, SerenaHoverClient, SOURCE_TOOL, TREE_SITTER_VALID_FROM};
 #[rustfmt::skip]
 pub use lifecycle::{Checkpoint, CheckpointError, Lifecycle, PidFile, PidFileError, ShutdownReason};
 pub use plugin_manager::{

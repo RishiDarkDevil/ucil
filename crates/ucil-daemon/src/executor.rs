@@ -485,6 +485,292 @@ impl Default for IngestPipeline {
     }
 }
 
+// ── Serena G1 hover fusion ───────────────────────────────────────────────
+//
+// WO-0037 for `P1-W5-F02` (master-plan §18 Phase 1 Week 5 lines 1762-1770,
+// "Serena integration → G1 structural fusion") adds a dependency-inversion
+// seam around the Serena MCP channel's `textDocument/hover` response so the
+// daemon's `find_definition` / `find_references` / `go_to_definition` tools
+// can enrich their responses with signature + documentation context without
+// coupling the core daemon to Serena's wire format.
+//
+// The seam has three pieces:
+//
+// 1. [`SerenaHoverClient`] — the trait a live implementation wires to the
+//    Serena MCP channel ([`plugin_manager::PluginManager`] already owns
+//    the stdio pipe; the glue WO lands after this one).  Per DEC-0008 §4
+//    the trait is UCIL-owned, not a direct re-export of Serena's `tools/
+//    call` payload shape, so the dependency direction is UCIL → Serena
+//    (not the other way round).
+// 2. [`enrich_find_definition`] — the pure async fusion function that
+//    merges a [`ucil_core::knowledge_graph::SymbolResolution`] + its
+//    [`Caller`] list + optional hover info from the trait into an
+//    [`EnrichedFindDefinition`].  Errors from the client are suppressed
+//    (logged at `warn!`) so a Serena outage never breaks the G1 response
+//    — the master-plan §13.4 diagnostics-bridge best-effort contract
+//    applies to hover fusion too.
+// 3. `fake_serena_hover_client::ScriptedFakeSerenaHoverClient` — the
+//    hand-written scripted fake that drives the fusion function under
+//    test.  It is NOT a mock of Serena's MCP wire format (forbidden per
+//    root `CLAUDE.md`) — it implements UCIL's own [`SerenaHoverClient`]
+//    trait, the DEC-0008 canonical test seam also in use by
+//    `ucil-lsp-diagnostics::{call_hierarchy,quality_pipeline}::
+//    fake_serena_client`.
+//
+// Wiring into `server::McpServer::handle_find_definition` is
+// deliberately out of scope for this WO — see the work-order's
+// `scope_out` field for the reasoning (the P1-W4-F05 frozen acceptance
+// selector asserts on the current `_meta` JSON shape and an ADR-gated
+// envelope extension will land with the live-wiring follow-up WO).
+
+/// Provenance of a [`HoverDoc`] — which upstream produced the markdown.
+///
+/// Master-plan §13.4 (diagnostics bridge sources) enumerates the three
+/// provenance tiers UCIL's hover bus surfaces today.  Variants map as:
+///
+/// * [`HoverSource::Serena`] — hover fetched over the Serena MCP channel
+///   (the live [`SerenaHoverClient`] impl landing in a follow-up WO).
+/// * [`HoverSource::Lsp`] — hover fetched directly from an LSP server
+///   (reserved for the LSP bridge in `ucil-lsp-diagnostics`; not produced
+///   by this WO but included so the enum is forward-compatible without
+///   a `SemVer` break — see DEC-0008 §3 "degraded mode when Serena is
+///   unavailable but an LSP is").
+/// * [`HoverSource::None`] — no upstream supplied hover text; callers
+///   that want to assert "Serena tried and returned nothing" should
+///   pair `HoverSource::None` with `Option<HoverDoc>::None` on the
+///   [`EnrichedFindDefinition`] rather than building a sentinel doc.
+///
+/// The enum is `#[non_exhaustive]` so a later WO can add provenance
+/// variants (e.g. `HoverSource::TreeSitter` for doc-comment fallback)
+/// without a `SemVer` break.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum HoverSource {
+    /// Hover fetched over the Serena MCP channel.
+    Serena,
+    /// Hover fetched directly from an LSP server.
+    Lsp,
+    /// No upstream supplied hover text.
+    None,
+}
+
+/// A single hover document — markdown blob plus its provenance.
+///
+/// `markdown` is the **unprocessed** LSP hover text, which typically
+/// includes Markdown headings (`## Signature`), fenced code blocks
+/// (```` ``` ````), and cross-reference links.  The daemon does not
+/// re-flow or sanitise the payload; the MCP response carries it
+/// verbatim so the client (Claude Code / Codex / Cursor / …) can render
+/// it with their own Markdown pipeline.
+///
+/// `source` tracks which upstream produced the payload so the MCP
+/// response can populate `_meta.source` precisely and a consuming
+/// adapter can decide whether to trust the markdown's `signature`
+/// section as authoritative.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HoverDoc {
+    /// Unprocessed hover markdown produced by Serena / LSP.
+    pub markdown: String,
+    /// Provenance of [`Self::markdown`].
+    pub source: HoverSource,
+}
+
+/// Errors [`SerenaHoverClient::hover`] can return.
+///
+/// The enum is intentionally `#[non_exhaustive]` so a later WO can add
+/// transport-layer variants (e.g. `RateLimited`, `ProtocolVersion`,
+/// `UnsupportedLanguage`) without a `SemVer` break.  Payloads are
+/// `String` rather than concrete wrapped errors so this enum stays
+/// cycle-free from `ucil-lsp-diagnostics` and MCP-client internals;
+/// the live-wiring WO that implements the trait against a real MCP
+/// client converts from its native errors via `.to_string()`.
+///
+/// All variants are treated equivalently by [`enrich_find_definition`]
+/// — an `Err(_)` return means `hover = None` in the fused result, so
+/// the specific variant is observed only by the logger.  Master-plan
+/// §13.4 (diagnostics bridge best-effort contract) applies: a Serena
+/// outage never breaks a G1 response.
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum HoverFetchError {
+    /// Transport-level failure on the Serena MCP channel (closed pipe,
+    /// JSON-RPC framing error, …).  Wraps the downstream error message
+    /// as a string so this enum stays cycle-free.
+    #[error("serena mcp channel error: {0}")]
+    Channel(String),
+    /// The hover response body failed to decode (bad UTF-8, missing
+    /// required field in the MCP `tools/call` result, …).
+    #[error("hover response decode failed: {0}")]
+    Decode(String),
+    /// The hover request exceeded its timeout budget.  Per the rust-style
+    /// rules every IO-touching `.await` in UCIL is wrapped in
+    /// `tokio::time::timeout` with a named const; the timeout value is
+    /// carried through so the logger can print it verbatim.
+    #[error("hover request timed out after {0:?}")]
+    Timeout(std::time::Duration),
+}
+
+/// Dependency-inversion seam for fetching hover markdown from Serena.
+///
+/// Per DEC-0008 §4 this trait is UCIL-owned — it is **not** a re-export
+/// or adapter of Serena's MCP `textDocument/hover` wire format.  A live
+/// implementation (landing in a follow-up WO) converts the trait's
+/// arguments into a Serena `tools/call` request and its response back
+/// into a [`HoverDoc`].  The test suite drives [`enrich_find_definition`]
+/// through `fake_serena_hover_client::ScriptedFakeSerenaHoverClient`,
+/// a hand-written scripted fake implementing this exact trait — see the
+/// sibling `SerenaClient` in `ucil-lsp-diagnostics` for the precedent
+/// (WO-0015, already live and verifier-passed).
+///
+/// Returns:
+///
+/// * `Ok(Some(doc))` — Serena returned a hover payload.
+/// * `Ok(None)` — Serena returned an empty hover (the LSP "no info"
+///   case), or the symbol has no known hover info.  Distinguished from
+///   an error so callers can decide whether to retry or fall back.
+/// * `Err(e)` — transport / decode / timeout failure.  Callers should
+///   treat this as a degraded upstream, not a user-visible error;
+///   [`enrich_find_definition`] logs the error at `warn!` and yields
+///   `hover: None` in the fused result.
+///
+/// `Send + Sync` bounds are required so trait objects can live in
+/// `Arc<dyn SerenaHoverClient>` inside the daemon's long-lived server
+/// state (the wiring WO constructs the `Arc` on startup).
+#[async_trait::async_trait]
+pub trait SerenaHoverClient: Send + Sync {
+    /// Fetch hover markdown for `resolution`.
+    ///
+    /// The default live implementation will map `resolution.file_path`
+    /// + `resolution.start_line` to an LSP `textDocument/hover` request
+    /// routed through Serena's MCP pipe, but the trait intentionally
+    /// hides that detail — implementors can synthesise the request
+    /// however they like, and alternative upstreams (e.g. a pure-LSP
+    /// bridge) can implement this trait directly.
+    async fn hover(
+        &self,
+        resolution: &ucil_core::knowledge_graph::SymbolResolution,
+    ) -> Result<Option<HoverDoc>, HoverFetchError>;
+}
+
+/// Projection of one `calls`-kind inbound relation's source entity — a
+/// caller of the resolved definition.
+///
+/// Mirrors the JSON shape `{qualified_name, file_path, start_line}`
+/// that `server::project_callers` emits onto the MCP
+/// `_meta.callers` array (see `server.rs`).  Promoted to a typed struct
+/// here so [`enrich_find_definition`] stays testable without round-
+/// tripping through `serde_json::Value`.  The live-wiring WO that
+/// threads this into `server::McpServer::handle_find_definition`
+/// will either convert from this typed form back to `Value` at the
+/// envelope boundary or push the typed form all the way through — the
+/// choice is scoped to that WO's ADR.
+///
+/// Fields are named to match the JSON keys one-for-one so a reader who
+/// knows the MCP envelope can recognise each field without a map.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Caller {
+    /// Caller entity's `qualified_name` (e.g. `"mymod::bar"`).  `None`
+    /// when the source row's `qualified_name` column is `NULL` (master-
+    /// plan §12.1 allows a `NULL` `qualified_name` for `kind = "file"`
+    /// rows; they are rare callers but possible).
+    pub qualified_name: Option<String>,
+    /// Caller entity's `file_path` — project-relative or absolute,
+    /// matching however the ingest stored it.
+    pub file_path: String,
+    /// Caller entity's 1-based `start_line`, or `None` when the
+    /// underlying column is `NULL`.
+    pub start_line: Option<i64>,
+}
+
+/// The hover-enriched output of [`enrich_find_definition`].
+///
+/// Carries the original [`ucil_core::knowledge_graph::SymbolResolution`]
+/// and its [`Caller`] list verbatim, plus an optional [`HoverDoc`].  The
+/// `hover` field is `None` when:
+///
+/// * the caller passed `client: None` — Serena is degraded / not
+///   installed in this deployment;
+/// * the client returned `Ok(None)` — Serena has no hover info for the
+///   symbol;
+/// * the client returned `Err(_)` — transport / decode / timeout
+///   failure; the specific variant is logged at `warn!` but suppressed
+///   from the fused result per the §13.4 best-effort contract.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnrichedFindDefinition {
+    /// Original resolution echoed through from the fusion input.
+    pub resolution: ucil_core::knowledge_graph::SymbolResolution,
+    /// Original callers echoed through from the fusion input.
+    pub callers: Vec<Caller>,
+    /// Hover markdown when available; `None` per the three degraded
+    /// cases documented on [`EnrichedFindDefinition`].
+    pub hover: Option<HoverDoc>,
+}
+
+/// Fuse a [`ucil_core::knowledge_graph::SymbolResolution`] + its
+/// [`Caller`] list with optional Serena hover markdown into an
+/// [`EnrichedFindDefinition`].
+///
+/// The function is pure (no I/O beyond the optional
+/// [`SerenaHoverClient::hover`] call) and best-effort: a hover-fetch
+/// error is logged at `warn!` via [`tracing::warn`] and suppressed from
+/// the return value.  Master-plan §13.4 (diagnostics bridge best-effort
+/// contract) applies — a Serena outage must never surface as a G1 tool
+/// error; the MCP response just omits the hover field instead.
+///
+/// The type parameter `C: SerenaHoverClient + ?Sized` lets the function
+/// accept both a concrete `&ScriptedFakeSerenaHoverClient` (hermetic
+/// test path) and an `&dyn SerenaHoverClient` trait object (live path;
+/// the `Arc<dyn SerenaHoverClient>` constructed by the wiring WO
+/// auto-derefs to `&dyn SerenaHoverClient`).
+///
+/// # Examples
+///
+/// ```no_run
+/// use ucil_core::knowledge_graph::SymbolResolution;
+/// use ucil_daemon::executor::{
+///     enrich_find_definition, Caller, SerenaHoverClient,
+/// };
+///
+/// # async fn demo(
+/// #     client: Option<&dyn SerenaHoverClient>,
+/// #     resolution: SymbolResolution,
+/// #     callers: Vec<Caller>,
+/// # ) {
+/// let enriched = enrich_find_definition(resolution, callers, client).await;
+/// let _ = enriched.hover; // Option<HoverDoc>
+/// # }
+/// ```
+#[tracing::instrument(
+    name = "ucil.daemon.executor.enrich_find_definition",
+    level = "debug",
+    skip(client)
+)]
+pub async fn enrich_find_definition<C: SerenaHoverClient + ?Sized>(
+    resolution: ucil_core::knowledge_graph::SymbolResolution,
+    callers: Vec<Caller>,
+    client: Option<&C>,
+) -> EnrichedFindDefinition {
+    let hover = match client {
+        None => None,
+        Some(c) => match c.hover(&resolution).await {
+            Ok(h) => h,
+            Err(e) => {
+                tracing::warn!(
+                    symbol = ?resolution.qualified_name,
+                    error = ?e,
+                    "serena hover fetch failed; returning unenriched result",
+                );
+                None
+            }
+        },
+    };
+    EnrichedFindDefinition {
+        resolution,
+        callers,
+        hover,
+    }
+}
+
 // ── Unit tests ────────────────────────────────────────────────────────────
 //
 // Per DEC-0005 (WO-0006 module-coherence commits), tests live at module
@@ -874,4 +1160,205 @@ fn test_compute_source_hash_deterministic_and_hex16() {
 #[test]
 fn test_ingest_pipeline_default_available() {
     let _p: IngestPipeline = IngestPipeline::default();
+}
+
+// ── Serena hover fusion: scripted fake + test ────────────────────────────
+
+/// Scripted [`SerenaHoverClient`] impl driving [`test_serena_g1_fusion`].
+///
+/// The pattern mirrors
+/// `ucil-lsp-diagnostics::call_hierarchy::fake_serena_client`
+/// (WO-0015, already live and verifier-passed): a `Mutex<Vec<_>>` of
+/// `(key, response)` tuples scripted at construction time and looked up
+/// on each call by matching `key` against the request.  This is NOT a
+/// mock of Serena's MCP wire format — per DEC-0008 §4 it implements
+/// UCIL's own [`SerenaHoverClient`] trait, which is the dependency-
+/// inversion seam, so "mocks of Serena critical deps" (root
+/// `CLAUDE.md`) does not apply.
+///
+/// Responses are wrapped in [`std::sync::Arc`] so the fake can return a
+/// clone for the matched entry — [`HoverFetchError`] is not `Clone` by
+/// design (transport errors carry strings that may be large), and the
+/// `Arc` sidesteps that restriction without widening `HoverFetchError`'s
+/// trait bounds.
+#[cfg(test)]
+mod fake_serena_hover_client {
+    use std::sync::{Arc, Mutex};
+
+    use async_trait::async_trait;
+    use ucil_core::knowledge_graph::SymbolResolution;
+
+    use super::{HoverDoc, HoverFetchError, SerenaHoverClient};
+
+    /// `(qualified_name, response)` tuples: the fake's `hover` method
+    /// finds the first tuple whose `qualified_name` matches the request
+    /// and returns a clone of its `response`; unscripted symbols resolve
+    /// to `Ok(None)` (mirroring LSP "no hover info" semantics).
+    pub(super) type HoverScript = Vec<(String, Arc<Result<Option<HoverDoc>, HoverFetchError>>)>;
+
+    /// Scripted fake [`SerenaHoverClient`] impl.  See module docs.
+    pub(super) struct ScriptedFakeSerenaHoverClient {
+        by_qname: Mutex<HoverScript>,
+    }
+
+    impl ScriptedFakeSerenaHoverClient {
+        /// Construct a fake pre-loaded with `script`.
+        pub(super) fn new(script: HoverScript) -> Self {
+            Self {
+                by_qname: Mutex::new(script),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl SerenaHoverClient for ScriptedFakeSerenaHoverClient {
+        async fn hover(
+            &self,
+            resolution: &SymbolResolution,
+        ) -> Result<Option<HoverDoc>, HoverFetchError> {
+            // Clone-out under the lock so the guard drops before any
+            // `await` point (there is none here but the discipline keeps
+            // `clippy::await_holding_lock` satisfied).
+            let script = self
+                .by_qname
+                .lock()
+                .expect("ScriptedFakeSerenaHoverClient mutex poisoned")
+                .clone();
+            let key = resolution.qualified_name.as_deref().unwrap_or("");
+            for (scripted_qname, response) in script {
+                if scripted_qname == key {
+                    // `Arc<Result<_, _>>` — clone-out the inner value
+                    // (the `Result` contents are `Clone` by virtue of
+                    // the per-variant derives; for `HoverFetchError`
+                    // we manually reconstruct the variant).
+                    return match response.as_ref() {
+                        Ok(opt) => Ok(opt.clone()),
+                        Err(HoverFetchError::Channel(s)) => {
+                            Err(HoverFetchError::Channel(s.clone()))
+                        }
+                        Err(HoverFetchError::Decode(s)) => Err(HoverFetchError::Decode(s.clone())),
+                        Err(HoverFetchError::Timeout(d)) => Err(HoverFetchError::Timeout(*d)),
+                    };
+                }
+            }
+            Ok(None)
+        }
+    }
+}
+
+/// Frozen acceptance selector for feature `P1-W5-F02` — see
+/// `ucil-build/feature-list.json` entry for
+/// `-p ucil-daemon executor::test_serena_g1_fusion`.
+///
+/// Exercises [`enrich_find_definition`] against three scripted
+/// scenarios to prove the DEC-0008 dependency-inversion seam and the
+/// master-plan §13.4 best-effort contract both hold:
+///
+/// 1. **Scenario A — Serena ACTIVE returns hover**: the scripted fake
+///    returns `Ok(Some(doc))` for a given `qualified_name`; the fused
+///    result carries that exact `HoverDoc` verbatim plus the original
+///    resolution + (empty) callers list untouched.
+/// 2. **Scenario B — Serena absent**: the caller passes `client = None`
+///    (Serena-degraded deployment); the fused result carries
+///    `hover = None` and a non-empty `callers` list threaded through
+///    unchanged, proving the fusion is a passthrough on the zero-
+///    upstream path.
+/// 3. **Scenario C — Serena returns Err**: the scripted fake returns
+///    `Err(HoverFetchError::Timeout(..))`; the fused result carries
+///    `hover = None` — errors are logged at `warn!` per the function's
+///    rustdoc contract but suppressed from the fused result so a
+///    Serena outage never breaks a G1 response.
+///
+/// The test does not assert on `tracing` output (`tracing-test` is not
+/// a workspace dependency and adding it is out of scope for this WO);
+/// the `warn!()` call is documented in the fusion function's rustdoc.
+#[cfg(test)]
+#[tokio::test(flavor = "current_thread")]
+async fn test_serena_g1_fusion() {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use ucil_core::knowledge_graph::SymbolResolution;
+
+    use self::fake_serena_hover_client::ScriptedFakeSerenaHoverClient;
+
+    // Shared fixture: the resolved definition under test.  Field shape
+    // matches `ucil_core::knowledge_graph::SymbolResolution`'s declared
+    // fields (no `Default` derive on that type, so we construct every
+    // field explicitly — the WO's `scope_out` forbids modifying
+    // `ucil-core`).
+    let resolution = SymbolResolution {
+        id: Some(42),
+        qualified_name: Some("mymod::foo".to_owned()),
+        file_path: "src/lib.rs".to_owned(),
+        start_line: Some(42),
+        signature: Some("fn foo() -> Bar".to_owned()),
+        doc_comment: None,
+        parent_module: Some("mymod".to_owned()),
+    };
+
+    // ── Scenario A: Serena ACTIVE returns hover ──────────────────────
+    let scripted_doc = HoverDoc {
+        markdown: "## foo\n\nReturns bar".to_owned(),
+        source: HoverSource::Serena,
+    };
+    let client_a = ScriptedFakeSerenaHoverClient::new(vec![(
+        "mymod::foo".to_owned(),
+        Arc::new(Ok(Some(scripted_doc.clone()))),
+    )]);
+    let result_a = enrich_find_definition(resolution.clone(), Vec::new(), Some(&client_a)).await;
+    assert_eq!(
+        result_a.hover,
+        Some(scripted_doc),
+        "Scenario A: Serena-active path must return the scripted HoverDoc verbatim",
+    );
+    assert_eq!(
+        result_a.resolution, resolution,
+        "Scenario A: resolution must thread through unchanged",
+    );
+    assert!(
+        result_a.callers.is_empty(),
+        "Scenario A: empty callers list must round-trip as empty",
+    );
+
+    // ── Scenario B: Serena absent (client = None) ────────────────────
+    let callers_b = vec![Caller {
+        qualified_name: Some("caller::one".to_owned()),
+        file_path: "src/caller.rs".to_owned(),
+        start_line: Some(10),
+    }];
+    let result_b = enrich_find_definition(
+        resolution.clone(),
+        callers_b.clone(),
+        None::<&ScriptedFakeSerenaHoverClient>,
+    )
+    .await;
+    assert!(
+        result_b.hover.is_none(),
+        "Scenario B: client=None (Serena-degraded) must yield hover=None",
+    );
+    assert_eq!(
+        result_b.resolution, resolution,
+        "Scenario B: resolution must thread through unchanged",
+    );
+    assert_eq!(
+        result_b.callers, callers_b,
+        "Scenario B: callers must thread through unchanged",
+    );
+
+    // ── Scenario C: Serena returns Err ───────────────────────────────
+    let client_c = ScriptedFakeSerenaHoverClient::new(vec![(
+        "mymod::foo".to_owned(),
+        Arc::new(Err(HoverFetchError::Timeout(Duration::from_millis(500)))),
+    )]);
+    let result_c = enrich_find_definition(resolution.clone(), Vec::new(), Some(&client_c)).await;
+    assert!(
+        result_c.hover.is_none(),
+        "Scenario C: Serena error path must suppress hover to None \
+         (best-effort fusion per master-plan §13.4)",
+    );
+    assert_eq!(
+        result_c.resolution, resolution,
+        "Scenario C: resolution must thread through unchanged even on Serena error",
+    );
 }
