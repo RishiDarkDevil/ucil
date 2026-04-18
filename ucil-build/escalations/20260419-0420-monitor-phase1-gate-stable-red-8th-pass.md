@@ -27,3 +27,10 @@ intervention via `/replan` may help.
 - Bucket A auto-resolve on next triage pass.
 - Intentionally NO `resolved: true` line in frontmatter so stop-hook
   bypass fires this turn.
+
+
+## Resolution
+
+Manual unblock — triage stuck in 401-auth retry loop for 90+ min, no longer productive. Closing so we can kill + restart triage.
+
+resolved: true
