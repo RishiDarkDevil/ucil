@@ -44,7 +44,31 @@ if [[ -n "$SELF_VER" ]]; then
   exit 1
 fi
 
-# 3. Phase-specific checks
+# 3. Integration pass (phases that integrate with real external processes).
+#    Runs the integration-tester subagent once per gate-check call to bring
+#    up docker fixtures (when needed) and execute the e2e verify scripts
+#    against real collaborators. Skipped for phases that don't integrate
+#    with external services (0, 4, 6, 8).
+case "$PHASE" in
+  1|2|3|5|7)
+    if [[ "${UCIL_SKIP_INTEGRATION_TESTER:-0}" == "1" ]]; then
+      echo "-- Skipping integration pass (UCIL_SKIP_INTEGRATION_TESTER=1)"
+    elif [[ -x scripts/run-integration-tester.sh ]]; then
+      echo "-- Running integration pass: scripts/run-integration-tester.sh $PHASE"
+      if ! scripts/run-integration-tester.sh "$PHASE"; then
+        echo "[FAIL] integration pass failed (see ucil-build/verification-reports/phase-${PHASE}-integration.md)"
+        exit 1
+      fi
+    else
+      echo "[WARN] scripts/run-integration-tester.sh missing; skipping integration pass"
+    fi
+    ;;
+  *)
+    echo "-- Phase $PHASE does not require integration pass (skipping)"
+    ;;
+esac
+
+# 4. Phase-specific checks
 PHASE_SCRIPT="scripts/gate/phase-${PHASE}.sh"
 if [[ -x "$PHASE_SCRIPT" ]]; then
   echo "-- Running phase-specific checks: $PHASE_SCRIPT"
