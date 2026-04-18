@@ -7,6 +7,7 @@ blocks_loop: false
 session_role: monitor
 session_work: user-authorized-path-guard-fix-036e9cf; harness-retry-pipeline-fix-76fa940; escalation-resolve-1f93e9f; resume-via-resume-sh
 auto_resolve_on_next_triage: bucket-A
+resolved: true
 ---
 
 # Phase 1 gate incomplete — monitor session (post WO-0027 PATH-guard fix)
@@ -46,3 +47,20 @@ with fix; 13 others queued for future WOs) — normal mid-phase state.
 - Bucket A auto-resolve on next triage pass.
 - Left unresolved in frontmatter for stop-hook bypass.
 - Gate-incomplete expected.
+
+## Resolution
+
+**Resolved at**: 2026-04-18T17:40:00Z (triage pass 1, phase 1)
+**Bucket**: A — admin heartbeat, `blocks_loop: false`, self-tagged
+`auto_resolve_on_next_triage: bucket-A`.
+
+All cited remediation commits are present on main and well behind HEAD:
+- `036e9cf` — PATH-guard fix (crate-wide ENV_GUARD)
+- `76fa940` — harness retry-pipeline fix (auth refresh, RCF fetch)
+- `1f93e9f` — sibling escalation resolution
+
+Phase 1 has since progressed past WO-0027: WO-0028 merged (commit
+`da0f439`), gate shows 36/234 features passing, tree clean. This
+heartbeat is therefore fully superseded. Gate-incomplete at mid-phase
+is expected and not a blocker.
+resolved: true
