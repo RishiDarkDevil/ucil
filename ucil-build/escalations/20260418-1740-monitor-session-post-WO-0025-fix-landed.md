@@ -7,6 +7,7 @@ blocks_loop: false
 session_role: monitor
 session_work: user-authorized-direct-WO-0025-fix; applied-f6ec86e; killed-stale-watchdog; resumed-loop
 auto_resolve_on_next_triage: bucket-A
+resolved: true
 ---
 
 # Phase 1 gate incomplete — monitor session (post WO-0025 fix landed)
@@ -27,3 +28,23 @@ locally green, so verifier retry should PASS and flip P1-W4-F02 + F08.
 - Bucket A auto-resolve on next triage pass.
 - Left unresolved in frontmatter for stop-hook bypass.
 - Gate-incomplete expected.
+
+## Resolution
+
+Triage pass 2 (phase 1) auto-resolving. Evidence:
+
+- WO-0025 rustdoc fix is present in HEAD at commit `f6ec86e`
+  (`fix(core): disambiguate rustdoc intra-doc links in incremental.rs`).
+- Downstream commits `3938012` (companion Bucket-A resolutions) and
+  `986365e` (this file's heartbeat sibling) are both on main.
+- Phase-1 feature progress: 21/34 passed — normal mid-phase state, with
+  14 phase-1 features still unfinished as the escalation author
+  predicted. `scripts/gate-check.sh 1` correctly fails with
+  `[FAIL] Unfinished features in phase 1: P1-W3-F03, P1-W3-F08,
+  P1-W4-F02, ...`, which is the expected, non-blocking gate-incomplete
+  state for a phase in progress.
+- `blocks_loop: false` on the frontmatter; no human action required.
+- Orchestrator has since progressed to WO-0026 (merged at `29b1e0e`),
+  confirming the loop resumed as expected.
+
+No further action required.
