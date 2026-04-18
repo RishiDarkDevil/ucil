@@ -654,3 +654,224 @@ fn test_treesitter_to_kg_pipeline() {
         entities.len()
     );
 }
+/// Multi-file ingest: each file gets its own transaction scope (no
+/// cross-file atomic requirement) but every file's symbols land in the
+/// knowledge graph.
+#[cfg(test)]
+#[test]
+fn test_ingest_multi_file_isolation() {
+    use ucil_core::KnowledgeGraph;
+
+    let tmp = TempDir::new().expect("tempdir must be creatable");
+    let kg_path = tmp.path().join("kg.db");
+    let mut kg = KnowledgeGraph::open(&kg_path).expect("KnowledgeGraph::open must succeed");
+
+    let fixture = rust_project_fixture();
+    let files = [fixture.join("src/util.rs"), fixture.join("src/parser.rs")];
+    let mut pipeline = IngestPipeline::new();
+    for f in &files {
+        assert!(f.is_file(), "fixture file {f:?} must exist");
+        let n = pipeline
+            .ingest_file(&mut kg, f)
+            .expect("ingest_file must succeed");
+        assert!(n > 0, "ingest {f:?} must contribute ≥1 symbol");
+    }
+
+    for f in &files {
+        let rows = kg
+            .list_entities_by_file(&f.display().to_string())
+            .expect("list_entities_by_file must succeed");
+        assert!(!rows.is_empty(), "{f:?} must produce ≥1 entity");
+        for r in &rows {
+            assert_eq!(r.source_tool.as_deref(), Some(SOURCE_TOOL));
+            assert_eq!(r.file_path, f.display().to_string());
+        }
+    }
+}
+
+/// `ingest_file` rejects unknown extensions before opening the file or
+/// invoking tree-sitter — the error type is
+/// [`ExecutorError::UnsupportedExtension`] and the offending path is
+/// carried through.
+#[cfg(test)]
+#[test]
+fn test_ingest_rejects_unsupported_extension() {
+    use ucil_core::KnowledgeGraph;
+
+    let tmp = TempDir::new().expect("tempdir must be creatable");
+    let kg_path = tmp.path().join("kg.db");
+    let mut kg = KnowledgeGraph::open(&kg_path).expect("KnowledgeGraph::open must succeed");
+
+    // `xyz` is not in the extension table; path need not exist — the
+    // extension check happens before any `fs::read_to_string` call.
+    let bogus = tmp.path().join("unknown.xyz");
+
+    let mut pipeline = IngestPipeline::new();
+    let err = pipeline
+        .ingest_file(&mut kg, &bogus)
+        .expect_err("unsupported extension must error");
+    match err {
+        ExecutorError::UnsupportedExtension { path } => {
+            assert_eq!(path, bogus);
+        }
+        other => panic!("expected UnsupportedExtension, got {other:?}"),
+    }
+}
+
+/// `language_from_extension` recognises every extension the module-level
+/// table documents — a regression fence against an accidental removal
+/// of one mapping.
+#[cfg(test)]
+#[test]
+fn test_language_from_extension_table() {
+    let cases: &[(&str, Language)] = &[
+        ("a.rs", Language::Rust),
+        ("a.py", Language::Python),
+        ("a.ts", Language::TypeScript),
+        ("a.tsx", Language::TypeScript),
+        ("a.js", Language::JavaScript),
+        ("a.jsx", Language::JavaScript),
+        ("a.mjs", Language::JavaScript),
+        ("a.cjs", Language::JavaScript),
+        ("a.go", Language::Go),
+        ("a.java", Language::Java),
+        ("a.c", Language::C),
+        ("a.h", Language::C),
+        ("a.cc", Language::Cpp),
+        ("a.cpp", Language::Cpp),
+        ("a.cxx", Language::Cpp),
+        ("a.hpp", Language::Cpp),
+        ("a.hh", Language::Cpp),
+        ("a.hxx", Language::Cpp),
+        ("a.rb", Language::Ruby),
+        ("a.sh", Language::Bash),
+        ("a.bash", Language::Bash),
+        ("a.json", Language::Json),
+    ];
+    for (name, expected) in cases {
+        let got = language_from_extension(Path::new(name));
+        assert_eq!(got, Some(*expected), "extension {name:?}");
+    }
+
+    // Unknown extensions return None.
+    assert_eq!(language_from_extension(Path::new("a.xyz")), None);
+    // Extensionless paths return None.
+    assert_eq!(language_from_extension(Path::new("Makefile")), None);
+    // Case-insensitive match: `.RS` also resolves to Rust.
+    assert_eq!(
+        language_from_extension(Path::new("a.RS")),
+        Some(Language::Rust)
+    );
+}
+
+/// `kind_tag` covers every [`SymbolKind`] variant with a stable lowercase
+/// tag matching Serde's `rename_all = "snake_case"`.
+#[cfg(test)]
+#[test]
+fn test_kind_tag_covers_all_variants() {
+    let cases: &[(SymbolKind, &str)] = &[
+        (SymbolKind::Function, "function"),
+        (SymbolKind::Method, "method"),
+        (SymbolKind::Class, "class"),
+        (SymbolKind::Struct, "struct"),
+        (SymbolKind::Enum, "enum"),
+        (SymbolKind::Trait, "trait"),
+        (SymbolKind::Interface, "interface"),
+        (SymbolKind::TypeAlias, "type_alias"),
+        (SymbolKind::Constant, "constant"),
+        (SymbolKind::Module, "module"),
+    ];
+    for (k, tag) in cases {
+        assert_eq!(kind_tag(*k), *tag, "{k:?}");
+    }
+}
+
+/// `build_qualified_name` produces the
+/// `<file>::<name>@<line>:<col>` shape the ON CONFLICT path relies on,
+/// and is stable across identical inputs.
+#[cfg(test)]
+#[test]
+fn test_build_qualified_name_shape_and_stability() {
+    let sym = ExtractedSymbol {
+        name: "foo".to_owned(),
+        kind: SymbolKind::Function,
+        file_path: PathBuf::from("src/a.rs"),
+        language: Language::Rust,
+        start_line: 10,
+        start_col: 1,
+        end_line: 15,
+        end_col: 2,
+        signature: None,
+        doc_comment: None,
+    };
+    let q1 = build_qualified_name("src/a.rs", &sym);
+    let q2 = build_qualified_name("src/a.rs", &sym);
+    assert_eq!(q1, "src/a.rs::foo@10:1");
+    assert_eq!(q1, q2, "qualified_name must be stable across calls");
+
+    // Distinct start_line → distinct qualified_name (disambiguates
+    // name-colliding methods like three `fn fmt` impls).
+    let sym2 = ExtractedSymbol {
+        start_line: 20,
+        ..sym
+    };
+    let q3 = build_qualified_name("src/a.rs", &sym2);
+    assert_ne!(q1, q3);
+}
+
+/// `compute_source_hash` is deterministic across calls and returns a
+/// 16-hex-char string.
+#[cfg(test)]
+#[test]
+fn test_compute_source_hash_deterministic_and_hex16() {
+    let src = "fn foo() {}\nfn bar() {}\n";
+    let sym = ExtractedSymbol {
+        name: "foo".to_owned(),
+        kind: SymbolKind::Function,
+        file_path: PathBuf::from("x.rs"),
+        language: Language::Rust,
+        start_line: 1,
+        start_col: 1,
+        end_line: 1,
+        end_col: 12,
+        signature: None,
+        doc_comment: None,
+    };
+    let h1 = compute_source_hash(src, &sym);
+    let h2 = compute_source_hash(src, &sym);
+    assert_eq!(h1, h2, "source_hash must be deterministic");
+    assert_eq!(h1.len(), 16, "source_hash must be 16 hex chars: {h1:?}");
+    assert!(
+        h1.chars().all(|c| c.is_ascii_hexdigit()),
+        "source_hash must be pure hex: {h1:?}"
+    );
+
+    // Distinct ranges feed the hasher distinct line/col inputs; assert
+    // the hash shape survives the second call too (value-equality with
+    // the first call would be a tolerated `SipHash-1-3` collision,
+    // which is why we only assert shape, not difference).
+    let sym_different_line = ExtractedSymbol {
+        start_line: 2,
+        end_line: 2,
+        ..sym
+    };
+    let h3 = compute_source_hash(src, &sym_different_line);
+    assert_eq!(
+        h3.len(),
+        16,
+        "second hash must also be 16 hex chars: {h3:?}"
+    );
+    assert!(
+        h3.chars().all(|c| c.is_ascii_hexdigit()),
+        "second hash must be pure hex: {h3:?}"
+    );
+}
+
+/// Default impl exists and matches `IngestPipeline::new` — the pipeline
+/// is movable into thread-local handles / struct fields that only have a
+/// `Default` bound.
+#[cfg(test)]
+#[test]
+fn test_ingest_pipeline_default_available() {
+    let _p: IngestPipeline = IngestPipeline::default();
+}
