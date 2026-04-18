@@ -40,3 +40,24 @@ Race closes naturally.
 - Bucket A auto-resolve on next triage pass.
 - Intentionally NO `resolved: true` line so stop-hook bypass fires.
 - Do not touch the untracked ADR — planner owns it.
+
+## Resolution
+
+Bucket A — auto-resolve. Admin heartbeat, `blocks_loop: false`,
+`severity: low`, self-tagged `auto_resolve_on_next_triage: bucket-A`.
+The planner-artifact race closed naturally as predicted:
+
+- Planner committed ADR + WO-0035 together at
+  `cf55900 chore(planner): WO-0035 search_code MCP tool + DEC-0009` —
+  no orphan untracked artifact remained.
+- WO-0035 proceeded through the normal cycle: executor →
+  critic CLEAN (`9b79c8f`) → verifier PASS (`f2a3388` flipping
+  P1-W5-F09) → merge (`6e7606d`).
+- Main at `6e7606d`, tree clean, 0 unpushed.
+- DEC-0009 (`decisions/DEC-0009-search-code-in-process-ripgrep.md`)
+  now tracked on main.
+
+No residual race. Monitor guidance held — planner owned the ADR
+artifact and committed it atomically with the WO.
+
+resolved: true
