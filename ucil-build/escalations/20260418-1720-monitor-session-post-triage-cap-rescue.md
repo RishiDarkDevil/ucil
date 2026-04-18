@@ -7,6 +7,7 @@ blocks_loop: false
 session_role: monitor
 session_work: watched-WO-0024-full-cycle-3-rejects; triage-cap-rescue-emitted-WO-0025-Bucket-D-fix; paged-user-before-triage-completed-recovery
 auto_resolve_on_next_triage: bucket-A
+resolved: true
 ---
 
 # Phase 1 gate incomplete — monitor session (post triage cap-rescue)
@@ -27,3 +28,15 @@ user action required unless WO-0025 itself fails to converge.
 - Bucket A auto-resolve on next triage pass.
 - Left unresolved in frontmatter for stop-hook bypass.
 - Gate-incomplete expected.
+
+## Resolution
+
+Bucket A auto-resolve. Recovery path converged as predicted:
+- WO-0025 (fix-incremental-rustdoc-ambiguity) landed at commit f6ec86e
+  ("fix(core): disambiguate rustdoc intra-doc links in incremental.rs").
+- Companion attempts-exhausted escalations 0848 + 0902 resolved at 3938012.
+- Phase 1 at 34/234 features passing; main clean; gate-incomplete is normal
+  mid-phase state, not a loop blocker.
+
+No user action required. Outer loop may continue picking up the next
+planner-emitted WO.
