@@ -924,6 +924,46 @@ impl KnowledgeGraph {
         Ok(out)
     }
 
+    /// List every [`Relation`] row with the given `target_id`.
+    ///
+    /// Mirrors [`Self::list_relations_by_source`] — read-only, no
+    /// transaction, rows returned in insertion order (`id ASC`).  The
+    /// `find_definition` MCP tool (`P1-W4-F05`) uses this to enumerate
+    /// **immediate callers** of a definition: every `calls`-kind
+    /// relation whose `target_id` is the definition's rowid is a caller
+    /// of that definition, per the inverted `calls`-edge semantics of
+    /// master-plan §12.1 rows.
+    ///
+    /// # Errors
+    ///
+    /// * [`KnowledgeGraphError::Sqlite`] — statement prepare, bind, or
+    ///   iteration failure.
+    #[tracing::instrument(
+        level = "debug",
+        skip(self),
+        fields(target_id = target_id),
+        name = "ucil.core.kg.list_relations_by_target",
+    )]
+    pub fn list_relations_by_target(
+        &self,
+        target_id: i64,
+    ) -> Result<Vec<Relation>, KnowledgeGraphError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, source_id, target_id, kind, weight, \
+                    t_valid_from, t_valid_to, \
+                    source_tool, source_evidence, confidence \
+             FROM relations \
+             WHERE target_id = ?1 \
+             ORDER BY id ASC",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![target_id], relation_from_row)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
     // ── Bi-temporal reads ────────────────────────────────────────────
     //
     // `t_valid_from` / `t_valid_to` are TEXT columns in SQLite, and
