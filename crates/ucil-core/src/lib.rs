@@ -24,6 +24,7 @@ pub use incremental::{dependent_metric, symbol_count, FileRevision, UcilDatabase
 // on rustfmt's wrapping heuristic — a single combined block exceeds
 // the 100-col width and rustfmt would split the names onto their own
 // lines, putting them past the `pub use` anchor.
+pub use knowledge_graph::SymbolResolution;
 pub use knowledge_graph::{Entity, Relation};
 pub use knowledge_graph::{HotObservation, WalCheckpointMode};
 pub use knowledge_graph::{KnowledgeGraph, KnowledgeGraphError};
