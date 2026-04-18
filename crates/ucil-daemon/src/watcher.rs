@@ -1278,13 +1278,27 @@ async fn test_poll_backend_delivers_events() {
     let path = tempdir.path().join("poll-hello.txt");
     std::fs::write(&path, b"poll").expect("write test file");
 
-    // Poll interval is POLL_WATCHER_INTERVAL (2 s); the debouncer
-    // adds up to DEBOUNCE_WINDOW (100 ms) of extra latency. Budget
-    // 10 s so the test stays green under CI jitter.
-    let ev = tokio::time::timeout(Duration::from_secs(10), rx.recv())
-        .await
-        .expect("timed out waiting for poll event")
-        .expect("channel closed before event arrived");
+    // PollWatcher's scan-and-diff emits BOTH a parent-directory mtime
+    // change and the new file entry across poll cycles, in no
+    // guaranteed order. Collect events until we see one for
+    // poll-hello.txt OR the 10 s budget elapses (poll interval is
+    // POLL_WATCHER_INTERVAL = 2 s, debouncer adds up to
+    // DEBOUNCE_WINDOW = 100 ms on top).
+    let start = std::time::Instant::now();
+    let deadline = Duration::from_secs(10);
+    let mut matched: Option<FileEvent> = None;
+    while start.elapsed() < deadline {
+        match tokio::time::timeout(deadline.saturating_sub(start.elapsed()), rx.recv()).await {
+            Ok(Some(ev)) => {
+                if ev.path.ends_with("poll-hello.txt") {
+                    matched = Some(ev);
+                    break;
+                }
+            }
+            Ok(None) | Err(_) => break,
+        }
+    }
+    let ev = matched.expect("poll backend never delivered event for poll-hello.txt");
 
     assert_eq!(
         ev.source,
