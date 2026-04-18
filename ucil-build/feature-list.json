@@ -506,10 +506,10 @@
         "P1-W3-F02"
       ],
       "passes": false,
-      "last_verified_ts": "2026-04-18T10:49:29Z",
-      "last_verified_by": "verifier-3b71d8ae-adc8-4846-a412-c61263b858ef",
-      "last_verified_commit": "650c854e8534fcd68941498f0b5996a1b3f5710c",
-      "attempts": 1,
+      "last_verified_ts": "2026-04-18T11:01:27Z",
+      "last_verified_by": "verifier-8ca4ed53-dc2a-457f-985a-6a9f61f83769",
+      "last_verified_commit": "592c9081423551b994aea976d7a56ee34ca49376",
+      "attempts": 2,
       "blocked_reason": null
     },
     {
