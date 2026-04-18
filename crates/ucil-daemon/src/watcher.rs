@@ -154,6 +154,100 @@ pub struct WatchmanCapability {
     pub binary: PathBuf,
 }
 
+/// Probe the current `PATH` for a `watchman` binary.
+///
+/// Returns `Some(WatchmanCapability { binary })` iff
+/// `which::which("watchman")` resolves successfully — i.e. the caller's
+/// process environment has a Watchman executable on the search path.
+/// Returns `None` otherwise (the common case on fresh developer
+/// machines).
+///
+/// This function does NOT spawn Watchman or issue any RPC; it's a
+/// cheap env-var + filesystem probe, suitable for calling at daemon
+/// startup and inside [`auto_select_backend`]. No caching: callers
+/// that need to invalidate a prior negative should re-probe.
+///
+/// Tracing span: `ucil.daemon.watcher.detect_watchman` per master-plan
+/// §15.2.
+#[must_use]
+#[tracing::instrument(name = "ucil.daemon.watcher.detect_watchman", level = "debug")]
+pub fn detect_watchman() -> Option<WatchmanCapability> {
+    match which::which("watchman") {
+        Ok(binary) => Some(WatchmanCapability { binary }),
+        Err(err) => {
+            tracing::debug!(
+                target: "ucil.daemon.watcher",
+                error = %err,
+                "watchman binary not found on PATH"
+            );
+            None
+        }
+    }
+}
+
+/// Count files under `root`, stopping after at most `cap + 1` entries.
+///
+/// Uses `walkdir::WalkDir` to walk `root` recursively and returns the
+/// number of *file* entries (directories, symlink targets, and I/O
+/// errors are filtered out) — but short-circuits once `cap + 1`
+/// entries have been seen. That early-exit means the walker's cost
+/// stays in `O(cap)` on repositories far larger than `cap`, which is
+/// critical for the
+/// [`WATCHMAN_AUTO_SELECT_THRESHOLD`]-is-50K check: a full walk of a
+/// 10-million-file repo would cost seconds, and we only need to know
+/// whether the count is above the threshold.
+///
+/// The returned value is in `[0, cap + 1]`. Callers should compare
+/// with `>` against their threshold (`count > cap` ⇔ "above
+/// threshold"); an exact count in the `≤ cap` range is only
+/// meaningful for small trees.
+///
+/// Walker errors (permission denied, broken symlinks) are silently
+/// skipped via `filter_map(Result::ok)` — the walker is used here for
+/// a coarse size check, not a correctness-critical traversal. A
+/// future WO can tighten the error handling if the metric becomes
+/// load-bearing.
+#[must_use]
+pub fn count_files_capped(root: &Path, cap: usize) -> usize {
+    walkdir::WalkDir::new(root)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_file())
+        .take(cap.saturating_add(1))
+        .count()
+}
+
+/// Pick the best [`WatcherBackend`] for `root` given a file-count
+/// `threshold`.
+///
+/// Returns [`WatcherBackend::Watchman`] iff BOTH conditions hold:
+///
+/// 1. A `watchman` binary is on the `PATH` ([`detect_watchman`] returns
+///    `Some`).
+/// 2. The recursive file count under `root` is strictly greater than
+///    `threshold` ([`count_files_capped`] returns a value `>` `threshold`).
+///
+/// Otherwise returns [`WatcherBackend::NotifyDebounced`] — the
+/// default, inotify / `FSEvents` / `ReadDirectoryChangesW`-backed path.
+///
+/// [`WatcherBackend::Poll`] is deliberately never returned from this
+/// function: auto-detecting network mounts cross-platform is out of
+/// scope for WO-0039 (see `scope_out` in the work-order). Callers
+/// that know they are on an NFS / sshfs root should pass
+/// [`WatcherBackend::Poll`] directly to
+/// [`FileWatcher::new_with_backend`].
+///
+/// Master-plan §2 line 138 specifies the 50K-file threshold; callers
+/// typically pass [`WATCHMAN_AUTO_SELECT_THRESHOLD`] here.
+#[must_use]
+pub fn auto_select_backend(root: &Path, threshold: usize) -> WatcherBackend {
+    if detect_watchman().is_some() && count_files_capped(root, threshold) > threshold {
+        WatcherBackend::Watchman
+    } else {
+        WatcherBackend::NotifyDebounced
+    }
+}
+
 /// Total classification of a file-change event.
 ///
 /// This enum is *total* over the event kinds we route through the
