@@ -60,6 +60,12 @@ streaming-iterator.workspace = true
 # method while remaining object-safe so downstream wiring can hold an
 # `Arc<dyn SerenaHoverClient>` against the live Serena MCP channel.
 async-trait = { workspace = true }
+# `tempfile::TempDir` backs the per-invocation `KnowledgeGraph` SQLite
+# file the `mcp --stdio --repo <PATH>` code path bootstraps in
+# `main.rs` (WO-0041).  The temp directory's lifetime is bound to the
+# `serve` loop so SQLite's WAL file + lock file stay on disk for the
+# duration of the stdio session.
+tempfile.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
