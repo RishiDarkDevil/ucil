@@ -2708,3 +2708,168 @@ fn test_symbol_resolution() {
         Some("ucil_treesitter::parser".to_owned()),
     );
 }
+
+// ── Conventions CRUD tests (P1-W4-F10) ───────────────────────────────────────
+//
+// Module-root placement per DEC-0005.  Fixture helper mints two
+// canonical categories (`"naming"`, `"error_handling"`) that the
+// server-level acceptance test in `ucil-daemon` also uses so the two
+// layers are re-asserted on the same shape.
+
+#[cfg(test)]
+fn mk_convention(category: &str, pattern: &str) -> Convention {
+    Convention {
+        id: None,
+        category: category.to_owned(),
+        pattern: pattern.to_owned(),
+        examples: Some(format!("// example for {category}: {pattern}")),
+        counter_examples: None,
+        confidence: 0.75,
+        evidence_count: 3,
+        // `t_ingested_at` is set by the schema default; the pre-insert
+        // value is irrelevant for the INSERT (it is not bound) but the
+        // struct requires a value.
+        t_ingested_at: String::new(),
+        last_verified: None,
+        scope: "project".to_owned(),
+    }
+}
+
+/// `test_insert_and_list_conventions_all` — round-trip two rows of
+/// different categories through `insert_convention` + `list_conventions`
+/// and assert both come back in `id ASC` order with every user-supplied
+/// column preserved and the schema-default `t_ingested_at` populated.
+#[cfg(test)]
+#[test]
+fn test_insert_and_list_conventions_all() {
+    use tempfile::TempDir;
+
+    let tmp = TempDir::new().expect("tempdir must be creatable");
+    let mut kg = KnowledgeGraph::open(&tmp.path().join("kg.db"))
+        .expect("KnowledgeGraph::open must succeed on fresh tempfile");
+
+    let first = mk_convention("naming", "snake_case for functions");
+    let second = mk_convention("error_handling", "thiserror on all library errors");
+
+    let id1 = kg
+        .insert_convention(&first)
+        .expect("first insert must succeed");
+    let id2 = kg
+        .insert_convention(&second)
+        .expect("second insert must succeed");
+    assert!(
+        id2 > id1,
+        "second insert must produce a higher rowid: {id1} vs {id2}",
+    );
+
+    let listed = kg
+        .list_conventions(None)
+        .expect("list_conventions(None) must succeed");
+    assert_eq!(listed.len(), 2, "both rows returned: got {}", listed.len());
+    assert_eq!(listed[0].id, Some(id1), "first row id matches insert");
+    assert_eq!(listed[0].category, "naming");
+    assert_eq!(listed[0].pattern, "snake_case for functions");
+    assert_eq!(listed[0].examples, first.examples);
+    assert!(
+        (listed[0].confidence - first.confidence).abs() < 1e-9,
+        "confidence round-trips as f64",
+    );
+    assert_eq!(listed[0].evidence_count, first.evidence_count);
+    assert_eq!(listed[0].scope, first.scope);
+    assert!(
+        !listed[0].t_ingested_at.is_empty(),
+        "t_ingested_at must be populated by the schema default",
+    );
+
+    assert_eq!(listed[1].id, Some(id2), "second row id matches insert");
+    assert_eq!(listed[1].category, "error_handling");
+    assert_eq!(listed[1].pattern, "thiserror on all library errors");
+}
+
+/// `test_list_conventions_category_filter` — insert rows in two
+/// categories and assert `list_conventions(Some("naming"))` returns
+/// only the naming row.
+#[cfg(test)]
+#[test]
+fn test_list_conventions_category_filter() {
+    use tempfile::TempDir;
+
+    let tmp = TempDir::new().expect("tempdir must be creatable");
+    let mut kg =
+        KnowledgeGraph::open(&tmp.path().join("kg.db")).expect("KnowledgeGraph::open must succeed");
+
+    kg.insert_convention(&mk_convention("naming", "snake_case for functions"))
+        .expect("naming insert must succeed");
+    kg.insert_convention(&mk_convention(
+        "error_handling",
+        "thiserror on all library errors",
+    ))
+    .expect("error_handling insert must succeed");
+    kg.insert_convention(&mk_convention("naming", "PascalCase for types"))
+        .expect("second naming insert must succeed");
+
+    let naming = kg
+        .list_conventions(Some("naming"))
+        .expect("filtered list must succeed");
+    assert_eq!(
+        naming.len(),
+        2,
+        "both naming rows returned: got {}",
+        naming.len()
+    );
+    assert!(
+        naming.iter().all(|c| c.category == "naming"),
+        "every filtered row must carry category=\"naming\": {naming:?}",
+    );
+    let patterns: Vec<&str> = naming.iter().map(|c| c.pattern.as_str()).collect();
+    assert_eq!(
+        patterns,
+        vec!["snake_case for functions", "PascalCase for types"],
+        "rows returned in id ASC order",
+    );
+}
+
+/// `test_list_conventions_unknown_category_returns_empty` — passing a
+/// category that has no rows must yield `Ok(vec![])`, NOT `Err`.
+#[cfg(test)]
+#[test]
+fn test_list_conventions_unknown_category_returns_empty() {
+    use tempfile::TempDir;
+
+    let tmp = TempDir::new().expect("tempdir must be creatable");
+    let mut kg =
+        KnowledgeGraph::open(&tmp.path().join("kg.db")).expect("KnowledgeGraph::open must succeed");
+
+    kg.insert_convention(&mk_convention("naming", "snake_case for functions"))
+        .expect("naming insert must succeed");
+
+    let missing = kg
+        .list_conventions(Some("does_not_exist_yet"))
+        .expect("unknown-category list must succeed (not Err)");
+    assert!(
+        missing.is_empty(),
+        "unknown category yields empty vec: got {missing:?}",
+    );
+}
+
+/// `test_list_conventions_empty_table` — a freshly-opened KG with zero
+/// rows in `conventions` must return `Ok(vec![])` from
+/// `list_conventions(None)` — the "none yet extracted" contract from
+/// master-plan §3.2 row 7.
+#[cfg(test)]
+#[test]
+fn test_list_conventions_empty_table() {
+    use tempfile::TempDir;
+
+    let tmp = TempDir::new().expect("tempdir must be creatable");
+    let kg =
+        KnowledgeGraph::open(&tmp.path().join("kg.db")).expect("KnowledgeGraph::open must succeed");
+
+    let empty = kg
+        .list_conventions(None)
+        .expect("empty-table list must succeed (not Err)");
+    assert!(
+        empty.is_empty(),
+        "empty conventions table yields empty vec: got {empty:?}",
+    );
+}
