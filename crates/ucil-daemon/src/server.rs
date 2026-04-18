@@ -539,6 +539,11 @@ impl McpServer {
                 return Self::handle_search_code(id, params, kg);
             }
         }
+        if name == "understand_code" {
+            if let Some(kg) = self.kg.as_ref() {
+                return crate::understand_code::handle_understand_code(id, params, kg);
+            }
+        }
 
         // Phase-1 invariant #9: every tool handler is a stub that
         // returns `_meta.not_yet_implemented: true`.  Downstream phases
@@ -971,7 +976,7 @@ fn not_found_response(id: &Value, name: &str) -> Value {
 }
 
 /// Build a JSON-RPC 2.0 error envelope.
-fn jsonrpc_error(id: &Value, code: i64, message: &str) -> Value {
+pub(crate) fn jsonrpc_error(id: &Value, code: i64, message: &str) -> Value {
     json!({
         "jsonrpc": JSONRPC_VERSION,
         "id": id.clone(),
@@ -3185,4 +3190,593 @@ async fn test_search_code_tool_only_text_no_symbol() {
             "every result must have source == \"text\" (no symbol half): got {r:?}"
         );
     }
+}
+
+// ── understand_code tests (P1-W4-F09, WO-0036) ───────────────────────────────
+
+/// Build an `McpServer::with_knowledge_graph`-backed server populated
+/// by running the real tree-sitter → KG pipeline on the fixture
+/// `tests/fixtures/rust-project/src/util.rs` with the *canonical
+/// absolute path* — so that `understand_code`'s `list_entities_by_file`
+/// lookup against a canonicalised `target` succeeds.
+///
+/// Also upserts a synthetic caller of `evaluate` so the symbol-mode
+/// response carries a non-empty `inbound_edges` list.
+///
+/// Returns `(server, kg_arc, tmp_dir, fixture_root_canonical,
+/// util_rs_canonical, evaluate_qualified_name,
+/// caller_qualified_name)`.
+#[cfg(test)]
+#[allow(clippy::type_complexity)]
+fn build_understand_code_fixture() -> (
+    McpServer,
+    Arc<Mutex<ucil_core::KnowledgeGraph>>,
+    tempfile::TempDir,
+    String,
+    String,
+    String,
+    String,
+) {
+    use ucil_core::{Entity, KnowledgeGraph, Relation};
+
+    use crate::executor::{
+        rust_project_fixture, IngestPipeline, SOURCE_TOOL, TREE_SITTER_VALID_FROM,
+    };
+
+    let tmp = tempfile::TempDir::new().expect("tempdir must be creatable");
+    let kg_path = tmp.path().join("knowledge.db");
+    let mut kg = KnowledgeGraph::open(&kg_path).expect("KnowledgeGraph::open must succeed");
+
+    let fixture_root = rust_project_fixture()
+        .canonicalize()
+        .expect("fixture root canonicalises");
+    let util_rs = fixture_root.join("src/util.rs");
+    assert!(util_rs.is_file(), "fixture {util_rs:?} must exist");
+
+    let mut pipeline = IngestPipeline::new();
+    let inserted = pipeline
+        .ingest_file(&mut kg, &util_rs)
+        .expect("ingest_file must succeed");
+    assert!(
+        inserted > 0,
+        "fixture ingest must produce ≥1 symbol (got {inserted})"
+    );
+
+    let util_rs_canonical = util_rs.display().to_string();
+
+    // Locate the `evaluate` row + its stored `qualified_name`.
+    let (evaluate_id, evaluate_qn): (i64, String) = {
+        let rows = kg
+            .list_entities_by_file(&util_rs_canonical)
+            .expect("list_entities_by_file must succeed");
+        let row = rows
+            .iter()
+            .find(|e| e.name == "evaluate" && e.kind == "function")
+            .expect("fixture must contain an `evaluate` function row");
+        (
+            row.id.expect("row must carry id"),
+            row.qualified_name
+                .clone()
+                .expect("row must carry qualified_name"),
+        )
+    };
+
+    // Upsert a synthetic caller + `calls` relation so the symbol-mode
+    // response has non-empty `inbound_edges`.
+    let caller_qn = "tests::synthetic::caller_of_evaluate@1:1".to_owned();
+    let caller = Entity {
+        id: None,
+        kind: "function".to_owned(),
+        name: "caller_of_evaluate".to_owned(),
+        qualified_name: Some(caller_qn.clone()),
+        file_path: "tests/synthetic.rs".to_owned(),
+        start_line: Some(1),
+        end_line: Some(3),
+        signature: Some("fn caller_of_evaluate()".to_owned()),
+        doc_comment: None,
+        language: Some("rust".to_owned()),
+        t_valid_from: Some(TREE_SITTER_VALID_FROM.to_owned()),
+        t_valid_to: None,
+        importance: 0.5,
+        source_tool: Some(SOURCE_TOOL.to_owned()),
+        source_hash: Some("synthetic".to_owned()),
+    };
+    let caller_id = kg
+        .upsert_entity(&caller)
+        .expect("synthetic caller upsert must succeed");
+    let relation = Relation {
+        id: None,
+        source_id: caller_id,
+        target_id: evaluate_id,
+        kind: "calls".to_owned(),
+        weight: 1.0,
+        t_valid_from: Some(TREE_SITTER_VALID_FROM.to_owned()),
+        t_valid_to: None,
+        source_tool: Some(SOURCE_TOOL.to_owned()),
+        source_evidence: Some("synthetic test edge".to_owned()),
+        confidence: 1.0,
+    };
+    kg.upsert_relation(&relation)
+        .expect("synthetic calls relation upsert must succeed");
+
+    let fixture_root_canonical = fixture_root.display().to_string();
+
+    let kg_arc = Arc::new(Mutex::new(kg));
+    let server = McpServer::with_knowledge_graph(Arc::clone(&kg_arc));
+    (
+        server,
+        kg_arc,
+        tmp,
+        fixture_root_canonical,
+        util_rs_canonical,
+        evaluate_qn,
+        caller_qn,
+    )
+}
+
+/// Frozen acceptance selector for feature `P1-W4-F09` — see
+/// `ucil-build/feature-list.json` entry for
+/// `-p ucil-daemon server::test_understand_code_tool`.
+///
+/// Exercises the file-mode happy path of the `understand_code`
+/// `tools/call` dispatch against a real tree-sitter → KG
+/// pipeline-populated database.  Asserts:
+///
+/// 1. The JSON-RPC envelope is well-formed (`jsonrpc == "2.0"`,
+///    matching `id`, no `error` field).
+/// 2. `result._meta.tool == "understand_code"` and
+///    `result._meta.source == "tree-sitter+kg"`.
+/// 3. `result._meta.kind == "file"` and `result._meta.target`
+///    echoes the caller's request string.
+/// 4. `result._meta.summary.language == "rust"`.
+/// 5. `result._meta.summary.import_count == 5` — the five `use`
+///    declarations in `tests/fixtures/rust-project/src/util.rs` (three
+///    at the top of the file plus two inside the `mod tests` block;
+///    tree-sitter counts them all because `count_imports` walks the
+///    whole AST, not just the module root).
+/// 6. `result._meta.summary.line_count >= 1` — non-zero lines.
+/// 7. `result._meta.summary.top_level_symbols` is a non-empty array
+///    and carries an `evaluate` function row.
+/// 8. `result._meta.summary.kg_entity_count >= 1` — the ingest
+///    pipeline produced at least one KG row for this file.
+/// 9. `result.isError == false`.
+/// 10. `result._meta.not_yet_implemented` is **absent** — the handler
+///     must have escaped the phase-1 stub path.
+#[cfg(test)]
+fn assert_understand_code_file_response(response: &Value, expected_target: &str) {
+    let meta = response
+        .pointer("/result/_meta")
+        .expect("response must carry result._meta");
+    assert_eq!(
+        meta.get("tool").and_then(Value::as_str),
+        Some("understand_code"),
+        "_meta.tool must be \"understand_code\": {response}"
+    );
+    assert_eq!(
+        meta.get("source").and_then(Value::as_str),
+        Some("tree-sitter+kg"),
+        "_meta.source must be \"tree-sitter+kg\": {response}"
+    );
+    assert_eq!(
+        meta.get("kind").and_then(Value::as_str),
+        Some("file"),
+        "_meta.kind must be \"file\": {response}"
+    );
+    assert_eq!(
+        meta.get("target").and_then(Value::as_str),
+        Some(expected_target),
+        "_meta.target must echo caller's target string: {response}"
+    );
+
+    let summary = meta
+        .get("summary")
+        .expect("_meta.summary must be present on file-mode response");
+    assert_eq!(
+        summary.get("language").and_then(Value::as_str),
+        Some("rust"),
+        "_meta.summary.language must be \"rust\" for util.rs: {response}"
+    );
+    let import_count = summary
+        .get("import_count")
+        .and_then(Value::as_u64)
+        .expect("_meta.summary.import_count must be an integer");
+    assert_eq!(
+        import_count, 5,
+        "_meta.summary.import_count must be 5 (three top-level `use` decls \
+         + two inside `mod tests` in tests/fixtures/rust-project/src/util.rs): \
+         got {import_count} — {response}"
+    );
+    let line_count = summary
+        .get("line_count")
+        .and_then(Value::as_u64)
+        .expect("_meta.summary.line_count must be an integer");
+    assert!(
+        line_count >= 1,
+        "_meta.summary.line_count must be >= 1: got {line_count} — {response}"
+    );
+
+    let top_level_symbols = summary
+        .get("top_level_symbols")
+        .and_then(Value::as_array)
+        .expect("_meta.summary.top_level_symbols must be a JSON array");
+    assert!(
+        !top_level_symbols.is_empty(),
+        "_meta.summary.top_level_symbols must be non-empty: {response}"
+    );
+    assert!(
+        top_level_symbols.iter().any(|s| {
+            s.get("name").and_then(Value::as_str) == Some("evaluate")
+                && s.get("kind").and_then(Value::as_str) == Some("function")
+        }),
+        "_meta.summary.top_level_symbols must contain an `evaluate` function row: got {top_level_symbols:?}"
+    );
+
+    let kg_entity_count = summary
+        .get("kg_entity_count")
+        .and_then(Value::as_u64)
+        .expect("_meta.summary.kg_entity_count must be an integer");
+    assert!(
+        kg_entity_count >= 1,
+        "_meta.summary.kg_entity_count must be >= 1 (ingest pipeline \
+         produced rows): got {kg_entity_count} — {response}"
+    );
+
+    assert_eq!(
+        response.pointer("/result/isError").and_then(Value::as_bool),
+        Some(false),
+        "result.isError must be false on the happy path: {response}"
+    );
+    assert!(
+        response
+            .pointer("/result/_meta/not_yet_implemented")
+            .is_none(),
+        "result._meta.not_yet_implemented must be ABSENT — the handler \
+         must have escaped the phase-1 stub path: {response}"
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn test_understand_code_tool() {
+    let (server, _kg, _tmp, fixture_root, util_rs_canonical, _eval_qn, _caller_qn) =
+        build_understand_code_fixture();
+
+    let request = json!({
+        "jsonrpc": JSONRPC_VERSION,
+        "id": 101,
+        "method": "tools/call",
+        "params": {
+            "name": "understand_code",
+            "arguments": {
+                "target": util_rs_canonical.as_str(),
+                "kind": "file",
+                "root": fixture_root,
+                "reason": "acceptance test"
+            }
+        }
+    })
+    .to_string();
+    let response = server.handle_line(&request);
+
+    assert_eq!(
+        response.get("jsonrpc").and_then(Value::as_str),
+        Some(JSONRPC_VERSION),
+        "response must carry jsonrpc == \"2.0\": {response}"
+    );
+    assert_eq!(
+        response.get("id").and_then(Value::as_i64),
+        Some(101),
+        "response id must echo request id: {response}"
+    );
+    assert!(
+        response.get("error").is_none(),
+        "response must not carry an error envelope: {response}"
+    );
+
+    assert_understand_code_file_response(&response, util_rs_canonical.as_str());
+}
+
+/// Symbol-mode happy path: `kind == "symbol"` + an ingested qualified
+/// name resolves through `get_entity_by_qualified_name` and returns
+/// the entity projection plus inbound/outbound edges.  The synthetic
+/// caller seeded in the fixture should appear in `inbound_edges`.
+#[cfg(test)]
+#[test]
+fn test_understand_code_tool_symbol_mode() {
+    let (server, _kg, _tmp, fixture_root, _util_rs, evaluate_qn, caller_qn) =
+        build_understand_code_fixture();
+
+    let request = json!({
+        "jsonrpc": JSONRPC_VERSION,
+        "id": 102,
+        "method": "tools/call",
+        "params": {
+            "name": "understand_code",
+            "arguments": {
+                "target": evaluate_qn.as_str(),
+                "kind": "symbol",
+                "root": fixture_root,
+            }
+        }
+    })
+    .to_string();
+    let response = server.handle_line(&request);
+
+    assert!(
+        response.get("error").is_none(),
+        "symbol-mode happy path must not return an error envelope: {response}"
+    );
+
+    let meta = response
+        .pointer("/result/_meta")
+        .expect("response must carry result._meta");
+    assert_eq!(
+        meta.get("kind").and_then(Value::as_str),
+        Some("symbol"),
+        "_meta.kind must be \"symbol\": {response}"
+    );
+    assert_eq!(
+        meta.get("found").and_then(Value::as_bool),
+        Some(true),
+        "_meta.found must be true for a resolved qualified_name: {response}"
+    );
+    assert_eq!(
+        meta.get("target").and_then(Value::as_str),
+        Some(evaluate_qn.as_str()),
+        "_meta.target must echo the requested qualified_name: {response}"
+    );
+
+    let summary = meta
+        .get("summary")
+        .expect("_meta.summary must be present on symbol-mode response");
+    let inbound_edges = summary
+        .get("inbound_edges")
+        .and_then(Value::as_array)
+        .expect("_meta.summary.inbound_edges must be an array");
+    assert!(
+        inbound_edges.iter().any(|e| {
+            e.get("peer_qualified_name").and_then(Value::as_str) == Some(caller_qn.as_str())
+                && e.get("relation_type").and_then(Value::as_str) == Some("calls")
+        }),
+        "inbound_edges must contain the synthetic `calls` edge from {caller_qn:?}: \
+         got {inbound_edges:?}"
+    );
+
+    let entity = summary
+        .get("entity")
+        .expect("_meta.summary.entity must be present");
+    assert_eq!(
+        entity.get("name").and_then(Value::as_str),
+        Some("evaluate"),
+        "_meta.summary.entity.name must be \"evaluate\": {response}"
+    );
+    assert_eq!(
+        entity.get("entity_type").and_then(Value::as_str),
+        Some("function"),
+        "_meta.summary.entity.entity_type must be \"function\": {response}"
+    );
+    assert_eq!(
+        response.pointer("/result/isError").and_then(Value::as_bool),
+        Some(false),
+        "result.isError must be false on symbol-mode happy path: {response}"
+    );
+    assert!(
+        response
+            .pointer("/result/_meta/not_yet_implemented")
+            .is_none(),
+        "result._meta.not_yet_implemented must be ABSENT on symbol mode: {response}"
+    );
+}
+
+/// Auto-detect mode: when `kind` is omitted and the target resolves
+/// to a file under `root`, the dispatcher must pick file mode.
+#[cfg(test)]
+#[test]
+fn test_understand_code_tool_auto_detect_file() {
+    let (server, _kg, _tmp, fixture_root, util_rs_canonical, _eval_qn, _caller_qn) =
+        build_understand_code_fixture();
+
+    let request = json!({
+        "jsonrpc": JSONRPC_VERSION,
+        "id": 103,
+        "method": "tools/call",
+        "params": {
+            "name": "understand_code",
+            "arguments": {
+                "target": util_rs_canonical,
+                "root": fixture_root,
+            }
+        }
+    })
+    .to_string();
+    let response = server.handle_line(&request);
+
+    assert!(
+        response.get("error").is_none(),
+        "auto-detected file mode must not produce error: {response}"
+    );
+    assert_eq!(
+        response
+            .pointer("/result/_meta/kind")
+            .and_then(Value::as_str),
+        Some("file"),
+        "auto-detection with a path-to-file target must route to file mode: {response}"
+    );
+}
+
+/// Malformed args: missing `target` must yield JSON-RPC `-32602`.
+#[cfg(test)]
+#[test]
+fn test_understand_code_tool_missing_target() {
+    let (server, _kg, _tmp, fixture_root, _util_rs, _eval_qn, _caller_qn) =
+        build_understand_code_fixture();
+
+    let request = json!({
+        "jsonrpc": JSONRPC_VERSION,
+        "id": 104,
+        "method": "tools/call",
+        "params": {
+            "name": "understand_code",
+            "arguments": { "root": fixture_root }
+        }
+    })
+    .to_string();
+    let response = server.handle_line(&request);
+
+    let error = response
+        .get("error")
+        .expect("missing `target` must produce JSON-RPC error envelope");
+    assert_eq!(
+        error.get("code").and_then(Value::as_i64),
+        Some(-32602),
+        "missing-target error code must be -32602 (Invalid params): {response}"
+    );
+}
+
+/// Malformed args: empty-string `target` must yield `-32602`.
+#[cfg(test)]
+#[test]
+fn test_understand_code_tool_empty_target() {
+    let (server, _kg, _tmp, fixture_root, _util_rs, _eval_qn, _caller_qn) =
+        build_understand_code_fixture();
+
+    let request = json!({
+        "jsonrpc": JSONRPC_VERSION,
+        "id": 105,
+        "method": "tools/call",
+        "params": {
+            "name": "understand_code",
+            "arguments": { "target": "", "root": fixture_root }
+        }
+    })
+    .to_string();
+    let response = server.handle_line(&request);
+
+    let error = response
+        .get("error")
+        .expect("empty `target` must produce JSON-RPC error envelope");
+    assert_eq!(
+        error.get("code").and_then(Value::as_i64),
+        Some(-32602),
+        "empty-target error code must be -32602 (Invalid params): {response}"
+    );
+}
+
+/// Malformed args: a `kind` string outside the
+/// `{"file","symbol","module"}` set must yield `-32602`.
+#[cfg(test)]
+#[test]
+fn test_understand_code_tool_invalid_kind() {
+    let (server, _kg, _tmp, fixture_root, _util_rs, _eval_qn, _caller_qn) =
+        build_understand_code_fixture();
+
+    let request = json!({
+        "jsonrpc": JSONRPC_VERSION,
+        "id": 106,
+        "method": "tools/call",
+        "params": {
+            "name": "understand_code",
+            "arguments": {
+                "target": "something",
+                "kind": "class",
+                "root": fixture_root,
+            }
+        }
+    })
+    .to_string();
+    let response = server.handle_line(&request);
+
+    let error = response
+        .get("error")
+        .expect("invalid `kind` must produce JSON-RPC error envelope");
+    assert_eq!(
+        error.get("code").and_then(Value::as_i64),
+        Some(-32602),
+        "invalid-kind error code must be -32602 (Invalid params): {response}"
+    );
+}
+
+/// Symbol-mode unknown symbol: the response must be a well-formed
+/// envelope with `_meta.found == false` and `isError == false` — NOT
+/// a JSON-RPC error (WO-0036 `scope_in` bullet 7).
+#[cfg(test)]
+#[test]
+fn test_understand_code_tool_unknown_symbol() {
+    let (server, _kg, _tmp, fixture_root, _util_rs, _eval_qn, _caller_qn) =
+        build_understand_code_fixture();
+
+    let request = json!({
+        "jsonrpc": JSONRPC_VERSION,
+        "id": 107,
+        "method": "tools/call",
+        "params": {
+            "name": "understand_code",
+            "arguments": {
+                "target": "definitely_not_a_symbol::anywhere@0:0",
+                "kind": "symbol",
+                "root": fixture_root,
+            }
+        }
+    })
+    .to_string();
+    let response = server.handle_line(&request);
+
+    assert!(
+        response.get("error").is_none(),
+        "unknown-symbol path must not return a JSON-RPC error: {response}"
+    );
+    assert_eq!(
+        response
+            .pointer("/result/_meta/found")
+            .and_then(Value::as_bool),
+        Some(false),
+        "_meta.found must be false for unresolved symbol: {response}"
+    );
+    assert_eq!(
+        response.pointer("/result/isError").and_then(Value::as_bool),
+        Some(false),
+        "result.isError must be false (well-formed zero-row result, \
+         not an error): {response}"
+    );
+}
+
+/// When the server is built without a KG attached, `understand_code`
+/// must fall through to the phase-1 stub — preserving phase-1
+/// invariant #9 for hosts that haven't wired up a KG yet.
+#[cfg(test)]
+#[test]
+fn test_understand_code_tool_no_kg_returns_stub() {
+    let server = McpServer::new();
+
+    let request = json!({
+        "jsonrpc": JSONRPC_VERSION,
+        "id": 108,
+        "method": "tools/call",
+        "params": {
+            "name": "understand_code",
+            "arguments": { "target": "x" }
+        }
+    })
+    .to_string();
+    let response = server.handle_line(&request);
+
+    assert!(
+        response.get("error").is_none(),
+        "stub path must not return a JSON-RPC error: {response}"
+    );
+    assert_eq!(
+        response
+            .pointer("/result/_meta/not_yet_implemented")
+            .and_then(Value::as_bool),
+        Some(true),
+        "no-KG path must fall through to the phase-1 stub \
+         (_meta.not_yet_implemented == true): {response}"
+    );
+    assert_eq!(
+        response
+            .pointer("/result/_meta/tool")
+            .and_then(Value::as_str),
+        Some("understand_code"),
+        "_meta.tool must echo the tool name even in the stub path: {response}"
+    );
 }
