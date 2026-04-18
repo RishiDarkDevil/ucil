@@ -16,6 +16,7 @@ pub mod lifecycle;
 pub mod plugin_manager;
 pub mod server;
 pub mod session_manager;
+pub mod session_ttl;
 
 pub use lifecycle::{Lifecycle, PidFile, PidFileError, ShutdownReason};
 pub use plugin_manager::{
@@ -32,3 +33,4 @@ pub use server::{
 pub use session_manager::{
     CallRecord, SessionId, SessionInfo, SessionManager, WorktreeInfo, DEFAULT_TTL_SECS,
 };
+pub use session_ttl::{compute_expires_at, is_expired};

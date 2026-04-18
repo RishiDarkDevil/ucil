@@ -22,11 +22,16 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::RwLock;
 
+use crate::session_ttl::{compute_expires_at, is_expired};
+
 /// Default session TTL in seconds — 1 hour.
 ///
-/// Used by [`SessionManager::create_session`] to compute
-/// [`SessionInfo::expires_at`] = `created_at + DEFAULT_TTL_SECS`.
-pub const DEFAULT_TTL_SECS: u64 = 3600;
+/// Re-export of [`crate::session_ttl::DEFAULT_TTL_SECS`] so existing
+/// public paths (`ucil_daemon::DEFAULT_TTL_SECS`,
+/// `ucil_daemon::session_manager::DEFAULT_TTL_SECS`) keep working
+/// after the P1-W4-F07 extraction of TTL helpers into a dedicated
+/// module.  See the `session_ttl` module rustdoc for the policy.
+pub use crate::session_ttl::DEFAULT_TTL_SECS;
 
 /// A single tool invocation recorded on a session's call history.
 ///
@@ -198,7 +203,7 @@ impl SessionManager {
             call_history: Vec::new(),
             inferred_domain: None,
             files_in_context: BTreeSet::new(),
-            expires_at: created_at.saturating_add(DEFAULT_TTL_SECS),
+            expires_at: compute_expires_at(created_at, DEFAULT_TTL_SECS),
         };
         self.sessions.write().await.insert(id.clone(), info);
         Ok(id)
@@ -254,7 +259,7 @@ impl SessionManager {
             .write()
             .await
             .get_mut(id)
-            .map(|info| info.expires_at = info.created_at.saturating_add(ttl_secs))
+            .map(|info| info.expires_at = compute_expires_at(info.created_at, ttl_secs))
     }
 
     /// Remove every session whose `expires_at <= now_secs`.
@@ -265,7 +270,7 @@ impl SessionManager {
     pub async fn purge_expired(&self, now_secs: u64) -> usize {
         let mut sessions = self.sessions.write().await;
         let before = sessions.len();
-        sessions.retain(|_, info| info.expires_at > now_secs);
+        sessions.retain(|_, info| !is_expired(info.expires_at, now_secs));
         let after = sessions.len();
         drop(sessions);
         before - after
