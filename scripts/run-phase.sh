@@ -325,7 +325,20 @@ Overwrite ucil-build/critic-reports/${WO_ID}.md with the fresh review, commit, p
 
   # Update drift counter — only after a successful merge (a rejected WO
   # counts as no flip for drift purposes).
-  FLIPPED_THIS_ITER=$(git log --since="5 minutes ago" --grep="flip-feature" --oneline 2>/dev/null | wc -l)
+  #
+  # A "flip" is detected by any commit in the last ~30 minutes that
+  # touched ucil-build/feature-list.json (the verifier is the sole writer
+  # via scripts/flip-feature.sh, and every flip commit modifies that
+  # file). The 30-minute window covers a full WO cycle end-to-end
+  # (planner → executor → critic → verifier → merge) plus slack for
+  # retries; shorter windows miss flips when an iteration has slow
+  # cargo-nextest compile times.
+  #
+  # Prior grep-based detection ("flip-feature") silently matched zero
+  # commits — actual verifier messages read `flip P1-W4-F05 to passes=true`
+  # (no hyphen). That was the cause of every drift-phase-1 false-positive
+  # on 2026-04-17 and 2026-04-18.
+  FLIPPED_THIS_ITER=$(git log --since="30 minutes ago" --name-only --pretty=format: -- ucil-build/feature-list.json 2>/dev/null | sed '/^$/d' | wc -l)
   if [[ "$FLIPPED_THIS_ITER" -eq 0 ]]; then
     NEW_DRIFT=$(jq -r --arg p "$PHASE" '.[$p] // 0 | tonumber + 1' "$DRIFT_FILE")
   else
