@@ -1,6 +1,7 @@
-//! UCIL daemon process lifecycle: PID file and signal-driven shutdown.
+//! UCIL daemon process lifecycle: PID file, signal-driven shutdown, and
+//! crash-recovery checkpoint.
 //!
-//! Two concerns live here:
+//! Three concerns live here:
 //!
 //! 1. [`PidFile`] — a best-effort guard that records the running daemon's
 //!    PID at a caller-supplied path (typically `.ucil/daemon.pid`, per
@@ -10,6 +11,12 @@
 //!    a [`ShutdownReason`] the first time the process receives `SIGTERM`
 //!    or `SIGHUP` (master-plan §18 Phase 1 Week 3 line 1740 — process
 //!    lifecycle requirement).
+//! 3. [`Checkpoint`] — a serde-backed progress marker persisted at
+//!    `.ucil/checkpoint.json`. The daemon writes the last-indexed commit,
+//!    active branch, and daemon version on each indexing-phase boundary so
+//!    that a restarted daemon can resume indexing without a full
+//!    re-index (master-plan §18 Phase 1 Week 3 line 1740 — crash
+//!    recovery, feature `P1-W3-F09`).
 //!
 //! A convenience [`Lifecycle`] handle owns the [`PidFile`] and exposes
 //! [`Lifecycle::run_until_shutdown`] for call-sites that want to block on
@@ -42,6 +49,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::signal::unix::{signal, SignalKind};
 
@@ -247,6 +255,192 @@ impl Lifecycle {
     }
 }
 
+// ── Checkpoint ───────────────────────────────────────────────────────────
+//
+// `Checkpoint` persists the daemon's indexing progress to
+// `.ucil/checkpoint.json` so that a restarted daemon can resume without a
+// full re-index (master-plan §11.2 line 1076 names the per-branch
+// `state.json`; the daemon-wide progress marker lives at the `.ucil/`
+// root per §18 Phase 1 Week 3 line 1740). The file is single-writer —
+// only the owning daemon writes to it — so we don't need the atomic
+// rename dance; a plain `OpenOptions::create().truncate().write()` +
+// `serde_json::to_writer_pretty` + `flush()` is sufficient. If
+// concurrency concerns surface later, raise an ADR.
+
+/// Errors returned by [`Checkpoint`] operations.
+///
+/// `#[non_exhaustive]` so future variants (e.g. a schema-version
+/// mismatch) can land without a SemVer-breaking change.
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum CheckpointError {
+    /// An I/O error occurred while reading or writing the checkpoint
+    /// file. `path` names the checkpoint location that was being
+    /// accessed.
+    #[error("checkpoint io at {path}: {source}", path = path.display())]
+    Io {
+        /// Path that was being accessed when the error occurred.
+        path: PathBuf,
+        /// Underlying OS error.
+        #[source]
+        source: std::io::Error,
+    },
+    /// The checkpoint file exists but its contents could not be parsed
+    /// as JSON. Fresh-start (no file) returns `Ok(None)` from
+    /// [`Checkpoint::read`] rather than this error.
+    #[error("checkpoint parse at {path}: {source}", path = path.display())]
+    Parse {
+        /// Path of the malformed checkpoint file.
+        path: PathBuf,
+        /// Underlying JSON parse error.
+        #[source]
+        source: serde_json::Error,
+    },
+}
+
+/// Daemon indexing-progress snapshot persisted at `.ucil/checkpoint.json`.
+///
+/// Written by the daemon on each indexing-phase boundary; read at
+/// startup to skip an already-indexed prefix of the commit history
+/// (master-plan §18 Phase 1 Week 3 — crash recovery, feature
+/// `P1-W3-F09`).
+///
+/// All fields are `pub` because call-sites legitimately need to inspect
+/// the last-indexed commit and the active branch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Checkpoint {
+    /// Commit SHA of the last successfully-indexed revision, or `None`
+    /// if the daemon has never completed an indexing run.
+    pub last_indexed_commit: Option<String>,
+    /// Branch that was active when this checkpoint was written. On
+    /// restart, the daemon resumes on the same branch.
+    pub active_branch: String,
+    /// Unix timestamp (seconds since epoch) at which this checkpoint
+    /// was written.
+    pub saved_at: u64,
+    /// Version of the daemon that wrote this checkpoint (the value of
+    /// `CARGO_PKG_VERSION` at build time). Lets a future daemon detect
+    /// an incompatible checkpoint schema and re-index from scratch.
+    pub daemon_version: String,
+}
+
+impl Checkpoint {
+    /// Construct a fresh checkpoint for a daemon that has never indexed
+    /// anything on `active_branch`.
+    ///
+    /// `saved_at` is filled from [`std::time::SystemTime::now`];
+    /// `daemon_version` from `env!("CARGO_PKG_VERSION")` so the value
+    /// is baked in at compile time of the daemon binary.
+    #[must_use]
+    pub fn new(active_branch: String) -> Self {
+        Self {
+            last_indexed_commit: None,
+            active_branch,
+            saved_at: now_unix_secs(),
+            daemon_version: env!("CARGO_PKG_VERSION").to_string(),
+        }
+    }
+
+    /// Write `value` to `path` as pretty-printed JSON, creating or
+    /// truncating the file. Flushes before returning.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CheckpointError::Io`] if the file cannot be created,
+    /// written to, or flushed.
+    #[tracing::instrument(
+        name = "ucil.daemon.lifecycle.checkpoint.write",
+        level = "debug",
+        skip(value)
+    )]
+    pub fn write(path: &Path, value: &Self) -> Result<(), CheckpointError> {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(path)
+            .map_err(|source| CheckpointError::Io {
+                path: path.to_path_buf(),
+                source,
+            })?;
+
+        serde_json::to_writer_pretty(&mut file, value).map_err(|e| {
+            // serde_json write errors during serialisation of an
+            // owned-type value can only originate from the underlying
+            // writer (our `File`), since `Serialize` for Checkpoint is
+            // infallible. Surface these as Io with the kind hint preserved.
+            let kind = e.io_error_kind().unwrap_or(std::io::ErrorKind::Other);
+            CheckpointError::Io {
+                path: path.to_path_buf(),
+                source: std::io::Error::new(kind, e),
+            }
+        })?;
+        file.flush().map_err(|source| CheckpointError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+
+        Ok(())
+    }
+
+    /// Read and deserialise the checkpoint at `path`.
+    ///
+    /// Returns `Ok(None)` if the file does not exist — this is the
+    /// expected fresh-start / pre-first-run case, not an error.
+    /// Returns [`CheckpointError::Parse`] if the file exists but is
+    /// not valid JSON of the expected shape.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CheckpointError::Io`] for any I/O error other than
+    /// `NotFound`. Returns [`CheckpointError::Parse`] if the file
+    /// exists but cannot be decoded into a [`Checkpoint`].
+    #[tracing::instrument(name = "ucil.daemon.lifecycle.checkpoint.read", level = "debug")]
+    pub fn read(path: &Path) -> Result<Option<Self>, CheckpointError> {
+        let contents = match std::fs::read_to_string(path) {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(source) => {
+                return Err(CheckpointError::Io {
+                    path: path.to_path_buf(),
+                    source,
+                });
+            }
+        };
+        serde_json::from_str(&contents)
+            .map(Some)
+            .map_err(|source| CheckpointError::Parse {
+                path: path.to_path_buf(),
+                source,
+            })
+    }
+
+    /// Read the checkpoint at `path`, or construct a fresh one rooted
+    /// at `default_branch` if no checkpoint file exists.
+    ///
+    /// # Errors
+    ///
+    /// Propagates [`CheckpointError::Io`] and [`CheckpointError::Parse`]
+    /// from [`Checkpoint::read`]. A missing file is NOT an error —
+    /// `restore_or_new` returns a freshly-constructed checkpoint in that
+    /// case.
+    pub fn restore_or_new(path: &Path, default_branch: &str) -> Result<Self, CheckpointError> {
+        Ok(Self::read(path)?.unwrap_or_else(|| Self::new(default_branch.to_string())))
+    }
+}
+
+/// Return the current unix time in seconds, or 0 if the clock is before
+/// `UNIX_EPOCH` (which should be impossible on any modern OS).
+///
+/// Duplicated from `session_manager::now_unix_secs` to keep the
+/// `lifecycle` module self-contained; see the work-order note on
+/// minimal blast-radius extensions.
+fn now_unix_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────
 //
 // Tests live at module root (NOT wrapped in `#[cfg(test)] mod tests { }`)
@@ -375,5 +569,109 @@ fn test_pid_file_read_rejects_non_numeric_contents() {
             assert_eq!(source.kind(), std::io::ErrorKind::InvalidData);
         }
         PidFileError::Stale { .. } => panic!("unexpected Stale for parse failure"),
+    }
+}
+
+// ── Checkpoint tests ─────────────────────────────────────────────────────
+//
+// Tests live at module root (NOT inside `mod tests { }`) so the frozen
+// P1-W3-F09 selector `lifecycle::test_crash_recovery` resolves with
+// exact path semantics, mirroring the PidFile tests above.
+
+#[cfg(test)]
+#[test]
+fn test_crash_recovery() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let path = tmp.path().join("checkpoint.json");
+
+    // Simulate a running daemon persisting its progress, then a restart.
+    let cp = Checkpoint {
+        last_indexed_commit: Some("abc123def".to_string()),
+        active_branch: "main".to_string(),
+        saved_at: 1_712_345_678,
+        daemon_version: "0.1.0".to_string(),
+    };
+    Checkpoint::write(&path, &cp).expect("write checkpoint");
+    assert!(path.exists(), "checkpoint file must exist after write");
+
+    let restored = Checkpoint::restore_or_new(&path, "fallback").expect("restore");
+    assert_eq!(
+        restored.last_indexed_commit,
+        Some("abc123def".to_string()),
+        "restored checkpoint must retain last_indexed_commit",
+    );
+    assert_eq!(
+        restored.active_branch, "main",
+        "restored active_branch must win over default_branch",
+    );
+    assert_eq!(restored.saved_at, 1_712_345_678);
+    assert_eq!(restored.daemon_version, "0.1.0");
+
+    // Simulate a fresh daemon start (no checkpoint on disk).
+    std::fs::remove_file(&path).expect("remove checkpoint");
+    let fresh = Checkpoint::restore_or_new(&path, "dev").expect("restore fresh");
+    assert_eq!(
+        fresh.last_indexed_commit, None,
+        "fresh checkpoint must have no last_indexed_commit",
+    );
+    assert_eq!(
+        fresh.active_branch, "dev",
+        "fresh checkpoint must pick up default_branch",
+    );
+    assert_eq!(
+        fresh.daemon_version,
+        env!("CARGO_PKG_VERSION"),
+        "fresh checkpoint must stamp the current daemon version",
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn test_checkpoint_write_then_read_roundtrip() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let path = tmp.path().join("checkpoint.json");
+
+    let original = Checkpoint {
+        last_indexed_commit: Some("deadbeefcafe".to_string()),
+        active_branch: "feat-round-trip".to_string(),
+        saved_at: 1_700_000_042,
+        daemon_version: "9.9.9".to_string(),
+    };
+    Checkpoint::write(&path, &original).expect("write");
+
+    let read_back = Checkpoint::read(&path).expect("read").expect("Some");
+    assert_eq!(
+        read_back, original,
+        "roundtrip must preserve every field exactly"
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn test_checkpoint_read_missing_returns_none() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let path = tmp.path().join("nope.json");
+    assert!(!path.exists(), "sanity: precondition — file must not exist");
+
+    let result = Checkpoint::read(&path).expect("read must not error on missing file");
+    assert!(
+        result.is_none(),
+        "missing checkpoint file must map to Ok(None), not an error",
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn test_checkpoint_read_malformed_returns_parse_error() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let path = tmp.path().join("broken.json");
+    std::fs::write(&path, "not json").expect("seed malformed file");
+
+    let err = Checkpoint::read(&path).expect_err("malformed JSON must error");
+    match err {
+        CheckpointError::Parse { path: err_path, .. } => {
+            assert_eq!(err_path, path);
+        }
+        CheckpointError::Io { .. } => panic!("expected Parse, got Io"),
     }
 }
