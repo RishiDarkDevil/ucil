@@ -3343,43 +3343,7 @@ fn build_understand_code_fixture() -> (
 /// 10. `result._meta.not_yet_implemented` is **absent** — the handler
 ///     must have escaped the phase-1 stub path.
 #[cfg(test)]
-#[test]
-fn test_understand_code_tool() {
-    let (server, _kg, _tmp, fixture_root, util_rs_canonical, _eval_qn, _caller_qn) =
-        build_understand_code_fixture();
-
-    let request = json!({
-        "jsonrpc": JSONRPC_VERSION,
-        "id": 101,
-        "method": "tools/call",
-        "params": {
-            "name": "understand_code",
-            "arguments": {
-                "target": util_rs_canonical.clone(),
-                "kind": "file",
-                "root": fixture_root.clone(),
-                "reason": "acceptance test"
-            }
-        }
-    })
-    .to_string();
-    let response = server.handle_line(&request);
-
-    assert_eq!(
-        response.get("jsonrpc").and_then(Value::as_str),
-        Some(JSONRPC_VERSION),
-        "response must carry jsonrpc == \"2.0\": {response}"
-    );
-    assert_eq!(
-        response.get("id").and_then(Value::as_i64),
-        Some(101),
-        "response id must echo request id: {response}"
-    );
-    assert!(
-        response.get("error").is_none(),
-        "response must not carry an error envelope: {response}"
-    );
-
+fn assert_understand_code_file_response(response: &Value, expected_target: &str) {
     let meta = response
         .pointer("/result/_meta")
         .expect("response must carry result._meta");
@@ -3400,7 +3364,7 @@ fn test_understand_code_tool() {
     );
     assert_eq!(
         meta.get("target").and_then(Value::as_str),
-        Some(util_rs_canonical.as_str()),
+        Some(expected_target),
         "_meta.target must echo caller's target string: {response}"
     );
 
@@ -3471,6 +3435,47 @@ fn test_understand_code_tool() {
     );
 }
 
+#[cfg(test)]
+#[test]
+fn test_understand_code_tool() {
+    let (server, _kg, _tmp, fixture_root, util_rs_canonical, _eval_qn, _caller_qn) =
+        build_understand_code_fixture();
+
+    let request = json!({
+        "jsonrpc": JSONRPC_VERSION,
+        "id": 101,
+        "method": "tools/call",
+        "params": {
+            "name": "understand_code",
+            "arguments": {
+                "target": util_rs_canonical.as_str(),
+                "kind": "file",
+                "root": fixture_root,
+                "reason": "acceptance test"
+            }
+        }
+    })
+    .to_string();
+    let response = server.handle_line(&request);
+
+    assert_eq!(
+        response.get("jsonrpc").and_then(Value::as_str),
+        Some(JSONRPC_VERSION),
+        "response must carry jsonrpc == \"2.0\": {response}"
+    );
+    assert_eq!(
+        response.get("id").and_then(Value::as_i64),
+        Some(101),
+        "response id must echo request id: {response}"
+    );
+    assert!(
+        response.get("error").is_none(),
+        "response must not carry an error envelope: {response}"
+    );
+
+    assert_understand_code_file_response(&response, util_rs_canonical.as_str());
+}
+
 /// Symbol-mode happy path: `kind == "symbol"` + an ingested qualified
 /// name resolves through `get_entity_by_qualified_name` and returns
 /// the entity projection plus inbound/outbound edges.  The synthetic
@@ -3488,9 +3493,9 @@ fn test_understand_code_tool_symbol_mode() {
         "params": {
             "name": "understand_code",
             "arguments": {
-                "target": evaluate_qn.clone(),
+                "target": evaluate_qn.as_str(),
                 "kind": "symbol",
-                "root": fixture_root.clone(),
+                "root": fixture_root,
             }
         }
     })
@@ -3578,8 +3583,8 @@ fn test_understand_code_tool_auto_detect_file() {
         "params": {
             "name": "understand_code",
             "arguments": {
-                "target": util_rs_canonical.clone(),
-                "root": fixture_root.clone(),
+                "target": util_rs_canonical,
+                "root": fixture_root,
             }
         }
     })
@@ -3693,7 +3698,7 @@ fn test_understand_code_tool_invalid_kind() {
 
 /// Symbol-mode unknown symbol: the response must be a well-formed
 /// envelope with `_meta.found == false` and `isError == false` — NOT
-/// a JSON-RPC error (WO-0036 scope_in bullet 7).
+/// a JSON-RPC error (WO-0036 `scope_in` bullet 7).
 #[cfg(test)]
 #[test]
 fn test_understand_code_tool_unknown_symbol() {

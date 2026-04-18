@@ -5,8 +5,8 @@
 //! structural data sources: tree-sitter AST symbols (the G1 group per
 //! master-plan §3.2 row 1) and knowledge-graph entity/relation metadata
 //! (master-plan §12.1 + §12.2).  The dispatch entry point
-//! [`handle_understand_code`] lives in
-//! [`crate::server::McpServer::handle_tools_call`]; the helpers
+//! [`handle_understand_code`] is invoked from the `tools/call` router
+//! inside `crate::server::McpServer` (private handler); the helpers
 //! ([`explain_file`], [`explain_symbol`], [`count_imports`]) and their
 //! data types (`UnderstandCodeFileSummary`, `UnderstandCodeSymbolSummary`,
 //! `UnderstandCodeError`, …) live in this module so `server.rs` stays
@@ -14,7 +14,7 @@
 //!
 //! Data lineage on the wire: `_meta.source = "tree-sitter+kg"` so
 //! downstream fusion layers know both authoritative structural sources
-//! have been consulted.  Semantic enrichment (LanceDB embeddings,
+//! have been consulted.  Semantic enrichment (`LanceDB` embeddings,
 //! Serena/LSP hover) is explicitly out of scope — see the WO-0036
 //! `scope_out` list.
 //!
@@ -201,7 +201,7 @@ pub struct UnderstandCodeFileSummary {
 /// bi-temporal / provenance columns (`t_valid_from`, `t_valid_to`,
 /// `importance`, `source_tool`, `source_hash`) that callers can fetch
 /// directly through future G2 tools.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct EntitySummary {
     /// Fully qualified name of the entity, or `None` when the `kind`
     /// does not carry one (e.g. `"file"`).
@@ -274,7 +274,7 @@ pub struct RelationEdge {
 /// summary is attached.  A missing file (e.g. stale KG row) is logged
 /// at `tracing::debug` and `containing_file` is `None` — never an
 /// error.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct UnderstandCodeSymbolSummary {
     /// Projection of the resolved entity's metadata columns.
     pub entity: EntitySummary,
@@ -323,6 +323,11 @@ pub struct UnderstandCodeSymbolSummary {
 ///   on a two-`use` Rust fixture).
 #[must_use]
 pub fn count_imports(source: &str, lang: Language) -> usize {
+    // `QueryMatches` implements `StreamingIterator`, not `Iterator`;
+    // hoisted to the top of the function so both `count_imports` and
+    // `count_require_calls` share a single import site.
+    use streaming_iterator::StreamingIterator as _;
+
     let mut parser = Parser::new();
     let tree = match parser.parse(source, lang) {
         Ok(t) => t,
@@ -348,10 +353,6 @@ pub fn count_imports(source: &str, lang: Language) -> usize {
             continue;
         };
         let mut cursor = QueryCursor::new();
-        // `QueryMatches` implements `StreamingIterator`, not `Iterator`;
-        // we only need the count so a plain increment in a `while let`
-        // loop is sufficient.
-        use streaming_iterator::StreamingIterator as _;
         let mut matches = cursor.matches(&query, tree.root_node(), source.as_bytes());
         while matches.next().is_some() {
             total += 1;
@@ -377,16 +378,16 @@ fn count_require_calls(
     source: &str,
     ts_lang: &tree_sitter::Language,
 ) -> usize {
+    use streaming_iterator::StreamingIterator as _;
+
     let q_str = "(call_expression function: (identifier) @fn) @call";
     let Ok(query) = Query::new(ts_lang, q_str) else {
         return 0;
     };
-    let fn_idx = match query.capture_index_for_name("fn") {
-        Some(i) => i,
-        None => return 0,
+    let Some(fn_idx) = query.capture_index_for_name("fn") else {
+        return 0;
     };
     let mut cursor = QueryCursor::new();
-    use streaming_iterator::StreamingIterator as _;
     let mut matches = cursor.matches(&query, tree.root_node(), source.as_bytes());
     let mut n = 0usize;
     while let Some(m) = matches.next() {
@@ -417,7 +418,7 @@ fn count_require_calls(
 /// taught about them fall through to `"unknown"` — the response still
 /// serialises and agents can see the gap in their own logs.
 #[must_use]
-pub fn language_tag(lang: Language) -> &'static str {
+pub const fn language_tag(lang: Language) -> &'static str {
     match lang {
         Language::Rust => "rust",
         Language::Python => "python",
@@ -572,8 +573,7 @@ pub fn explain_file(
 /// Otherwise return `path` unchanged — never errors.
 fn project_relative(path: &Path, root: &Path) -> PathBuf {
     path.strip_prefix(root)
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|_| path.to_path_buf())
+        .map_or_else(|_| path.to_path_buf(), Path::to_path_buf)
 }
 
 /// Map a [`ucil_treesitter::SymbolKind`] to its snake-case wire tag,
@@ -583,7 +583,7 @@ fn project_relative(path: &Path, root: &Path) -> PathBuf {
 /// [`ucil_treesitter::SymbolKind`] is `#[non_exhaustive]` so the
 /// compiler requires a wildcard arm; unseen variants fall through to
 /// `"other"` rather than panicking.
-fn symbol_kind_tag(kind: ucil_treesitter::SymbolKind) -> &'static str {
+const fn symbol_kind_tag(kind: ucil_treesitter::SymbolKind) -> &'static str {
     use ucil_treesitter::SymbolKind;
     match kind {
         SymbolKind::Function => "function",
@@ -601,6 +601,70 @@ fn symbol_kind_tag(kind: ucil_treesitter::SymbolKind) -> &'static str {
 }
 
 // ── explain_symbol ───────────────────────────────────────────────────────────
+
+/// Look up every inbound + outbound relation edge for `entity_id`
+/// and project each edge onto a [`RelationEdge`].
+///
+/// Held under a single mutex acquisition so the guard lifetime is
+/// tightly bounded and callers don't have to worry about lock
+/// granularity.  Returns `(inbound, outbound)` — order matches the
+/// callsite in [`explain_symbol`].  Dangling FK rows (peer entity
+/// vanished between `list_relations_*` and `get_entity_by_id`) are
+/// logged at `tracing::debug` and dropped.
+fn collect_edges(
+    kg: &Arc<Mutex<KnowledgeGraph>>,
+    entity_id: i64,
+) -> Result<(Vec<RelationEdge>, Vec<RelationEdge>), UnderstandCodeError> {
+    let guard = kg.lock().map_err(|_| UnderstandCodeError::Poisoned)?;
+    let outbound_rel = guard.list_relations_by_source(entity_id)?;
+    let inbound_rel = guard.list_relations_by_target(entity_id)?;
+    let outbound: Vec<RelationEdge> = outbound_rel
+        .iter()
+        .filter_map(|r| match guard.get_entity_by_id(r.target_id) {
+            Ok(Some(peer)) => Some(relation_edge_from(r.kind.clone(), &peer)),
+            Ok(None) => {
+                tracing::debug!(
+                    relation_id = ?r.id,
+                    target_id = r.target_id,
+                    "understand_code: outbound peer missing (dangling fk)",
+                );
+                None
+            }
+            Err(e) => {
+                tracing::debug!(
+                    relation_id = ?r.id,
+                    target_id = r.target_id,
+                    "understand_code: get_entity_by_id failed on outbound: {e}",
+                );
+                None
+            }
+        })
+        .collect();
+    let inbound: Vec<RelationEdge> = inbound_rel
+        .iter()
+        .filter_map(|r| match guard.get_entity_by_id(r.source_id) {
+            Ok(Some(peer)) => Some(relation_edge_from(r.kind.clone(), &peer)),
+            Ok(None) => {
+                tracing::debug!(
+                    relation_id = ?r.id,
+                    source_id = r.source_id,
+                    "understand_code: inbound peer missing (dangling fk)",
+                );
+                None
+            }
+            Err(e) => {
+                tracing::debug!(
+                    relation_id = ?r.id,
+                    source_id = r.source_id,
+                    "understand_code: get_entity_by_id failed on inbound: {e}",
+                );
+                None
+            }
+        })
+        .collect();
+    drop(guard);
+    Ok((inbound, outbound))
+}
 
 /// Build the symbol-mode [`UnderstandCodeSymbolSummary`] for
 /// `target` (a qualified name).
@@ -641,65 +705,16 @@ pub fn explain_symbol(
             None => return Err(UnderstandCodeError::NotFound(target.to_owned())),
         }
     };
-    let entity_id = match entity.id {
-        Some(i) => i,
-        None => return Err(UnderstandCodeError::NotFound(target.to_owned())),
+    let Some(entity_id) = entity.id else {
+        return Err(UnderstandCodeError::NotFound(target.to_owned()));
     };
 
     // 2. Enumerate edges — inbound (target_id = entity) +
     //    outbound (source_id = entity).  Peer projection uses
     //    get_entity_by_id per edge; dangling rows are logged and
-    //    dropped.
-    let (inbound_edges, outbound_edges) = {
-        let guard = kg.lock().map_err(|_| UnderstandCodeError::Poisoned)?;
-        let outbound_rel = guard.list_relations_by_source(entity_id)?;
-        let inbound_rel = guard.list_relations_by_target(entity_id)?;
-        let outbound: Vec<RelationEdge> = outbound_rel
-            .iter()
-            .filter_map(|r| match guard.get_entity_by_id(r.target_id) {
-                Ok(Some(peer)) => Some(relation_edge_from(r.kind.clone(), &peer)),
-                Ok(None) => {
-                    tracing::debug!(
-                        relation_id = ?r.id,
-                        target_id = r.target_id,
-                        "understand_code: outbound peer missing (dangling fk)",
-                    );
-                    None
-                }
-                Err(e) => {
-                    tracing::debug!(
-                        relation_id = ?r.id,
-                        target_id = r.target_id,
-                        "understand_code: get_entity_by_id failed on outbound: {e}",
-                    );
-                    None
-                }
-            })
-            .collect();
-        let inbound: Vec<RelationEdge> = inbound_rel
-            .iter()
-            .filter_map(|r| match guard.get_entity_by_id(r.source_id) {
-                Ok(Some(peer)) => Some(relation_edge_from(r.kind.clone(), &peer)),
-                Ok(None) => {
-                    tracing::debug!(
-                        relation_id = ?r.id,
-                        source_id = r.source_id,
-                        "understand_code: inbound peer missing (dangling fk)",
-                    );
-                    None
-                }
-                Err(e) => {
-                    tracing::debug!(
-                        relation_id = ?r.id,
-                        source_id = r.source_id,
-                        "understand_code: get_entity_by_id failed on inbound: {e}",
-                    );
-                    None
-                }
-            })
-            .collect();
-        (inbound, outbound)
-    };
+    //    dropped.  The guard is explicitly dropped at the end of the
+    //    block to keep the mutex held for as little as possible.
+    let (inbound_edges, outbound_edges) = collect_edges(kg, entity_id)?;
 
     let inbound_relation_count = inbound_edges.len();
     let outbound_relation_count = outbound_edges.len();
@@ -811,7 +826,7 @@ fn try_containing_file(
 ///   `arguments.root` non-string/missing-on-disk/not-a-directory.
 /// * `-32603` — file read / parse / KG / mutex-poisoning failure.
 ///
-/// Not-found shape (scope_in bullet 7): when
+/// Not-found shape (`scope_in` bullet 7): when
 /// `get_entity_by_qualified_name` returns `None`, the response
 /// envelope carries `_meta.found == false` and `isError == false` —
 /// *not* a JSON-RPC error.
@@ -825,154 +840,33 @@ pub fn handle_understand_code(
         .cloned()
         .unwrap_or_else(|| json!({}));
 
-    // ── arguments.target ─────────────────────────────────────────────
-    let target: String = match args.get("target") {
-        Some(Value::String(s)) if !s.is_empty() => s.clone(),
-        Some(Value::String(_)) => {
-            return jsonrpc_error(
-                id,
-                -32602,
-                "understand_code: `arguments.target` is required and must be a non-empty string",
-            );
-        }
-        _ => {
-            return jsonrpc_error(
-                id,
-                -32602,
-                "understand_code: `arguments.target` is required and must be a non-empty string",
-            );
-        }
+    let target = match parse_target(id, &args) {
+        Ok(t) => t,
+        Err(resp) => return resp,
+    };
+    let kind_opt = match parse_kind(id, &args) {
+        Ok(k) => k,
+        Err(resp) => return resp,
+    };
+    let root = match parse_root(id, &args) {
+        Ok(r) => r,
+        Err(resp) => return resp,
     };
 
-    // ── arguments.kind ───────────────────────────────────────────────
-    let kind_opt: Option<&str> = match args.get("kind") {
-        None | Some(Value::Null) => None,
-        Some(Value::String(s)) => {
-            if !matches!(s.as_str(), "file" | "symbol" | "module") {
-                return jsonrpc_error(
-                    id,
-                    -32602,
-                    "understand_code: `arguments.kind` must be one of \"file\", \"symbol\", or \"module\"",
-                );
-            }
-            Some(s.as_str())
-        }
-        Some(_) => {
-            return jsonrpc_error(
-                id,
-                -32602,
-                "understand_code: `arguments.kind` must be a string (or omitted/null)",
-            );
-        }
-    };
-
-    // ── arguments.root ───────────────────────────────────────────────
-    let root: PathBuf = match args.get("root") {
-        None | Some(Value::Null) => match std::env::current_dir() {
-            Ok(d) => d,
-            Err(e) => {
-                return jsonrpc_error(
-                    id,
-                    -32603,
-                    &format!("understand_code: could not resolve current_dir: {e}"),
-                );
-            }
-        },
-        Some(Value::String(s)) if s.is_empty() => match std::env::current_dir() {
-            Ok(d) => d,
-            Err(e) => {
-                return jsonrpc_error(
-                    id,
-                    -32603,
-                    &format!("understand_code: could not resolve current_dir: {e}"),
-                );
-            }
-        },
-        Some(Value::String(s)) => PathBuf::from(s),
-        Some(_) => {
-            return jsonrpc_error(
-                id,
-                -32602,
-                "understand_code: `arguments.root` must be a string (or omitted/null)",
-            );
-        }
-    };
-    let root = match root.canonicalize() {
-        Ok(p) => p,
-        Err(_) => {
-            return jsonrpc_error(
-                id,
-                -32602,
-                &format!(
-                    "understand_code: `arguments.root` does not exist: {}",
-                    root.display()
-                ),
-            );
-        }
-    };
-    if !root.is_dir() {
-        return jsonrpc_error(
-            id,
-            -32602,
-            &format!(
-                "understand_code: `arguments.root` is not a directory: {}",
-                root.display()
-            ),
-        );
-    }
-
-    // ── Auto-detect kind + candidate path ────────────────────────────
+    // Auto-detect kind + candidate path.
     let candidate_path = root.join(&target);
-    let is_existing_file = candidate_path
-        .canonicalize()
-        .map(|p| p.is_file())
-        .unwrap_or(false);
-    let effective_kind: &str = match kind_opt {
-        Some(k) => k,
-        None => {
-            if is_existing_file {
-                "file"
-            } else {
-                "symbol"
-            }
+    let is_existing_file = candidate_path.canonicalize().is_ok_and(|p| p.is_file());
+    let effective_kind: &str = kind_opt.unwrap_or({
+        if is_existing_file {
+            "file"
+        } else {
+            "symbol"
         }
-    };
+    });
 
-    // ── Dispatch ─────────────────────────────────────────────────────
+    // Dispatch.
     match effective_kind {
-        "file" | "module" => {
-            // Resolve and canonicalise the file.  Under file/module
-            // mode, the target MUST resolve to a regular file under
-            // `root`.
-            let resolved = match candidate_path.canonicalize() {
-                Ok(p) => p,
-                Err(_) => {
-                    return jsonrpc_error(
-                        id,
-                        -32602,
-                        &format!("understand_code: target file not found: {target}"),
-                    );
-                }
-            };
-            if !resolved.is_file() {
-                return jsonrpc_error(
-                    id,
-                    -32602,
-                    &format!("understand_code: target is not a regular file: {target}"),
-                );
-            }
-            if resolved.strip_prefix(&root).is_err() {
-                return jsonrpc_error(
-                    id,
-                    -32602,
-                    &format!("understand_code: target {target} escapes root"),
-                );
-            }
-            match explain_file(&resolved, &root, kg) {
-                Ok(summary) => file_response(id, &target, effective_kind, &summary),
-                Err(e) => understand_error_to_envelope(id, &e),
-            }
-        }
+        "file" | "module" => dispatch_file(id, &target, effective_kind, &candidate_path, &root, kg),
         "symbol" => match explain_symbol(&target, kg, &root) {
             Ok(summary) => symbol_response(id, &target, &summary),
             Err(UnderstandCodeError::NotFound(_)) => not_found_response(id, &target),
@@ -983,6 +877,140 @@ pub fn handle_understand_code(
             -32602,
             "understand_code: `arguments.kind` must be one of \"file\", \"symbol\", or \"module\"",
         ),
+    }
+}
+
+/// Parse + validate `arguments.target`.  Returns the non-empty string
+/// on success, or a pre-built `-32602` JSON-RPC error envelope on
+/// failure.
+fn parse_target(id: &Value, args: &Value) -> Result<String, Value> {
+    match args.get("target") {
+        Some(Value::String(s)) if !s.is_empty() => Ok(s.clone()),
+        _ => Err(jsonrpc_error(
+            id,
+            -32602,
+            "understand_code: `arguments.target` is required and must be a non-empty string",
+        )),
+    }
+}
+
+/// Parse + validate `arguments.kind` (optional).  Returns
+/// `Ok(None)` when absent / `null`, `Ok(Some(kind))` when valid, or a
+/// pre-built `-32602` JSON-RPC error envelope on any malformed shape.
+fn parse_kind(id: &Value, args: &Value) -> Result<Option<&'static str>, Value> {
+    match args.get("kind") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(s)) => match s.as_str() {
+            "file" => Ok(Some("file")),
+            "symbol" => Ok(Some("symbol")),
+            "module" => Ok(Some("module")),
+            _ => Err(jsonrpc_error(
+                id,
+                -32602,
+                "understand_code: `arguments.kind` must be one of \"file\", \"symbol\", or \"module\"",
+            )),
+        },
+        Some(_) => Err(jsonrpc_error(
+            id,
+            -32602,
+            "understand_code: `arguments.kind` must be a string (or omitted/null)",
+        )),
+    }
+}
+
+/// Parse + validate `arguments.root` (optional).  Falls back to
+/// `std::env::current_dir` when absent / `null` / empty.  The
+/// resolved path is canonicalised and must point at an existing
+/// directory.  Returns a pre-built JSON-RPC error envelope on failure.
+fn parse_root(id: &Value, args: &Value) -> Result<PathBuf, Value> {
+    let raw: PathBuf = match args.get("root") {
+        None | Some(Value::Null) => match std::env::current_dir() {
+            Ok(d) => d,
+            Err(e) => {
+                return Err(jsonrpc_error(
+                    id,
+                    -32603,
+                    &format!("understand_code: could not resolve current_dir: {e}"),
+                ));
+            }
+        },
+        Some(Value::String(s)) if s.is_empty() => match std::env::current_dir() {
+            Ok(d) => d,
+            Err(e) => {
+                return Err(jsonrpc_error(
+                    id,
+                    -32603,
+                    &format!("understand_code: could not resolve current_dir: {e}"),
+                ));
+            }
+        },
+        Some(Value::String(s)) => PathBuf::from(s),
+        Some(_) => {
+            return Err(jsonrpc_error(
+                id,
+                -32602,
+                "understand_code: `arguments.root` must be a string (or omitted/null)",
+            ));
+        }
+    };
+    let Ok(root) = raw.canonicalize() else {
+        return Err(jsonrpc_error(
+            id,
+            -32602,
+            &format!(
+                "understand_code: `arguments.root` does not exist: {}",
+                raw.display()
+            ),
+        ));
+    };
+    if !root.is_dir() {
+        return Err(jsonrpc_error(
+            id,
+            -32602,
+            &format!(
+                "understand_code: `arguments.root` is not a directory: {}",
+                root.display()
+            ),
+        ));
+    }
+    Ok(root)
+}
+
+/// Handle file/module mode: resolve and canonicalise the candidate
+/// path, reject if not a regular file or if it escapes `root`, then
+/// call [`explain_file`].
+fn dispatch_file(
+    id: &Value,
+    target: &str,
+    effective_kind: &str,
+    candidate_path: &Path,
+    root: &Path,
+    kg: &Arc<Mutex<KnowledgeGraph>>,
+) -> Value {
+    let Ok(resolved) = candidate_path.canonicalize() else {
+        return jsonrpc_error(
+            id,
+            -32602,
+            &format!("understand_code: target file not found: {target}"),
+        );
+    };
+    if !resolved.is_file() {
+        return jsonrpc_error(
+            id,
+            -32602,
+            &format!("understand_code: target is not a regular file: {target}"),
+        );
+    }
+    if resolved.strip_prefix(root).is_err() {
+        return jsonrpc_error(
+            id,
+            -32602,
+            &format!("understand_code: target {target} escapes root"),
+        );
+    }
+    match explain_file(&resolved, root, kg) {
+        Ok(summary) => file_response(id, target, effective_kind, &summary),
+        Err(e) => understand_error_to_envelope(id, &e),
     }
 }
 
