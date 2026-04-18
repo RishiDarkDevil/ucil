@@ -17,6 +17,7 @@
 #![deny(rustdoc::broken_intra_doc_links)]
 
 pub mod bridge;
+pub mod call_hierarchy;
 pub mod diagnostics;
 pub mod quality_pipeline;
 pub mod types;
@@ -24,6 +25,10 @@ pub mod types;
 // ── Re-exports ────────────────────────────────────────────────────────────────
 
 pub use bridge::{BridgeError, LspDiagnosticsBridge};
+pub use call_hierarchy::{
+    persist_call_hierarchy_incoming, persist_call_hierarchy_outgoing,
+    persist_type_hierarchy_supertypes, symbol_kind_to_entity_kind, CallHierarchyError,
+};
 pub use diagnostics::{
     DiagnosticsClient, DiagnosticsClientError, SerenaClient, LSP_REQUEST_TIMEOUT_MS,
 };
