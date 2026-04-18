@@ -595,3 +595,44 @@ async fn test_hook_event_source_is_distinct() {
     // two detection paths for the same path — §14 lines 1024-1025.
     assert_ne!(notify_event.source, hook_event.source);
 }
+
+#[cfg(test)]
+#[tokio::test(flavor = "multi_thread")]
+async fn test_watcher_shutdown_is_clean() {
+    let tempdir = tempfile::TempDir::new().expect("create tempdir");
+    let (tx, mut rx) = mpsc::channel::<FileEvent>(32);
+
+    {
+        let _watcher = FileWatcher::new(tempdir.path(), tx).expect("create watcher");
+        // Let notify register.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        // Watcher drops here.
+    }
+
+    // After the watcher drops, its upstream `notify-debouncer-full`
+    // backend stops the event thread (via its own `Drop` impl). Give
+    // the runtime a moment to quiesce, then write to the file.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let path = tempdir.path().join("after-drop.txt");
+    std::fs::write(&path, b"post-shutdown").expect("write");
+
+    // Shutdown is "clean" if EITHER:
+    //   (a) the receiver returns `None` (sender side was the watcher's
+    //       clone and the forwarder task has terminated), OR
+    //   (b) no new event is observed within 500 ms (the watcher is
+    //       quiescent; no phantom forwards).
+    // Both outcomes are valid — document the disjunction so a future
+    // platform change that tips the balance one way doesn't require a
+    // test rewrite. Any `Ok(Some(_))` means the forwarder is still
+    // alive after drop — a real regression.
+    let outcome = tokio::time::timeout(Duration::from_millis(500), rx.recv()).await;
+    if let Ok(Some(ev)) = outcome {
+        panic!(
+            "received unexpected event after watcher drop: {ev:?} — \
+             debouncer or forwarder is still alive"
+        );
+    }
+    // Reaching here means either:
+    //   - `Ok(None)` — channel closed (ideal), OR
+    //   - `Err(_)`   — 500 ms quiet (acceptable).
+}
