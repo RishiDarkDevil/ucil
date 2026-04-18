@@ -2,8 +2,8 @@
 //!
 //! This module introduces the minimal Salsa-based dependency DAG required
 //! by master-plan §10 (daemon architecture).  It wires one tracked input
-//! ([`FileRevision`]) to two tracked query functions ([`symbol_count`] and
-//! [`dependent_metric`]) so the compiler, rustdoc, and the unit-test suite
+//! ([`FileRevision`]) to two tracked query functions ([`symbol_count()`] and
+//! [`dependent_metric()`]) so the compiler, rustdoc, and the unit-test suite
 //! can all verify the three invariants the Week-3 feature card demands:
 //!
 //! 1. **Memoisation** — two reads of the same input do not re-execute the
