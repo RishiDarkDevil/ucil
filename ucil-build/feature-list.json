@@ -461,10 +461,10 @@
       "dependencies": [
         "P1-W2-F05"
       ],
-      "passes": false,
-      "last_verified_ts": null,
-      "last_verified_by": null,
-      "last_verified_commit": null,
+      "passes": true,
+      "last_verified_ts": "2026-04-18T06:03:50Z",
+      "last_verified_by": "verifier-798c6503-8182-420e-9ee5-f6b17ff71ca6",
+      "last_verified_commit": "22db0c26dd6280a8d3cb3101ad872dd48ae01a76",
       "attempts": 0,
       "blocked_reason": null
     },
@@ -793,10 +793,10 @@
       "dependencies": [
         "P1-W2-F05"
       ],
-      "passes": false,
-      "last_verified_ts": null,
-      "last_verified_by": null,
-      "last_verified_commit": null,
+      "passes": true,
+      "last_verified_ts": "2026-04-18T06:03:54Z",
+      "last_verified_by": "verifier-798c6503-8182-420e-9ee5-f6b17ff71ca6",
+      "last_verified_commit": "22db0c26dd6280a8d3cb3101ad872dd48ae01a76",
       "attempts": 0,
       "blocked_reason": null
     },
