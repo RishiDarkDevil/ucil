@@ -1,53 +1,15 @@
 # Coverage Gate — ucil-treesitter
 
-- **Verdict**: PASS
+- **Verdict**: FAIL
 - **Min line coverage**: 85%
 - **Min branch coverage**: 75%
-- **Generated**: 2026-04-18T20:25:48Z
+- **Generated**: 2026-04-18T20:34:20Z
 
-## Summary
-
-| Metric       | Value |
-|--------------|-------|
-| Line         | 89.48374760994264% (floor 85%) |
-| Branch       | _unavailable (toolchain)_ |
-
-## Raw JSON
+`cargo llvm-cov report` failed after profraw prune. Tail of log:
 
 ```
-{
-  "branches": {
-    "count": 0,
-    "covered": 0,
-    "notcovered": 0,
-    "percent": 0
-  },
-  "functions": {
-    "count": 159,
-    "covered": 144,
-    "percent": 90.56603773584906
-  },
-  "instantiations": {
-    "count": 238,
-    "covered": 182,
-    "percent": 76.47058823529412
-  },
-  "lines": {
-    "count": 1569,
-    "covered": 1404,
-    "percent": 89.48374760994264
-  },
-  "mcdc": {
-    "count": 0,
-    "covered": 0,
-    "notcovered": 0,
-    "percent": 0
-  },
-  "regions": {
-    "count": 2787,
-    "covered": 2525,
-    "notcovered": 262,
-    "percent": 90.59921062073914
-  }
-}
+warning: /home/rishidarkdevil/Desktop/ucil/target/ucil-2669594-4475060405275049803_26.profraw: invalid instrumentation profile data (file header is corrupt)
+warning: /home/rishidarkdevil/Desktop/ucil/target/ucil-2669591-4475060405275049803_23.profraw: invalid instrumentation profile data (file header is corrupt)
+error: no profile can be merged
+error: failed to merge profile data: process didn't exit successfully: `/home/rishidarkdevil/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/x86_64-unknown-linux-gnu/bin/llvm-profdata merge -sparse -f /home/rishidarkdevil/Desktop/ucil/target/ucil-profraw-list -o /home/rishidarkdevil/Desktop/ucil/target/ucil.profdata` (exit status: 1)
 ```
