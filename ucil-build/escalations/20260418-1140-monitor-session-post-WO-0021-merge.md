@@ -22,3 +22,12 @@ Triage pass-2 auto-resolved prior 1050 heartbeat (57bc98c).
 - Bucket A auto-resolve on next triage pass.
 - Left unresolved in frontmatter for stop-hook bypass.
 - Gate-incomplete expected.
+
+## Resolution
+
+Triage pass-3 force-halt (08258b5) misclassified this admin heartbeat as Bucket E
+due to pass-3 default rule. Applying rule 7g: resolve + rm .ucil-triage-pass.phase-1 + resume.sh --yes.
+
+Since filing: WO-0022 merged cleanly (69a724a, +2 features P1-W2-F06+P1-W3-F09 -> 33/234 passing).
+
+resolved: true
