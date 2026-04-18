@@ -1843,6 +1843,145 @@ fn test_upsert_relation_and_list() {
     assert!(empty.is_empty(), "absent source_id yields empty vec");
 }
 
+/// `test_get_entity_by_id` — round-trip an `Entity` through `upsert_entity`,
+/// then fetch it back by rowid via `get_entity_by_id`.  Asserts every
+/// field survives and that a rowid with no matching row returns
+/// `Ok(None)` (not an error).
+#[cfg(test)]
+#[test]
+fn test_get_entity_by_id() {
+    use tempfile::TempDir;
+
+    let tmp = TempDir::new().expect("tempdir must be creatable");
+    let mut kg = KnowledgeGraph::open(&tmp.path().join("kg.db"))
+        .expect("KnowledgeGraph::open must succeed on fresh tempfile");
+
+    let entity = Entity {
+        id: None,
+        kind: "function".to_owned(),
+        name: "resolve".to_owned(),
+        qualified_name: Some("app::dns::resolve".to_owned()),
+        file_path: "src/app/dns.rs".to_owned(),
+        start_line: Some(17),
+        end_line: Some(33),
+        signature: Some("fn resolve(host: &str) -> Ip".to_owned()),
+        doc_comment: Some("Resolve a hostname.".to_owned()),
+        language: Some("rust".to_owned()),
+        t_valid_from: Some("2026-04-18T00:00:00+00:00".to_owned()),
+        t_valid_to: None,
+        importance: 0.5,
+        source_tool: Some("tree-sitter".to_owned()),
+        source_hash: None,
+    };
+    let id = kg.upsert_entity(&entity).expect("upsert must succeed");
+
+    let fetched = kg
+        .get_entity_by_id(id)
+        .expect("get_entity_by_id must succeed")
+        .expect("row must be present after upsert");
+
+    assert_eq!(fetched.id, Some(id));
+    assert_eq!(fetched.name, entity.name);
+    assert_eq!(fetched.qualified_name, entity.qualified_name);
+    assert_eq!(fetched.file_path, entity.file_path);
+    assert_eq!(fetched.start_line, entity.start_line);
+    assert_eq!(fetched.signature, entity.signature);
+    assert_eq!(fetched.doc_comment, entity.doc_comment);
+    assert_eq!(fetched.language, entity.language);
+    assert_eq!(fetched.source_tool, entity.source_tool);
+
+    // A rowid that was never inserted returns Ok(None), not an error.
+    let missing = kg
+        .get_entity_by_id(9_999_999)
+        .expect("missing rowid must be Ok(None)");
+    assert!(
+        missing.is_none(),
+        "absent rowid must yield None, got {missing:?}",
+    );
+}
+
+/// `test_list_relations_by_target` — insert two entities and two
+/// relations targeting the same `target_id` with different
+/// `source_id`/`kind`, assert `list_relations_by_target` returns both
+/// rows in insertion order and that an unknown target yields an empty
+/// vec.
+#[cfg(test)]
+#[test]
+fn test_list_relations_by_target() {
+    use tempfile::TempDir;
+
+    let tmp = TempDir::new().expect("tempdir must be creatable");
+    let mut kg =
+        KnowledgeGraph::open(&tmp.path().join("kg.db")).expect("KnowledgeGraph::open must succeed");
+
+    let make_entity = |name: &str, qname: &str| Entity {
+        id: None,
+        kind: "function".to_owned(),
+        name: name.to_owned(),
+        qualified_name: Some(qname.to_owned()),
+        file_path: "src/caller_map.rs".to_owned(),
+        start_line: Some(1),
+        end_line: Some(10),
+        signature: None,
+        doc_comment: None,
+        language: Some("rust".to_owned()),
+        t_valid_from: Some("2026-04-18T00:00:00+00:00".to_owned()),
+        t_valid_to: None,
+        importance: 0.5,
+        source_tool: None,
+        source_hash: None,
+    };
+    let caller_a = kg
+        .upsert_entity(&make_entity("caller_a", "graph::caller_a"))
+        .expect("caller_a upsert");
+    let caller_b = kg
+        .upsert_entity(&make_entity("caller_b", "graph::caller_b"))
+        .expect("caller_b upsert");
+    let target = kg
+        .upsert_entity(&make_entity("target", "graph::target"))
+        .expect("target upsert");
+
+    let make_relation = |src: i64, kind: &str| Relation {
+        id: None,
+        source_id: src,
+        target_id: target,
+        kind: kind.to_owned(),
+        weight: 0.5,
+        t_valid_from: Some("2026-04-18T00:00:00+00:00".to_owned()),
+        t_valid_to: None,
+        source_tool: Some("tree-sitter".to_owned()),
+        source_evidence: None,
+        confidence: 0.9,
+    };
+    let rel_a = kg
+        .upsert_relation(&make_relation(caller_a, "calls"))
+        .expect("rel_a upsert");
+    let rel_b = kg
+        .upsert_relation(&make_relation(caller_b, "references"))
+        .expect("rel_b upsert");
+
+    let listed = kg
+        .list_relations_by_target(target)
+        .expect("list_relations_by_target must succeed");
+    assert_eq!(listed.len(), 2, "both inbound edges returned");
+    assert_eq!(
+        listed[0].id,
+        Some(rel_a),
+        "first row is the earliest-inserted (id ASC)",
+    );
+    assert_eq!(listed[0].source_id, caller_a);
+    assert_eq!(listed[0].kind, "calls");
+    assert_eq!(listed[1].id, Some(rel_b));
+    assert_eq!(listed[1].source_id, caller_b);
+    assert_eq!(listed[1].kind, "references");
+
+    // target with no inbound edges returns empty vec.
+    let empty = kg
+        .list_relations_by_target(9_999_999)
+        .expect("empty list must be Ok");
+    assert!(empty.is_empty(), "absent target_id yields empty vec");
+}
+
 /// `test_bi_temporal_as_of` — insert three rows for the same
 /// `qualified_name` with staggered `t_valid_from` / `t_valid_to`, query
 /// `get_entity_as_of` at different instants, assert the correct
