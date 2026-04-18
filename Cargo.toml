@@ -121,6 +121,27 @@ heed = "0.20"
 # Phase 1 Week 2 (WO-0018).
 bincode = "1.3"
 
+# In-process `ripgrep` libraries — back the `search_code` MCP tool's
+# text-search half (`P1-W5-F09`, master-plan §3.2 row 4 / §18 Phase 1
+# Week 5 line 1765).  `DEC-0009-search-code-in-process-ripgrep` picks
+# these four crates over shelling out to the `rg` binary because (a) no
+# system binary dep (phase-1 invariant #2 spirit), (b) anti-laziness
+# contract forbids mocking critical deps, (c) identical behaviour by
+# construction — `rg` itself is ~1000 lines of CLI glue on top of these
+# libraries.  Used by `ucil-daemon::text_search` (WO-0035).
+#
+# Recursive filesystem walker that respects `.gitignore`, `.ignore`,
+# hidden-file rules, and symlink cycles — the same walker `rg` uses.
+ignore = "0.4"
+# Per-file streaming searcher with bounded memory and line-by-line
+# match emission.
+grep-searcher = "0.1"
+# Regex-based `Matcher` implementation — case-smart, Unicode-aware.
+grep-regex = "0.1"
+# The `Matcher` trait the searcher consumes.  Brought in explicitly so
+# `ucil-daemon` can name the trait in its own type signatures.
+grep-matcher = "0.1"
+
 [profile.dev]
 opt-level = 0
 
