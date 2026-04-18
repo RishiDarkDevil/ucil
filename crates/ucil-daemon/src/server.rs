@@ -317,8 +317,9 @@ pub struct McpServer {
     /// Optional handle onto the bi-temporal knowledge graph populated by
     /// the `P1-W4-F04` tree-sitter → KG ingest pipeline.  When present,
     /// `tools/call` dispatches the `find_definition` tool
-    /// (`P1-W4-F05`, master-plan §3.2 row 2) to a real handler that
-    /// pulls definition + callers from the graph; when absent, the tool
+    /// (`P1-W4-F05`, master-plan §3.2 row 2) and the
+    /// `get_conventions` tool (`P1-W4-F10`, master-plan §3.2 row 7) to
+    /// real handlers that pull from the graph; when absent, each tool
     /// falls through to the `_meta.not_yet_implemented: true` stub path
     /// every other tool still uses (phase-1 invariant #9).
     pub kg: Option<Arc<Mutex<KnowledgeGraph>>>,
@@ -348,19 +349,22 @@ impl McpServer {
     }
 
     /// Construct a server that routes `find_definition` (`P1-W4-F05`)
-    /// to the real `handle_find_definition` handler backed by the
-    /// supplied knowledge graph.
+    /// **and** `get_conventions` (`P1-W4-F10`) to their real handlers
+    /// backed by the supplied knowledge graph.
     ///
     /// The handle is `Arc<Mutex<_>>` so the caller can keep a second
     /// reference (e.g. the ingest pipeline) and mutate the graph
-    /// concurrently; the handler takes the lock for the duration of a
+    /// concurrently; each handler takes the lock for the duration of a
     /// single read and releases it before encoding the response.  Every
-    /// tool **other** than `find_definition` still falls through to the
-    /// stub path — the 22-tool catalog is unchanged and phase-1
-    /// invariant #9 is preserved for the remaining 21 tools.
+    /// tool **other** than `find_definition` and `get_conventions`
+    /// still falls through to the stub path — the 22-tool catalog is
+    /// unchanged and phase-1 invariant #9 is preserved for the
+    /// remaining 20 tools.
     ///
-    /// See master-plan §3.2 row 2 (`find_definition` — go-to-definition
-    /// with full context) and §18 Phase 1 Week 4 line 1751 ("Implement
+    /// See master-plan §3.2 row 2 (`find_definition` —
+    /// go-to-definition with full context), §3.2 row 7
+    /// (`get_conventions` — project coding style, naming conventions,
+    /// patterns in use), and §18 Phase 1 Week 4 line 1751 ("Implement
     /// first working tool: `find_definition`").
     #[must_use]
     pub fn with_knowledge_graph(kg: Arc<Mutex<KnowledgeGraph>>) -> Self {
@@ -488,14 +492,20 @@ impl McpServer {
             return jsonrpc_error(id, -32602, &format!("Unknown tool: {name}"));
         }
 
-        // Route `find_definition` (P1-W4-F05) to its real handler when
-        // a KG handle is attached; every other tool — and
-        // `find_definition` when no KG is attached — falls through to
-        // the stub path so phase-1 invariant #9 is preserved for the
-        // remaining 21 tools of the §3.2 catalog.
+        // Route `find_definition` (P1-W4-F05) and `get_conventions`
+        // (P1-W4-F10) to their real handlers when a KG handle is
+        // attached; every other tool — and both of these when no KG
+        // is attached — falls through to the stub path so phase-1
+        // invariant #9 is preserved for the remaining 20 tools of the
+        // §3.2 catalog.
         if name == "find_definition" {
             if let Some(kg) = self.kg.as_ref() {
                 return Self::handle_find_definition(id, params, kg);
+            }
+        }
+        if name == "get_conventions" {
+            if let Some(kg) = self.kg.as_ref() {
+                return Self::handle_get_conventions(id, params, kg);
             }
         }
 
@@ -576,6 +586,70 @@ impl McpServer {
                 callers,
             }) => found_response(id, name, &resolution, &callers),
             Ok(FindDefinitionPayload::NotFound) => not_found_response(id, name),
+            Err(e) => jsonrpc_error(id, e.code, &e.message),
+        }
+    }
+
+    /// Handle the `get_conventions` MCP tool (`P1-W4-F10`,
+    /// master-plan §3.2 row 7 / §12.1 lines 1172-1182).
+    ///
+    /// Extracts `arguments.category` (optional, string) from `params`,
+    /// queries [`KnowledgeGraph::list_conventions`], and returns an MCP
+    /// `tools/call` envelope whose `result._meta` carries the
+    /// structured payload:
+    ///
+    /// * `tool`: `"get_conventions"`.
+    /// * `source`: `"kg"` — advertises the data lineage so downstream
+    ///   G3 (conventions) fusion layer can merge results from other
+    ///   sources (warm-tier sweep, convention-learner) without
+    ///   clobbering the cold-table path.
+    /// * `count`: length of the returned `conventions` array.
+    /// * `category`: echoes the caller's filter (string when present;
+    ///   JSON `null` when absent — the "unfiltered" marker).
+    /// * `conventions`: array of per-row JSON objects carrying every
+    ///   [`ucil_core::Convention`] column.  Empty vec when the table
+    ///   is empty or no rows match the filter — the master-plan §3.2
+    ///   row 7 "empty list if none yet extracted" contract.
+    ///
+    /// Empty result is a **non-error** response (`isError: false`,
+    /// `content[0].text == "no conventions yet"`); only a missing-or-
+    /// wrong-type `category` argument produces a JSON-RPC error.
+    /// Non-string `category` → JSON-RPC error `-32602` (invalid
+    /// params).
+    ///
+    /// Missing `category` (key absent) **and** explicit `null` are
+    /// both treated as "no filter" — the master-plan spec says
+    /// `category` is optional; MCP hosts that omit the key and hosts
+    /// that send `null` are both accepted.
+    fn handle_get_conventions(
+        id: &Value,
+        params: &Value,
+        kg: &Arc<Mutex<KnowledgeGraph>>,
+    ) -> Value {
+        let args = params
+            .get("arguments")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        // Extract `arguments.category`:
+        // * missing key / explicit JSON null → Option::None (no filter)
+        // * JSON string → Some(s)
+        // * any other type (number, bool, array, object) → -32602
+        let category: Option<String> = match args.get("category") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(s)) => Some(s.clone()),
+            Some(_) => {
+                return jsonrpc_error(
+                    id,
+                    -32602,
+                    "get_conventions: `arguments.category` must be a string (or omitted/null)",
+                );
+            }
+        };
+
+        match read_conventions(kg, category.as_deref()) {
+            Ok(conventions) => {
+                get_conventions_found_response(id, category.as_deref(), &conventions)
+            }
             Err(e) => jsonrpc_error(id, e.code, &e.message),
         }
     }
@@ -767,6 +841,104 @@ fn jsonrpc_error(id: &Value, code: i64, message: &str) -> Value {
         "jsonrpc": JSONRPC_VERSION,
         "id": id.clone(),
         "error": { "code": code, "message": message }
+    })
+}
+
+/// Internal error shape for the `get_conventions` read pipeline —
+/// mirrors [`FindDefinitionReadError`]: threads a `(code, message)`
+/// pair out of the KG-locked section so the outer handler can build
+/// the JSON-RPC error envelope with the mutex guard already released.
+#[derive(Debug)]
+struct GetConventionsReadError {
+    code: i64,
+    message: String,
+}
+
+/// Execute the knowledge-graph read that backs `get_conventions`:
+/// acquire the mutex, call [`KnowledgeGraph::list_conventions`], and
+/// release the lock before returning.
+///
+/// Kept out of the `McpServer` impl so `handle_get_conventions` stays
+/// below the `clippy::too_many_lines` threshold — the outer method
+/// owns the argument parsing and JSON envelope construction, the
+/// helper owns the mutex-lock and KG call.
+fn read_conventions(
+    kg: &Arc<Mutex<KnowledgeGraph>>,
+    category: Option<&str>,
+) -> Result<Vec<ucil_core::Convention>, GetConventionsReadError> {
+    let guard = kg.lock().map_err(|poisoned| {
+        tracing::error!("knowledge graph mutex is poisoned: {poisoned}");
+        GetConventionsReadError {
+            code: -32603,
+            message: "get_conventions: internal error (knowledge graph mutex poisoned)".to_owned(),
+        }
+    })?;
+    let rows = guard.list_conventions(category).map_err(|e| {
+        tracing::error!("list_conventions failed: {e}");
+        GetConventionsReadError {
+            code: -32603,
+            message: format!("get_conventions: list failed: {e}"),
+        }
+    })?;
+    drop(guard);
+    Ok(rows)
+}
+
+/// Project a [`ucil_core::Convention`] onto the JSON-object shape the
+/// `get_conventions` response advertises in `_meta.conventions`.
+///
+/// Every column mirrors the `conventions` table schema at
+/// master-plan §12.1 lines 1172-1182 — including the nullable
+/// `examples`, `counter_examples`, and `last_verified` columns, which
+/// are encoded as `null` when absent.
+fn convention_to_json(convention: &ucil_core::Convention) -> Value {
+    json!({
+        "id": convention.id,
+        "category": convention.category,
+        "pattern": convention.pattern,
+        "examples": convention.examples,
+        "counter_examples": convention.counter_examples,
+        "confidence": convention.confidence,
+        "evidence_count": convention.evidence_count,
+        "t_ingested_at": convention.t_ingested_at,
+        "last_verified": convention.last_verified,
+        "scope": convention.scope,
+    })
+}
+
+/// Build the JSON-RPC response envelope for a successful
+/// `get_conventions` read.  Empty `conventions` is a valid shape — the
+/// response carries `_meta.count == 0`, `_meta.conventions == []`, and
+/// `isError == false` per master-plan §3.2 row 7.
+fn get_conventions_found_response(
+    id: &Value,
+    category: Option<&str>,
+    conventions: &[ucil_core::Convention],
+) -> Value {
+    let count = conventions.len();
+    let text = if count == 0 {
+        "no conventions yet".to_owned()
+    } else {
+        format!("{count} convention{}", if count == 1 { "" } else { "s" })
+    };
+    let conventions_json: Vec<Value> = conventions.iter().map(convention_to_json).collect();
+    let category_json = category.map_or(Value::Null, |c| Value::String(c.to_owned()));
+    json!({
+        "jsonrpc": JSONRPC_VERSION,
+        "id": id.clone(),
+        "result": {
+            "_meta": {
+                "tool": "get_conventions",
+                "source": "kg",
+                "count": count,
+                "category": category_json,
+                "conventions": conventions_json,
+            },
+            "content": [
+                { "type": "text", "text": text }
+            ],
+            "isError": false
+        }
     })
 }
 
