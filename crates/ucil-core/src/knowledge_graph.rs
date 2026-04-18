@@ -1034,6 +1034,59 @@ impl KnowledgeGraph {
             Ok(id)
         })
     }
+
+    // ── WAL checkpoint (P1-W4-F02 supporting primitive) ─────────────
+    //
+    // Exposes `PRAGMA wal_checkpoint(<MODE>)` as a typed method so the
+    // merge-consolidator's sweep loop — and ad-hoc shutdown code — can
+    // bound the WAL file size without hand-building PRAGMA strings at
+    // call sites.  Routing through a typed enum also enforces the
+    // master-plan §11 line 1117 invariant that only the documented
+    // checkpoint modes are used.
+
+    /// Run `PRAGMA wal_checkpoint(<MODE>)` against the underlying
+    /// connection and return the three-tuple `(busy, log, checkpointed)`
+    /// the pragma reports — matching the `SQLite` column order.
+    ///
+    /// * `busy` — `1` if the pragma could not complete because another
+    ///   connection was writing; `0` otherwise.
+    /// * `log` — number of frames currently in the WAL file (after the
+    ///   pragma runs).
+    /// * `checkpointed` — number of frames successfully moved from the
+    ///   WAL into the main database by this call.
+    ///
+    /// `WalCheckpointMode::Truncate` additionally shrinks the WAL file
+    /// to zero bytes on success, which is the mode the scheduled sweep
+    /// uses to keep on-disk state bounded.
+    ///
+    /// # Errors
+    ///
+    /// * [`KnowledgeGraphError::Sqlite`] — the `PRAGMA` failed, the row
+    ///   shape was unexpected, or the connection was poisoned.
+    #[tracing::instrument(
+        level = "debug",
+        skip(self),
+        fields(mode = %mode.as_sql()),
+        name = "ucil.core.kg.checkpoint_wal",
+    )]
+    pub fn checkpoint_wal(
+        &self,
+        mode: WalCheckpointMode,
+    ) -> Result<(i64, i64, i64), KnowledgeGraphError> {
+        // PRAGMA wal_checkpoint cannot be bound with `?N` parameters —
+        // the mode is part of the pragma syntax — so we format the
+        // token in.  `mode.as_sql()` returns one of two hard-coded
+        // `&'static str`s so there is no injection surface.
+        let sql = format!("PRAGMA wal_checkpoint({});", mode.as_sql());
+        let tuple = self.conn.query_row(&sql, [], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })?;
+        Ok(tuple)
+    }
 }
 
 // ── Row decoders ─────────────────────────────────────────────────────────────
@@ -1788,5 +1841,90 @@ fn test_hot_staging_writes() {
     assert_eq!(
         arch_count, 1,
         "exactly one hot_architecture_deltas row inserted",
+    );
+}
+
+/// `test_wal_checkpoint_truncates` — acceptance test for the WAL
+/// checkpoint primitive that underpins the merge-consolidator's
+/// scheduled sweep (P1-W4-F02).
+///
+/// Drives the db through a real write workload so the WAL file has
+/// frames to checkpoint, then calls
+/// [`KnowledgeGraph::checkpoint_wal`] with both modes and asserts:
+///
+/// 1. `Passive` returns a non-busy tuple (`busy == 0`) — nobody else
+///    holds a write lock in a single-threaded test.
+/// 2. `Truncate` returns a non-busy tuple AND the `kg.db-wal` file on
+///    disk shrinks to zero bytes (the defining behaviour of
+///    `TRUNCATE` vs. `PASSIVE` / `FULL` / `RESTART`).
+///
+/// No mocks of rusqlite or `SQLite` — the test runs against a real
+/// tempfile-backed db.
+#[cfg(test)]
+#[test]
+fn test_wal_checkpoint_truncates() {
+    use tempfile::TempDir;
+
+    let tmp = TempDir::new().expect("tempdir must be creatable");
+    let db_path = tmp.path().join("kg.db");
+    let wal_path = tmp.path().join("kg.db-wal");
+
+    let mut kg = KnowledgeGraph::open(&db_path).expect("KnowledgeGraph::open must succeed");
+
+    // Drive a real write workload through `execute_in_transaction` so
+    // the WAL file accumulates frames.  Without any writes the WAL is
+    // already empty and a TRUNCATE checkpoint is indistinguishable
+    // from a no-op.
+    for i in 0..10 {
+        kg.execute_in_transaction(|tx| {
+            tx.execute(
+                "INSERT INTO sessions (id, agent_id, branch) \
+                 VALUES (?1, 'wal-truncate-test', 'main');",
+                rusqlite::params![format!("sess-{i:03}")],
+            )?;
+            Ok(())
+        })
+        .expect("workload insert must succeed");
+    }
+
+    // Assert the WAL exists on disk and has non-zero size.  (Ext4
+    // reports the WAL file as soon as the first write frame is
+    // appended; WAL2 / bigfile-WAL configurations still create it.)
+    let wal_size_before = std::fs::metadata(&wal_path)
+        .expect("kg.db-wal must exist after a workload")
+        .len();
+    assert!(
+        wal_size_before > 0,
+        "expected non-empty WAL before TRUNCATE checkpoint, got {wal_size_before} bytes",
+    );
+
+    // ── PASSIVE ─────────────────────────────────────────────────────
+    //
+    // Single-threaded test → no concurrent writer → `busy == 0`.
+    let (busy_p, _log_p, _ckpt_p) = kg
+        .checkpoint_wal(WalCheckpointMode::Passive)
+        .expect("PASSIVE checkpoint must succeed");
+    assert_eq!(
+        busy_p, 0,
+        "PASSIVE checkpoint must not report BUSY in a single-threaded test (got {busy_p})",
+    );
+
+    // ── TRUNCATE ────────────────────────────────────────────────────
+    //
+    // TRUNCATE is the defining behaviour: after a successful call the
+    // WAL file is zero-length on disk.
+    let (busy_t, _log_t, _ckpt_t) = kg
+        .checkpoint_wal(WalCheckpointMode::Truncate)
+        .expect("TRUNCATE checkpoint must succeed");
+    assert_eq!(
+        busy_t, 0,
+        "TRUNCATE checkpoint must not report BUSY in a single-threaded test (got {busy_t})",
+    );
+    let wal_size_after = std::fs::metadata(&wal_path)
+        .expect("kg.db-wal must still exist after TRUNCATE")
+        .len();
+    assert_eq!(
+        wal_size_after, 0,
+        "TRUNCATE must shrink kg.db-wal to 0 bytes (got {wal_size_after})",
     );
 }
