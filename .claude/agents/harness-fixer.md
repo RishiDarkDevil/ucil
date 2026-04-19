@@ -91,17 +91,73 @@ bucket-E escalation instead and halt.
 7. **Commit + push.** One commit per script. Body explains the root
    cause and the fix. No `--amend`, no force-push.
 
-## Diff budget
+## When to escalate (complexity, not line count)
 
-**120 lines of diff per run, across all files you touch.** If your
-fix is larger, write a bucket-E escalation with the investigation log
-and halt — a larger fix needs planner sign-off.
+The wrong question is "is this diff big?" The right question is
+"does fixing this need a decision nobody told me how to make?" LOC is
+a terrible proxy for complexity — a 10-line regex fix can take 4
+hours and a 200-line mechanical rewrite can take 10 minutes. Escalate
+based on the **shape** of the problem, not its size.
 
-## Iteration cap
+**Escalate (bucket-E halt) when ANY of these hold:**
 
-**3 iterations per failing script.** If script still fails after 3
-attempts, stop editing it and include the failing script in your
-final bucket-E escalation. Don't thrash.
+1. **The fix requires a design decision you weren't given.** Examples:
+   "should the coverage floor be 85% or 80%?", "pull-diagnostics or
+   push-diagnostics for pyright?", "which of three tools should we use
+   for X?". Design decisions belong to the planner or the user, not
+   you. Escalate with your options analysis.
+
+2. **You can't explain WHY the script fails** in one paragraph with
+   concrete evidence after 3+ debug iterations. If the root cause is
+   still "I'm not sure" after earnest investigation, that's a signal
+   you're missing context the user has.
+
+3. **The only fix weakens the script's semantics.** If the only way
+   to make `coverage-gate.sh` pass is to drop the 85% floor to 50%,
+   the script was asserting something real — escalate, don't weaken.
+   Same for "skip this test", "relax this timeout past the SLA",
+   "remove this invariant check".
+
+4. **The fix needs paths outside your write-scope.** If scripts/
+   changes can't work without a corresponding crates/ change, that's
+   a bucket-D escalation (planner emits a UCIL-source WO) — not a
+   bucket-B you can apply unilaterally.
+
+5. **You're thrashing.** Progress signal: each iteration reveals more
+   information (e.g. logs show a specific error, a diff narrows the
+   hypothesis). Thrashing signal: iterations produce the same error
+   without new information, or they oscillate between equivalent
+   failures. Escalate after 5 thrashing iterations. If iterations are
+   still making progress, keep going — don't let an arbitrary cap
+   halt a fix that's converging.
+
+6. **The fix depends on an external tool the user hasn't approved.**
+   If you'd need to `npm install -g X`, `pipx install Y`, or add a new
+   dependency to Cargo.toml, that's a supply-chain decision — escalate
+   with the install command + rationale.
+
+7. **The failing script is a symptom of a cross-system bug.** If
+   `diagnostics-bridge.sh` fails because UCIL's actual LSP bridge code
+   returns wrong framing, the script is correct and the UCIL source
+   is wrong — that's a bucket-D planner WO, not your fix.
+
+**Do NOT escalate** when:
+
+- The diff is "large" but every line is mechanical. A 300-LOC
+  rewrite of a placeholder script is fine if the logic is clear and
+  the write-scope is respected.
+- You're still learning about the script on iteration 2. Give the
+  investigation room. Read the code twice, run it three times, inspect
+  output carefully before giving up.
+- The fix crosses two files in your write-scope. Multi-file fixes are
+  fine; just keep each commit focused.
+
+## Iteration ceiling
+
+**5 iterations per failing script, with the progress caveat above.**
+The ceiling is a thrash-detector, not a time-budget — if you're
+converging, keep going past 5. If you hit 5 with no visible progress,
+stop editing that script and escalate it in the final summary.
 
 ## Commit style
 
