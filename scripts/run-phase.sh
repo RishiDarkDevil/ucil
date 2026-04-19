@@ -61,7 +61,35 @@ Open for human review." > "ucil-build/escalations/$(date -u +%Y%m%dT%H%M%SZ)-max
 
   # Gate check
   if scripts/gate-check.sh "$PHASE" 2>/dev/null; then
-    echo "[run-phase] Gate for phase $PHASE is GREEN — loop complete."
+    echo "[run-phase] Gate for phase $PHASE is GREEN — tagging + advancing."
+
+    # Create the phase-complete tag so the watchdog recognises this
+    # as a legitimate quiescence (see scripts/_watchdog.sh::phase_shipped).
+    # Without this tag, the watchdog treats gate-green exit as loop
+    # death and restarts run-phase in a tight loop ("flapping"), each
+    # restart exiting immediately because the gate is already green.
+    TAG="phase-${PHASE}-complete"
+    if ! git tag --list "$TAG" | grep -qx "$TAG"; then
+      git tag -a "$TAG" -m "phase ${PHASE} gate green at $(git rev-parse HEAD)" 2>/dev/null \
+        && git push origin "$TAG" 2>/dev/null \
+        || echo "[run-phase] WARN: tag push for $TAG failed (non-fatal)"
+    fi
+
+    # Advance progress.json if it's still pointing at this phase.
+    # Idempotent: if someone already bumped it past, this is a no-op.
+    CUR_PHASE=$(jq -r '.phase // empty' ucil-build/progress.json 2>/dev/null)
+    if [[ "$CUR_PHASE" == "$PHASE" ]]; then
+      NEXT_PHASE=$(( PHASE + 1 ))
+      jq --argjson np "$NEXT_PHASE" '.phase = $np' ucil-build/progress.json > /tmp/progress.tmp \
+        && mv /tmp/progress.tmp ucil-build/progress.json \
+        && git add ucil-build/progress.json \
+        && git commit -m "chore(progress): phase ${PHASE} shipped, advance to phase ${NEXT_PHASE}" 2>/dev/null \
+        && git push origin main 2>/dev/null \
+        || echo "[run-phase] WARN: progress.json advance failed (non-fatal)"
+      echo "[run-phase] phase ${PHASE} shipped — progress.json now at ${NEXT_PHASE}"
+    fi
+
+    echo "[run-phase] Loop complete. Next invocation should target phase $(jq -r '.phase' ucil-build/progress.json 2>/dev/null || echo '?')."
     exit 0
   fi
 

@@ -68,12 +68,54 @@ case "$PHASE" in
     ;;
 esac
 
-# 4. Phase-specific checks
+# 4. Phase-specific checks — with auto-invoke of harness-fixer on failure.
+#
+# When phase-N.sh fails because a `scripts/verify/*.sh` sub-check
+# errors out, we spawn the harness-fixer subagent to diagnose and patch
+# the failing scripts. After the fixer returns we re-run phase-N.sh
+# exactly once. If sub-checks still fail (or the fixer halted with an
+# escalation), we return failure.
+#
+# This closes the "harness-script bugs" gap where the normal planner →
+# executor → verifier pipeline has no path to fix harness-side code
+# because its scope is feature_ids, not shell scripts.
+#
+# Set UCIL_SKIP_HARNESS_FIXER=1 to bypass (rare; mostly for debugging
+# the fixer itself).
 PHASE_SCRIPT="scripts/gate/phase-${PHASE}.sh"
 if [[ -x "$PHASE_SCRIPT" ]]; then
   echo "-- Running phase-specific checks: $PHASE_SCRIPT"
-  if ! "$PHASE_SCRIPT"; then
+  GATE_LOG="/tmp/ucil-gate-check.log"
+  : > "$GATE_LOG"
+  if ! "$PHASE_SCRIPT" 2>&1 | tee -a "$GATE_LOG"; then
     echo "[FAIL] phase-specific checks failed"
+
+    if [[ "${UCIL_SKIP_HARNESS_FIXER:-0}" == "1" ]]; then
+      echo "[gate-check] UCIL_SKIP_HARNESS_FIXER=1 — not invoking harness-fixer"
+      exit 1
+    fi
+
+    # Only spawn fixer if at least one verify-script sub-check failed
+    # (grep the log for `[FAIL]` lines that reference a script path).
+    if grep -qE '\[FAIL\]' "$GATE_LOG"; then
+      if [[ -x scripts/run-harness-fixer.sh ]]; then
+        echo "-- Invoking harness-fixer to diagnose + patch failing scripts"
+        if scripts/run-harness-fixer.sh "$PHASE" "$GATE_LOG"; then
+          echo "-- Re-running phase-specific checks after harness-fixer"
+          : > "$GATE_LOG"
+          if "$PHASE_SCRIPT" 2>&1 | tee -a "$GATE_LOG"; then
+            echo "[OK] Gate for phase $PHASE is GREEN (post harness-fixer)"
+            exit 0
+          fi
+          echo "[FAIL] phase-specific checks still failing after harness-fixer"
+        else
+          echo "[FAIL] harness-fixer halted or errored (see ucil-build/escalations/)"
+        fi
+      else
+        echo "[WARN] scripts/run-harness-fixer.sh missing — can't self-repair"
+      fi
+    fi
+
     exit 1
   fi
 else
