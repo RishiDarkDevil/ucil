@@ -1,0 +1,49 @@
+---
+timestamp: 2026-04-25T15:56:31Z
+type: watchdog-flapping
+severity: high
+blocks_loop: true
+requires_planner_action: true
+---
+
+# UCIL watchdog restart loop detected
+
+The autonomous loop died and was restarted 3 times inside
+3600s. Probable cause: a consistent crash (not a transient
+kill). Watchdog has exited; fix the root cause and re-invoke via
+`scripts/install-watchdog.sh` or `scripts/_watchdog.sh &` once the
+loop runs clean for >1h.
+
+Tail of `ucil-build/telemetry/watchdog.log`:
+```
+2026-04-25T15:14:03Z [watchdog] invoking scripts/resume.sh --yes
+2026-04-25T15:14:03Z [watchdog] spawned resume.sh (pid 99265)
+Already up to date.
+
+=== Resume summary ===
+Phase:                  2
+Features passing:       48 / 234
+Work-orders on disk:    41
+Unresolved escalations: 443
+Open rejections:        8
+Orphans killed:         0
+Worktrees auto-stashed: 0
+Corrupt WOs quarantined:0
+Main HEAD:              14e68fb
+
+Starting ./scripts/run-phase.sh 2
+2026-04-25T15:15:03Z [watchdog] loop appears dead; entering 300s quiesce before restart
+2026-04-25T15:20:04Z [watchdog] MAX_RESTARTS (3) hit within 3600s — escalating and exiting
+2026-04-25T15:21:05Z [watchdog] loop appears dead; entering 300s quiesce before restart
+2026-04-25T15:26:06Z [watchdog] MAX_RESTARTS (3) hit within 3600s — escalating and exiting
+2026-04-25T15:27:09Z [watchdog] loop appears dead; entering 300s quiesce before restart
+2026-04-25T15:32:10Z [watchdog] MAX_RESTARTS (3) hit within 3600s — escalating and exiting
+2026-04-25T15:33:15Z [watchdog] loop appears dead; entering 300s quiesce before restart
+2026-04-25T15:38:15Z [watchdog] MAX_RESTARTS (3) hit within 3600s — escalating and exiting
+2026-04-25T15:39:21Z [watchdog] loop appears dead; entering 300s quiesce before restart
+2026-04-25T15:44:22Z [watchdog] MAX_RESTARTS (3) hit within 3600s — escalating and exiting
+2026-04-25T15:45:27Z [watchdog] loop appears dead; entering 300s quiesce before restart
+2026-04-25T15:50:28Z [watchdog] MAX_RESTARTS (3) hit within 3600s — escalating and exiting
+2026-04-25T15:51:31Z [watchdog] loop appears dead; entering 300s quiesce before restart
+2026-04-25T15:56:31Z [watchdog] MAX_RESTARTS (3) hit within 3600s — escalating and exiting
+```
