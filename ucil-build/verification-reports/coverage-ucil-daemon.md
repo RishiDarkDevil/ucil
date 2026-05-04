@@ -3,8 +3,8 @@
 - **Verdict**: PASS
 - **Min line coverage**: 85%
 - **Min branch coverage**: 75%
-- **Generated**: 2026-05-05T00:50:00Z
-- **Method**: documented `env -u RUSTC_WRAPPER cargo llvm-cov` workaround (carried through WO-0039 retry-1 / WO-0040 / WO-0041 / WO-0042 / WO-0043). Tracking escalation: `ucil-build/escalations/20260419-0152-monitor-phase1-gate-red-integration-gaps.md`.
+- **Generated**: 2026-05-05T01:35:00Z
+- **Method**: documented `env -u RUSTC_WRAPPER cargo llvm-cov` workaround (carried through WO-0039 retry-1 / WO-0040 / WO-0041 / WO-0042 / WO-0043 / WO-0044 / WO-0045). Tracking escalation: `ucil-build/escalations/20260419-0152-monitor-phase1-gate-red-integration-gaps.md`.
 
 ## Summary
 
