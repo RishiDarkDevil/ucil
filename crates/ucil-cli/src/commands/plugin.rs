@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
 use clap::{Args, Subcommand, ValueEnum};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use walkdir::WalkDir;
 
@@ -57,13 +57,31 @@ pub struct PluginArgs {
     pub command: PluginSubcommand,
 }
 
-/// `ucil plugin <subcommand>` — subcommand dispatcher.
+/// `ucil plugin <subcommand>` — subcommand dispatcher (master-plan §16
+/// line 1580: `plugin list | install <n> | uninstall <n> | enable <n> |
+/// disable <n> | reload`).
 #[derive(Subcommand, Debug)]
 pub enum PluginSubcommand {
     /// Spawn the named plugin's MCP server, probe `tools/list`, and
-    /// report back.  Does NOT register the plugin into the running
-    /// daemon — that happens via `ucil plugin enable` in a later WO.
+    /// report back. Persists `installed=true` to the state file on
+    /// success so subsequent `list` reflects the install.
     Install(InstallArgs),
+    /// Enumerate every `plugin.toml` under `plugins_dir` and join with
+    /// the per-plugin state file. Manifests with no state row default
+    /// to `installed=false, enabled=false`.
+    List(ListArgs),
+    /// Mark the named plugin as `installed=false` in the state file.
+    /// Does NOT remove the manifest from disk — the operator decides
+    /// when to delete the directory.
+    Uninstall(UninstallArgs),
+    /// Mark the named plugin as `enabled=true` in the state file.
+    Enable(EnableArgs),
+    /// Mark the named plugin as `enabled=false` in the state file.
+    Disable(DisableArgs),
+    /// Re-run the health probe against the named plugin and persist
+    /// `installed=true` on success. In-process re-probe; the daemon
+    /// has no IPC reload channel in Phase 2.
+    Reload(ReloadArgs),
 }
 
 /// Arguments for `ucil plugin install <name>`.
@@ -89,6 +107,101 @@ pub struct InstallArgs {
     #[arg(long, default_value_t = 180_000)]
     pub timeout_ms: u64,
 
+    /// How to format the CLI's stdout report.
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    pub format: OutputFormat,
+}
+
+/// Arguments for `ucil plugin list`.
+///
+/// # JSON output
+///
+/// `{ "plugins": [{ "name": "...", "installed": bool, "enabled":
+/// bool }, ...] }` — one element per discovered manifest, joined with
+/// the persisted state file.
+#[derive(Args, Debug)]
+pub struct ListArgs {
+    /// Directory to search for `plugin.toml` manifests (max-depth 3,
+    /// matching `install`).
+    #[arg(long, default_value = "./plugins")]
+    pub plugins_dir: PathBuf,
+    /// How to format the CLI's stdout report.
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    pub format: OutputFormat,
+}
+
+/// Arguments for `ucil plugin uninstall <name>`.
+///
+/// # JSON output
+///
+/// `{ "name": "...", "status": "uninstalled", "installed": false,
+/// "enabled": bool }`
+#[derive(Args, Debug)]
+pub struct UninstallArgs {
+    /// Plugin identifier (the `[plugin] name` field of the target
+    /// manifest).
+    pub name: String,
+    /// Directory holding the state file.
+    #[arg(long, default_value = "./plugins")]
+    pub plugins_dir: PathBuf,
+    /// How to format the CLI's stdout report.
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    pub format: OutputFormat,
+}
+
+/// Arguments for `ucil plugin enable <name>`.
+///
+/// # JSON output
+///
+/// `{ "name": "...", "status": "enabled", "enabled": true,
+/// "installed": bool }`
+#[derive(Args, Debug)]
+pub struct EnableArgs {
+    /// Plugin identifier.
+    pub name: String,
+    /// Directory holding the state file.
+    #[arg(long, default_value = "./plugins")]
+    pub plugins_dir: PathBuf,
+    /// How to format the CLI's stdout report.
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    pub format: OutputFormat,
+}
+
+/// Arguments for `ucil plugin disable <name>`.
+///
+/// # JSON output
+///
+/// `{ "name": "...", "status": "disabled", "enabled": false,
+/// "installed": bool }`
+#[derive(Args, Debug)]
+pub struct DisableArgs {
+    /// Plugin identifier.
+    pub name: String,
+    /// Directory holding the state file.
+    #[arg(long, default_value = "./plugins")]
+    pub plugins_dir: PathBuf,
+    /// How to format the CLI's stdout report.
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    pub format: OutputFormat,
+}
+
+/// Arguments for `ucil plugin reload <name>`.
+///
+/// # JSON output
+///
+/// `{ "name": "...", "status": "reloaded", "tool_count": <usize>,
+/// "tools": [...], "installed": true }`
+#[derive(Args, Debug)]
+pub struct ReloadArgs {
+    /// Plugin identifier.
+    pub name: String,
+    /// Directory holding the manifest index AND the state file.
+    #[arg(long, default_value = "./plugins")]
+    pub plugins_dir: PathBuf,
+    /// Timeout budget, in milliseconds, for the spawn → `tools/list`
+    /// round-trip. Same default as `install`.
+    #[arg(long, default_value_t = 180_000)]
+    pub timeout_ms: u64,
     /// How to format the CLI's stdout report.
     #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
     pub format: OutputFormat,
@@ -158,6 +271,46 @@ pub enum PluginCmdError {
         /// Number of tools reported (may be zero).
         tool_count: usize,
     },
+    /// IO error while reading or writing the plugin state file
+    /// (`<plugins_dir>/.ucil-plugin-state.toml`).
+    #[error("failed to read plugin state at {}: {source}", path.display())]
+    StateRead {
+        /// State-file path that failed.
+        path: PathBuf,
+        /// Underlying IO error.
+        #[source]
+        source: std::io::Error,
+    },
+    /// Failure parsing or serialising the plugin state file.
+    #[error("failed to (de)serialise plugin state at {}: {source}", path.display())]
+    StateFormat {
+        /// State-file path that failed.
+        path: PathBuf,
+        /// Human-readable diagnostic for the underlying TOML error.
+        #[source]
+        source: StateFormatError,
+    },
+    /// Atomic-rename step of the state-file write failed.
+    #[error("failed to write plugin state to {}: {source}", path.display())]
+    StateWrite {
+        /// State-file path that failed.
+        path: PathBuf,
+        /// Underlying IO error from the rename or temp-file write.
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+/// Wrapper error around `toml::de::Error` / `toml::ser::Error` so the
+/// outer [`PluginCmdError`] can stay one enum.
+#[derive(Debug, Error)]
+pub enum StateFormatError {
+    /// Failed to parse TOML on read.
+    #[error("invalid TOML: {0}")]
+    De(#[from] toml::de::Error),
+    /// Failed to serialise TOML on write.
+    #[error("invalid TOML: {0}")]
+    Ser(#[from] toml::ser::Error),
 }
 
 // ── JSON output shape ───────────────────────────────────────────────────────
@@ -210,6 +363,46 @@ pub async fn run_with_writer<W: Write>(args: PluginArgs, mut writer: W) -> Resul
                 .context("failed to write plugin install report")?;
             Ok(())
         }
+        PluginSubcommand::List(list) => {
+            let outcome = list_plugins(&list).await.with_context(|| {
+                format!("plugin list (plugins_dir={})", list.plugins_dir.display())
+            })?;
+            emit_list(list.format, &outcome, &mut writer)
+                .context("failed to write plugin list report")?;
+            Ok(())
+        }
+        PluginSubcommand::Uninstall(uninstall) => {
+            let outcome = uninstall_plugin(&uninstall)
+                .await
+                .with_context(|| format!("plugin uninstall `{}`", uninstall.name))?;
+            emit_state_change(uninstall.format, &outcome, &mut writer)
+                .context("failed to write plugin uninstall report")?;
+            Ok(())
+        }
+        PluginSubcommand::Enable(enable) => {
+            let outcome = enable_plugin(&enable)
+                .await
+                .with_context(|| format!("plugin enable `{}`", enable.name))?;
+            emit_state_change(enable.format, &outcome, &mut writer)
+                .context("failed to write plugin enable report")?;
+            Ok(())
+        }
+        PluginSubcommand::Disable(disable) => {
+            let outcome = disable_plugin(&disable)
+                .await
+                .with_context(|| format!("plugin disable `{}`", disable.name))?;
+            emit_state_change(disable.format, &outcome, &mut writer)
+                .context("failed to write plugin disable report")?;
+            Ok(())
+        }
+        PluginSubcommand::Reload(reload) => {
+            let outcome = reload_plugin(&reload)
+                .await
+                .with_context(|| format!("plugin reload `{}`", reload.name))?;
+            emit_reload(reload.format, &outcome, &mut writer)
+                .context("failed to write plugin reload report")?;
+            Ok(())
+        }
     }
 }
 
@@ -235,11 +428,17 @@ async fn install_plugin(args: &InstallArgs) -> Result<InstallOutcome, PluginCmdE
 
     let tool_count = health.tools.len();
     match health.status {
-        HealthStatus::Ok if tool_count >= 1 => Ok(InstallOutcome {
-            name: health.name,
-            tools: health.tools,
-            status_label: "ok",
-        }),
+        HealthStatus::Ok if tool_count >= 1 => {
+            mutate_state(&args.plugins_dir, &health.name, |row| {
+                row.installed = true;
+            })
+            .await?;
+            Ok(InstallOutcome {
+                name: health.name,
+                tools: health.tools,
+                status_label: "ok",
+            })
+        }
         HealthStatus::Ok => Err(PluginCmdError::Degraded {
             name: health.name,
             message: "plugin reported Ok status but zero tools".to_owned(),
@@ -257,24 +456,7 @@ async fn install_plugin(args: &InstallArgs) -> Result<InstallOutcome, PluginCmdE
 /// files and return the one whose `[plugin] name` equals `name`.
 fn resolve_manifest(name: &str, plugins_dir: &Path) -> Result<PluginManifest, PluginCmdError> {
     let mut matches: Vec<(PathBuf, PluginManifest)> = Vec::new();
-    for entry in WalkDir::new(plugins_dir)
-        .max_depth(3)
-        .follow_links(false)
-        .into_iter()
-        .filter_map(std::result::Result::ok)
-    {
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        if entry.file_name() != "plugin.toml" {
-            continue;
-        }
-        let path = entry.path().to_path_buf();
-        let manifest =
-            PluginManifest::from_path(&path).map_err(|source| PluginCmdError::ManifestRead {
-                path: path.clone(),
-                source: Box::new(source),
-            })?;
+    for (path, manifest) in walk_manifests(plugins_dir)? {
         if manifest.plugin.name == name {
             matches.push((path, manifest));
         }
@@ -293,6 +475,161 @@ fn resolve_manifest(name: &str, plugins_dir: &Path) -> Result<PluginManifest, Pl
         _ => Err(PluginCmdError::Ambiguous {
             name: name.to_owned(),
             paths: matches.into_iter().map(|(p, _)| p).collect(),
+        }),
+    }
+}
+
+/// Walk `plugins_dir` (max depth 3) and yield every `plugin.toml`
+/// found, parsed into a `PluginManifest`. Shared by `resolve_manifest`
+/// (`install` / `reload`) and `list_plugins`.
+fn walk_manifests(plugins_dir: &Path) -> Result<Vec<(PathBuf, PluginManifest)>, PluginCmdError> {
+    let mut out: Vec<(PathBuf, PluginManifest)> = Vec::new();
+    for entry in WalkDir::new(plugins_dir)
+        .max_depth(3)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(std::result::Result::ok)
+    {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        if entry.file_name() != "plugin.toml" {
+            continue;
+        }
+        let path = entry.path().to_path_buf();
+        let manifest =
+            PluginManifest::from_path(&path).map_err(|source| PluginCmdError::ManifestRead {
+                path: path.clone(),
+                source: Box::new(source),
+            })?;
+        out.push((path, manifest));
+    }
+    Ok(out)
+}
+
+// ── `list` core ─────────────────────────────────────────────────────────────
+
+/// Runtime result of a successful `list` — one row per discovered
+/// manifest joined with the persisted state.
+struct ListOutcome {
+    rows: Vec<PluginStateEntry>,
+}
+
+async fn list_plugins(args: &ListArgs) -> Result<ListOutcome, PluginCmdError> {
+    let manifests = walk_manifests(&args.plugins_dir)?;
+    let state = read_state(&args.plugins_dir).await?;
+
+    let mut rows: Vec<PluginStateEntry> = Vec::with_capacity(manifests.len());
+    for (_, manifest) in manifests {
+        let name = manifest.plugin.name;
+        let row = state
+            .iter()
+            .find(|e| e.name == name)
+            .cloned()
+            .unwrap_or_else(|| PluginStateEntry {
+                name: name.clone(),
+                installed: false,
+                enabled: false,
+            });
+        rows.push(row);
+    }
+    rows.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(ListOutcome { rows })
+}
+
+// ── State-mutating subcommands ──────────────────────────────────────────────
+
+/// Result of a state-only mutation (`uninstall` / `enable` / `disable`).
+/// Holds the post-mutation row plus the static status label so emission
+/// is parameter-free.
+#[derive(Debug, Clone)]
+struct StateChangeOutcome {
+    entry: PluginStateEntry,
+    status_label: &'static str,
+}
+
+async fn uninstall_plugin(args: &UninstallArgs) -> Result<StateChangeOutcome, PluginCmdError> {
+    let entry = mutate_state(&args.plugins_dir, &args.name, |row| {
+        row.installed = false;
+    })
+    .await?;
+    Ok(StateChangeOutcome {
+        entry,
+        status_label: "uninstalled",
+    })
+}
+
+async fn enable_plugin(args: &EnableArgs) -> Result<StateChangeOutcome, PluginCmdError> {
+    let entry = mutate_state(&args.plugins_dir, &args.name, |row| {
+        row.enabled = true;
+    })
+    .await?;
+    Ok(StateChangeOutcome {
+        entry,
+        status_label: "enabled",
+    })
+}
+
+async fn disable_plugin(args: &DisableArgs) -> Result<StateChangeOutcome, PluginCmdError> {
+    let entry = mutate_state(&args.plugins_dir, &args.name, |row| {
+        row.enabled = false;
+    })
+    .await?;
+    Ok(StateChangeOutcome {
+        entry,
+        status_label: "disabled",
+    })
+}
+
+// ── `reload` core ───────────────────────────────────────────────────────────
+
+/// Runtime result of a successful `reload` — the freshly-probed tool
+/// list plus the post-mutation state row. `tool_count` is on the
+/// outcome explicitly so the verifier mutation check (replace body
+/// with `Ok(ReloadOutcome { tool_count: 0, .. })`) trips a tight
+/// assertion.
+#[derive(Debug, Clone, Default)]
+struct ReloadOutcome {
+    name: String,
+    tools: Vec<String>,
+    tool_count: usize,
+    installed: bool,
+    enabled: bool,
+}
+
+async fn reload_plugin(args: &ReloadArgs) -> Result<ReloadOutcome, PluginCmdError> {
+    let manifest = resolve_manifest(&args.name, &args.plugins_dir)?;
+    let health = PluginManager::health_check_with_timeout(&manifest, args.timeout_ms)
+        .await
+        .map_err(|source| PluginCmdError::Health {
+            name: manifest.plugin.name.clone(),
+            source: Box::new(source),
+        })?;
+
+    let tool_count = health.tools.len();
+    match health.status {
+        HealthStatus::Ok if tool_count >= 1 => {
+            let entry = mutate_state(&args.plugins_dir, &health.name, |row| {
+                row.installed = true;
+            })
+            .await?;
+            Ok(ReloadOutcome {
+                name: health.name,
+                tools: health.tools,
+                tool_count,
+                installed: entry.installed,
+                enabled: entry.enabled,
+            })
+        }
+        HealthStatus::Ok => Err(PluginCmdError::Degraded {
+            name: health.name,
+            message: "plugin reported Ok status but zero tools".to_owned(),
+            tool_count,
+        }),
+        HealthStatus::Degraded(message) => Err(PluginCmdError::Degraded {
+            name: health.name,
+            message,
+            tool_count,
         }),
     }
 }
@@ -333,6 +670,279 @@ fn emit_json<W: Write>(outcome: &InstallOutcome, writer: &mut W) -> std::io::Res
     serde_json::to_writer_pretty(&mut *writer, &report).map_err(std::io::Error::other)?;
     writeln!(writer)?;
     Ok(())
+}
+
+// ── List emission ───────────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize)]
+struct ListReport<'a> {
+    plugins: &'a [PluginStateEntry],
+}
+
+fn emit_list<W: Write>(
+    format: OutputFormat,
+    outcome: &ListOutcome,
+    writer: &mut W,
+) -> std::io::Result<()> {
+    match format {
+        OutputFormat::Text => emit_list_text(outcome, writer),
+        OutputFormat::Json => emit_list_json(outcome, writer),
+    }
+}
+
+fn emit_list_text<W: Write>(outcome: &ListOutcome, writer: &mut W) -> std::io::Result<()> {
+    writeln!(writer, "plugins ({} discovered):", outcome.rows.len())?;
+    for row in &outcome.rows {
+        writeln!(
+            writer,
+            "  - {} (installed={}, enabled={})",
+            row.name, row.installed, row.enabled
+        )?;
+    }
+    Ok(())
+}
+
+fn emit_list_json<W: Write>(outcome: &ListOutcome, writer: &mut W) -> std::io::Result<()> {
+    let report = ListReport {
+        plugins: &outcome.rows,
+    };
+    serde_json::to_writer_pretty(&mut *writer, &report).map_err(std::io::Error::other)?;
+    writeln!(writer)?;
+    Ok(())
+}
+
+// ── State-change emission ──────────────────────────────────────────────────
+
+#[derive(Debug, Serialize)]
+struct StateChangeReport<'a> {
+    name: &'a str,
+    status: &'a str,
+    installed: bool,
+    enabled: bool,
+}
+
+fn emit_state_change<W: Write>(
+    format: OutputFormat,
+    outcome: &StateChangeOutcome,
+    writer: &mut W,
+) -> std::io::Result<()> {
+    match format {
+        OutputFormat::Text => emit_state_change_text(outcome, writer),
+        OutputFormat::Json => emit_state_change_json(outcome, writer),
+    }
+}
+
+fn emit_state_change_text<W: Write>(
+    outcome: &StateChangeOutcome,
+    writer: &mut W,
+) -> std::io::Result<()> {
+    writeln!(
+        writer,
+        "plugin `{}` {} (installed={}, enabled={})",
+        outcome.entry.name, outcome.status_label, outcome.entry.installed, outcome.entry.enabled
+    )
+}
+
+fn emit_state_change_json<W: Write>(
+    outcome: &StateChangeOutcome,
+    writer: &mut W,
+) -> std::io::Result<()> {
+    let report = StateChangeReport {
+        name: &outcome.entry.name,
+        status: outcome.status_label,
+        installed: outcome.entry.installed,
+        enabled: outcome.entry.enabled,
+    };
+    serde_json::to_writer_pretty(&mut *writer, &report).map_err(std::io::Error::other)?;
+    writeln!(writer)?;
+    Ok(())
+}
+
+// ── Reload emission ────────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize)]
+struct ReloadReport<'a> {
+    name: &'a str,
+    status: &'a str,
+    tools: &'a [String],
+    tool_count: usize,
+    installed: bool,
+    enabled: bool,
+}
+
+fn emit_reload<W: Write>(
+    format: OutputFormat,
+    outcome: &ReloadOutcome,
+    writer: &mut W,
+) -> std::io::Result<()> {
+    match format {
+        OutputFormat::Text => emit_reload_text(outcome, writer),
+        OutputFormat::Json => emit_reload_json(outcome, writer),
+    }
+}
+
+fn emit_reload_text<W: Write>(outcome: &ReloadOutcome, writer: &mut W) -> std::io::Result<()> {
+    writeln!(
+        writer,
+        "plugin `{}` RELOADED: {} tools (installed={}, enabled={})",
+        outcome.name, outcome.tool_count, outcome.installed, outcome.enabled
+    )?;
+    for tool in &outcome.tools {
+        writeln!(writer, "  - {tool}")?;
+    }
+    Ok(())
+}
+
+fn emit_reload_json<W: Write>(outcome: &ReloadOutcome, writer: &mut W) -> std::io::Result<()> {
+    let report = ReloadReport {
+        name: &outcome.name,
+        status: "reloaded",
+        tools: &outcome.tools,
+        tool_count: outcome.tool_count,
+        installed: outcome.installed,
+        enabled: outcome.enabled,
+    };
+    serde_json::to_writer_pretty(&mut *writer, &report).map_err(std::io::Error::other)?;
+    writeln!(writer)?;
+    Ok(())
+}
+
+// ── State persistence ───────────────────────────────────────────────────────
+//
+// Per-plugin `installed` / `enabled` flags are persisted in a single
+// TOML file at `<plugins_dir>/.ucil-plugin-state.toml`. Writes go
+// through tempfile-then-rename so a concurrent `list` either sees the
+// old state or the new state — never a torn read. The file is created
+// lazily on first mutation; absence is equivalent to `Vec::new()`.
+
+/// One row of the plugin state file. Frozen field set so the on-disk
+/// layout is stable across releases. Adding a field is a breaking
+/// change requiring an ADR + a tombstone-compatible migration.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+struct PluginStateEntry {
+    /// Plugin name from the manifest's `[plugin] name` field.
+    name: String,
+    /// Whether the operator has installed the plugin
+    /// (manifest passed health probe via `install` / `reload`).
+    #[serde(default)]
+    installed: bool,
+    /// Whether the operator has enabled the plugin (the daemon should
+    /// route activation rules through it). Disabled plugins remain on
+    /// disk but UCIL skips them at runtime.
+    #[serde(default)]
+    enabled: bool,
+}
+
+/// On-disk wrapper over the state file. Lives only for the lifetime of
+/// a (de)serialise round-trip — callers operate on the inner
+/// `Vec<PluginStateEntry>`.
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct PluginStateFile {
+    #[serde(default)]
+    plugins: Vec<PluginStateEntry>,
+}
+
+/// Path to the plugin state file relative to `plugins_dir`.
+fn state_file_path(plugins_dir: &Path) -> PathBuf {
+    plugins_dir.join(".ucil-plugin-state.toml")
+}
+
+/// Read the plugin state file. Returns `Ok(vec![])` when the file is
+/// absent so first-mutation flows do not require pre-creation.
+async fn read_state(plugins_dir: &Path) -> Result<Vec<PluginStateEntry>, PluginCmdError> {
+    let path = state_file_path(plugins_dir);
+    let bytes = match tokio::fs::read(&path).await {
+        Ok(bytes) => bytes,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => {
+            return Err(PluginCmdError::StateRead {
+                path: path.clone(),
+                source: err,
+            });
+        }
+    };
+    let text = std::str::from_utf8(&bytes).map_err(|err| PluginCmdError::StateRead {
+        path: path.clone(),
+        source: std::io::Error::new(std::io::ErrorKind::InvalidData, err),
+    })?;
+    let parsed: PluginStateFile =
+        toml::from_str(text).map_err(|err| PluginCmdError::StateFormat {
+            path: path.clone(),
+            source: StateFormatError::De(err),
+        })?;
+    Ok(parsed.plugins)
+}
+
+/// Write the plugin state file atomically: serialise to TOML, write to
+/// a sibling tempfile, then `tokio::fs::rename` so a concurrent reader
+/// either sees the old file or the new file — never a half-written one.
+/// Creates `plugins_dir` if it does not yet exist (mirrors the
+/// `WalkDir`-tolerant behaviour of `resolve_manifest`).
+async fn write_state(
+    plugins_dir: &Path,
+    entries: &[PluginStateEntry],
+) -> Result<(), PluginCmdError> {
+    let path = state_file_path(plugins_dir);
+    let file = PluginStateFile {
+        plugins: entries.to_vec(),
+    };
+    let body = toml::to_string_pretty(&file).map_err(|err| PluginCmdError::StateFormat {
+        path: path.clone(),
+        source: StateFormatError::Ser(err),
+    })?;
+
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|err| PluginCmdError::StateWrite {
+                    path: path.clone(),
+                    source: err,
+                })?;
+        }
+    }
+
+    let tmp_path = path.with_extension("toml.tmp");
+    tokio::fs::write(&tmp_path, body.as_bytes())
+        .await
+        .map_err(|err| PluginCmdError::StateWrite {
+            path: tmp_path.clone(),
+            source: err,
+        })?;
+    tokio::fs::rename(&tmp_path, &path)
+        .await
+        .map_err(|err| PluginCmdError::StateWrite {
+            path: path.clone(),
+            source: err,
+        })?;
+    Ok(())
+}
+
+/// Apply a mutation to the named plugin's state row. Adds a new row if
+/// none exists, otherwise updates in place. Returns the resulting row
+/// for downstream JSON / text emission.
+async fn mutate_state(
+    plugins_dir: &Path,
+    name: &str,
+    mutate: impl FnOnce(&mut PluginStateEntry),
+) -> Result<PluginStateEntry, PluginCmdError> {
+    let mut entries = read_state(plugins_dir).await?;
+    let idx = entries.iter().position(|e| e.name == name);
+    let updated = if let Some(i) = idx {
+        mutate(&mut entries[i]);
+        entries[i].clone()
+    } else {
+        let mut row = PluginStateEntry {
+            name: name.to_owned(),
+            installed: false,
+            enabled: false,
+        };
+        mutate(&mut row);
+        entries.push(row.clone());
+        row
+    };
+    write_state(plugins_dir, &entries).await?;
+    Ok(updated)
 }
 
 // ── Branch parity marker ────────────────────────────────────────────────────
@@ -452,6 +1062,318 @@ args = []
     assert_eq!(tools.len(), 2, "tools array length must match tool_count");
 }
 
+// ── Module-root acceptance tests for `list|uninstall|enable|disable|reload` ──
+//
+// All five live at module root so the F07 frozen selector
+// `cargo test -p ucil-cli commands::plugin::` matches each
+// `test_plugin_<subcommand>_*` test directly. See DEC-0007 +
+// WO-0042/0043/0044 lessons-learned for the rationale.
+
+#[cfg(test)]
+fn write_minimal_manifest(plugin_dir: &Path, name: &str) {
+    let body = format!(
+        r#"[plugin]
+name = "{name}"
+version = "0.1.0"
+description = "module-root acceptance fixture"
+
+[transport]
+type = "stdio"
+command = "/usr/bin/true"
+args = []
+"#
+    );
+    std::fs::write(plugin_dir.join("plugin.toml"), body).expect("write minimal manifest");
+}
+
+#[cfg(test)]
+fn read_state_entry_blocking(plugins_dir: &Path, name: &str) -> Option<PluginStateEntry> {
+    let path = plugins_dir.join(".ucil-plugin-state.toml");
+    let text = std::fs::read_to_string(path).ok()?;
+    let parsed: PluginStateFile = toml::from_str(&text).ok()?;
+    parsed.plugins.into_iter().find(|e| e.name == name)
+}
+
+/// `commands::plugin::test_plugin_list_returns_all_discovered_manifests`
+///
+/// Stands up two manifests (`alpha`, `beta`) in a `TempDir`, runs
+/// `plugin list --format json`, and asserts the JSON array contains
+/// both names with their resolved `enabled`/`installed` defaults.
+#[cfg(test)]
+#[tokio::test]
+async fn test_plugin_list_returns_all_discovered_manifests() {
+    use tempfile::TempDir;
+
+    let tmp = TempDir::new().expect("tempdir");
+    let plugins_fixture = tmp.path().join("plugins_fixture");
+    let alpha_dir = plugins_fixture.join("category_a").join("alpha");
+    let beta_dir = plugins_fixture.join("category_b").join("beta");
+    std::fs::create_dir_all(&alpha_dir).expect("create alpha dir");
+    std::fs::create_dir_all(&beta_dir).expect("create beta dir");
+    write_minimal_manifest(&alpha_dir, "alpha");
+    write_minimal_manifest(&beta_dir, "beta");
+
+    let args = PluginArgs {
+        command: PluginSubcommand::List(ListArgs {
+            plugins_dir: plugins_fixture.clone(),
+            format: OutputFormat::Json,
+        }),
+    };
+
+    let mut buf: Vec<u8> = Vec::new();
+    run_with_writer(args, &mut buf)
+        .await
+        .expect("plugin list must succeed");
+
+    let printed = std::str::from_utf8(&buf).expect("utf-8 stdout");
+    let parsed: serde_json::Value = serde_json::from_str(printed).expect("report is valid JSON");
+    let plugins = parsed
+        .get("plugins")
+        .and_then(serde_json::Value::as_array)
+        .expect("plugins array present");
+    assert_eq!(plugins.len(), 2, "list must enumerate both manifests");
+
+    let names: Vec<&str> = plugins
+        .iter()
+        .filter_map(|p| p.get("name").and_then(serde_json::Value::as_str))
+        .collect();
+    assert!(names.contains(&"alpha"), "list must include alpha");
+    assert!(names.contains(&"beta"), "list must include beta");
+
+    for entry in plugins {
+        assert_eq!(
+            entry.get("installed").and_then(serde_json::Value::as_bool),
+            Some(false),
+            "default installed=false for never-mutated plugin"
+        );
+        assert_eq!(
+            entry.get("enabled").and_then(serde_json::Value::as_bool),
+            Some(false),
+            "default enabled=false for never-mutated plugin"
+        );
+    }
+}
+
+/// `commands::plugin::test_plugin_uninstall_marks_state_file`
+///
+/// Pre-creates a state file with `installed=true`, runs
+/// `uninstall alpha`, re-reads the state and asserts
+/// `installed=false`.
+#[cfg(test)]
+#[tokio::test]
+async fn test_plugin_uninstall_marks_state_file() {
+    use tempfile::TempDir;
+
+    let tmp = TempDir::new().expect("tempdir");
+    let plugins_fixture = tmp.path().join("plugins_fixture");
+    std::fs::create_dir_all(&plugins_fixture).expect("create plugins dir");
+
+    // Pre-populate state file with installed=true so we can detect the
+    // mutation flipping it to false.
+    let initial = PluginStateFile {
+        plugins: vec![PluginStateEntry {
+            name: "alpha".to_owned(),
+            installed: true,
+            enabled: true,
+        }],
+    };
+    std::fs::write(
+        plugins_fixture.join(".ucil-plugin-state.toml"),
+        toml::to_string_pretty(&initial).expect("seed state"),
+    )
+    .expect("write seed state");
+
+    let args = PluginArgs {
+        command: PluginSubcommand::Uninstall(UninstallArgs {
+            name: "alpha".to_owned(),
+            plugins_dir: plugins_fixture.clone(),
+            format: OutputFormat::Json,
+        }),
+    };
+
+    let mut buf: Vec<u8> = Vec::new();
+    run_with_writer(args, &mut buf)
+        .await
+        .expect("plugin uninstall must succeed");
+
+    let state = read_state_entry_blocking(&plugins_fixture, "alpha")
+        .expect("state row present after mutation");
+    assert!(
+        !state.installed,
+        "uninstall must set installed=false (got {state:?})"
+    );
+    assert!(
+        state.enabled,
+        "uninstall must NOT touch enabled — left as seeded true"
+    );
+}
+
+/// `commands::plugin::test_plugin_enable_marks_state_file`
+///
+/// Runs `enable alpha` against an empty state file and asserts the new
+/// row has `enabled=true`.
+#[cfg(test)]
+#[tokio::test]
+async fn test_plugin_enable_marks_state_file() {
+    use tempfile::TempDir;
+
+    let tmp = TempDir::new().expect("tempdir");
+    let plugins_fixture = tmp.path().join("plugins_fixture");
+    std::fs::create_dir_all(&plugins_fixture).expect("create plugins dir");
+
+    let args = PluginArgs {
+        command: PluginSubcommand::Enable(EnableArgs {
+            name: "alpha".to_owned(),
+            plugins_dir: plugins_fixture.clone(),
+            format: OutputFormat::Json,
+        }),
+    };
+
+    let mut buf: Vec<u8> = Vec::new();
+    run_with_writer(args, &mut buf)
+        .await
+        .expect("plugin enable must succeed");
+
+    let state =
+        read_state_entry_blocking(&plugins_fixture, "alpha").expect("state row created on enable");
+    assert!(
+        state.enabled,
+        "enable must set enabled=true (got {state:?})"
+    );
+    assert!(
+        !state.installed,
+        "enable must NOT touch installed — left as default false"
+    );
+}
+
+/// `commands::plugin::test_plugin_disable_marks_state_file`
+///
+/// Pre-creates a state file with `enabled=true`, runs `disable alpha`,
+/// re-reads the state and asserts `enabled=false`.
+#[cfg(test)]
+#[tokio::test]
+async fn test_plugin_disable_marks_state_file() {
+    use tempfile::TempDir;
+
+    let tmp = TempDir::new().expect("tempdir");
+    let plugins_fixture = tmp.path().join("plugins_fixture");
+    std::fs::create_dir_all(&plugins_fixture).expect("create plugins dir");
+
+    let initial = PluginStateFile {
+        plugins: vec![PluginStateEntry {
+            name: "alpha".to_owned(),
+            installed: true,
+            enabled: true,
+        }],
+    };
+    std::fs::write(
+        plugins_fixture.join(".ucil-plugin-state.toml"),
+        toml::to_string_pretty(&initial).expect("seed state"),
+    )
+    .expect("write seed state");
+
+    let args = PluginArgs {
+        command: PluginSubcommand::Disable(DisableArgs {
+            name: "alpha".to_owned(),
+            plugins_dir: plugins_fixture.clone(),
+            format: OutputFormat::Json,
+        }),
+    };
+
+    let mut buf: Vec<u8> = Vec::new();
+    run_with_writer(args, &mut buf)
+        .await
+        .expect("plugin disable must succeed");
+
+    let state = read_state_entry_blocking(&plugins_fixture, "alpha")
+        .expect("state row present after mutation");
+    assert!(
+        !state.enabled,
+        "disable must set enabled=false (got {state:?})"
+    );
+    assert!(
+        state.installed,
+        "disable must NOT touch installed — left as seeded true"
+    );
+}
+
+/// `commands::plugin::test_plugin_reload_runs_health_check`
+///
+/// Stands up a manifest pointing at the real `mock-mcp-plugin` binary
+/// (same setup as `test_plugin_install_resolves_manifest_by_name`),
+/// runs `reload alpha --format json`, and asserts the JSON carries
+/// `tool_count >= 1` AND the state file shows `installed=true`.
+#[cfg(test)]
+#[tokio::test]
+async fn test_plugin_reload_runs_health_check() {
+    use tempfile::TempDir;
+
+    let mock = mock_mcp_plugin_path();
+    assert!(
+        mock.exists(),
+        "expected mock-mcp-plugin binary at {} — run `cargo build -p ucil-daemon --bin mock-mcp-plugin` first",
+        mock.display()
+    );
+
+    let tmp = TempDir::new().expect("tempdir");
+    let plugins_fixture = tmp.path().join("plugins_fixture");
+    let plugin_dir = plugins_fixture.join("search").join("alpha");
+    std::fs::create_dir_all(&plugin_dir).expect("create plugin dir");
+
+    let manifest_body = format!(
+        r#"[plugin]
+name = "alpha"
+version = "0.1.0"
+description = "module-root reload subject-under-test"
+
+[transport]
+type = "stdio"
+command = "{cmd}"
+args = []
+"#,
+        cmd = mock.to_string_lossy().replace('\\', "\\\\"),
+    );
+    std::fs::write(plugin_dir.join("plugin.toml"), manifest_body).expect("write manifest");
+
+    let args = PluginArgs {
+        command: PluginSubcommand::Reload(ReloadArgs {
+            name: "alpha".to_owned(),
+            plugins_dir: plugins_fixture.clone(),
+            timeout_ms: 5_000,
+            format: OutputFormat::Json,
+        }),
+    };
+
+    let mut buf: Vec<u8> = Vec::new();
+    run_with_writer(args, &mut buf)
+        .await
+        .expect("plugin reload against mock must succeed");
+
+    let printed = std::str::from_utf8(&buf).expect("utf-8 stdout");
+    let parsed: serde_json::Value = serde_json::from_str(printed).expect("report is valid JSON");
+
+    let tool_count = parsed
+        .get("tool_count")
+        .and_then(serde_json::Value::as_u64)
+        .expect("tool_count present");
+    assert!(
+        tool_count >= 1,
+        "reload must report tool_count >= 1 (got {tool_count})"
+    );
+    assert_eq!(
+        parsed.get("status").and_then(|v| v.as_str()),
+        Some("reloaded"),
+        "status must be 'reloaded' (got {parsed})"
+    );
+
+    let state =
+        read_state_entry_blocking(&plugins_fixture, "alpha").expect("state row created on reload");
+    assert!(
+        state.installed,
+        "reload must persist installed=true (got {state:?})"
+    );
+}
+
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -548,6 +1470,103 @@ args = []
         assert_eq!(parsed["name"], "demo");
         assert_eq!(parsed["status"], "ok");
         assert_eq!(parsed["tool_count"], 1);
+        assert_eq!(parsed["tools"][0], "echo");
+    }
+
+    #[test]
+    fn list_emits_json_array() {
+        let outcome = ListOutcome {
+            rows: vec![
+                PluginStateEntry {
+                    name: "alpha".to_owned(),
+                    installed: true,
+                    enabled: false,
+                },
+                PluginStateEntry {
+                    name: "beta".to_owned(),
+                    installed: false,
+                    enabled: true,
+                },
+            ],
+        };
+        let mut buf: Vec<u8> = Vec::new();
+        emit_list_json(&outcome, &mut buf).expect("emit_list_json");
+        let parsed: serde_json::Value = serde_json::from_slice(&buf).expect("json");
+        let plugins = parsed["plugins"].as_array().expect("plugins is array");
+        assert_eq!(plugins.len(), 2);
+        assert_eq!(plugins[0]["name"], "alpha");
+        assert_eq!(plugins[0]["installed"], true);
+        assert_eq!(plugins[1]["name"], "beta");
+        assert_eq!(plugins[1]["enabled"], true);
+    }
+
+    #[test]
+    fn uninstall_emits_status_field() {
+        let outcome = StateChangeOutcome {
+            entry: PluginStateEntry {
+                name: "alpha".to_owned(),
+                installed: false,
+                enabled: true,
+            },
+            status_label: "uninstalled",
+        };
+        let mut buf: Vec<u8> = Vec::new();
+        emit_state_change_json(&outcome, &mut buf).expect("emit_state_change_json");
+        let parsed: serde_json::Value = serde_json::from_slice(&buf).expect("json");
+        assert_eq!(parsed["name"], "alpha");
+        assert_eq!(parsed["status"], "uninstalled");
+        assert_eq!(parsed["installed"], false);
+    }
+
+    #[test]
+    fn enable_emits_status_field() {
+        let outcome = StateChangeOutcome {
+            entry: PluginStateEntry {
+                name: "alpha".to_owned(),
+                installed: false,
+                enabled: true,
+            },
+            status_label: "enabled",
+        };
+        let mut buf: Vec<u8> = Vec::new();
+        emit_state_change_json(&outcome, &mut buf).expect("emit_state_change_json");
+        let parsed: serde_json::Value = serde_json::from_slice(&buf).expect("json");
+        assert_eq!(parsed["status"], "enabled");
+        assert_eq!(parsed["enabled"], true);
+    }
+
+    #[test]
+    fn disable_emits_status_field() {
+        let outcome = StateChangeOutcome {
+            entry: PluginStateEntry {
+                name: "alpha".to_owned(),
+                installed: true,
+                enabled: false,
+            },
+            status_label: "disabled",
+        };
+        let mut buf: Vec<u8> = Vec::new();
+        emit_state_change_json(&outcome, &mut buf).expect("emit_state_change_json");
+        let parsed: serde_json::Value = serde_json::from_slice(&buf).expect("json");
+        assert_eq!(parsed["status"], "disabled");
+        assert_eq!(parsed["enabled"], false);
+    }
+
+    #[test]
+    fn reload_emits_tool_count_field() {
+        let outcome = ReloadOutcome {
+            name: "alpha".to_owned(),
+            tools: vec!["echo".to_owned(), "reverse".to_owned()],
+            tool_count: 2,
+            installed: true,
+            enabled: false,
+        };
+        let mut buf: Vec<u8> = Vec::new();
+        emit_reload_json(&outcome, &mut buf).expect("emit_reload_json");
+        let parsed: serde_json::Value = serde_json::from_slice(&buf).expect("json");
+        assert_eq!(parsed["status"], "reloaded");
+        assert_eq!(parsed["tool_count"], 2);
+        assert_eq!(parsed["installed"], true);
         assert_eq!(parsed["tools"][0], "echo");
     }
 }
