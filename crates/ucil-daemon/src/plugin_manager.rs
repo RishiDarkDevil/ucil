@@ -80,13 +80,12 @@ pub const DEFAULT_IDLE_TIMEOUT_MINUTES: u64 = 10;
 /// Tracks master-plan §14.2 default `max_restarts = 3`.
 pub const MAX_RESTARTS: u32 = 3;
 
-/// Base backoff, in milliseconds, between restart attempts inside
-/// [`PluginManager::restart_with_backoff`].  The actual delay between
-/// attempt `n` and attempt `n + 1` is `base × 2^n` (exponential
-/// backoff), so attempts complete at base × {1, 2, 4} for the default
-/// `MAX_RESTARTS = 3`.
+/// Base backoff, in milliseconds, used by
+/// [`PluginManager::restart_with_backoff`] for exponential backoff.
 ///
-/// Tests can override the base via
+/// The actual delay between attempt `n` and attempt `n + 1` is
+/// `base × 2^n`, so attempts complete at base × {1, 2, 4} for the
+/// default [`MAX_RESTARTS`] of 3.  Tests can override the base via
 /// [`PluginManager::with_circuit_breaker_base`] to keep wall-time
 /// inside the fast-test budget.  The production default follows
 /// master-plan §14.2 (1 s base).
@@ -1136,6 +1135,101 @@ impl PluginManager {
         runtime.state = PluginState::Active;
         runtime.last_call = Instant::now();
         Ok(())
+    }
+
+    /// Hot-reload a registered plugin: drain in-flight tool calls,
+    /// re-spawn the child via [`Self::health_check`], then mark the
+    /// runtime [`PluginState::Active`] again — all without restarting
+    /// the daemon (master-plan §14.2 hot-reload semantics).
+    ///
+    /// Behaviour:
+    ///
+    /// 1. Look up the runtime by name; clone its `manifest` and
+    ///    `in_flight` gate, then release the manager's read lock so the
+    ///    drain in step 2 cannot deadlock against another caller.
+    /// 2. Acquire the WRITER half of the runtime's `in_flight` lock —
+    ///    blocks until every outstanding read-guard (i.e. every
+    ///    in-flight tool call) is dropped.  Held for the entire reload
+    ///    window.
+    /// 3. Run `health_check(&manifest)` against the cloned manifest —
+    ///    spawns a fresh child, drives the MCP handshake, kills it.
+    /// 4. On success: re-acquire the manager's write lock; locate the
+    ///    runtime by name; set `state = Active`, `last_call =
+    ///    Instant::now()`, `restart_attempts = 0`.
+    /// 5. On failure: increment `restart_attempts` and propagate the
+    ///    error; the runtime's `state` is left unchanged so the caller
+    ///    can decide whether to escalate to
+    ///    [`Self::restart_with_backoff`].
+    /// 6. The writer guard is released before this function returns,
+    ///    so the next tool call's `in_flight.read().await` can proceed
+    ///    immediately.
+    ///
+    /// # Errors
+    ///
+    /// * [`PluginError::NotFound`] — no runtime registered under
+    ///   `name`.
+    /// * Any error from [`Self::health_check`] — spawn, stdio, timeout,
+    ///   or protocol failure.
+    pub async fn reload(&mut self, name: &str) -> Result<(), PluginError> {
+        // Step 1: snapshot manifest + in_flight gate; the read guard
+        // is dropped at the end of this expression — no `let` binding,
+        // so the lock is held only for the lookup.
+        let (manifest_clone, in_flight) = self
+            .runtimes
+            .read()
+            .await
+            .iter()
+            .find(|rt| rt.manifest.plugin.name == name)
+            .map(|rt| (rt.manifest.clone(), rt.in_flight.clone()))
+            .ok_or_else(|| PluginError::NotFound { name: name.into() })?;
+
+        // Step 2: drain in-flight readers by acquiring the writer half.
+        let _drain_guard = in_flight.write().await;
+
+        // Step 3: real health check (no mocks per rust-style.md).
+        match Self::health_check(&manifest_clone).await {
+            Ok(_health) => {
+                // Step 4: re-acquire manager's write lock and flip state.
+                if let Some(runtime) = self
+                    .runtimes
+                    .write()
+                    .await
+                    .iter_mut()
+                    .find(|rt| rt.manifest.plugin.name == name)
+                {
+                    runtime.state = PluginState::Active;
+                    runtime.last_call = Instant::now();
+                    runtime.restart_attempts = 0;
+                }
+                tracing::info!(
+                    target: "ucil.plugin.lifecycle",
+                    op = "reload",
+                    plugin = %name,
+                    "plugin reload complete",
+                );
+                Ok(())
+            }
+            Err(e) => {
+                // Step 5: bump restart_attempts; leave state unchanged.
+                if let Some(runtime) = self
+                    .runtimes
+                    .write()
+                    .await
+                    .iter_mut()
+                    .find(|rt| rt.manifest.plugin.name == name)
+                {
+                    runtime.restart_attempts = runtime.restart_attempts.saturating_add(1);
+                }
+                tracing::warn!(
+                    target: "ucil.plugin.lifecycle",
+                    op = "reload",
+                    plugin = %name,
+                    error = %e,
+                    "plugin reload failed",
+                );
+                Err(e)
+            }
+        }
     }
 
     /// Spawn a background task that periodically calls
