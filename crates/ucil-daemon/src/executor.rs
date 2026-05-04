@@ -1157,6 +1157,137 @@ where
     )
 }
 
+// ── G1 Fusion (P2-W7-F02 / WO-0048) ───────────────────────────────────────
+//
+// Master-plan §5.1 lines 430-442 prescribes the post-orchestrator fusion
+// step: merge per-source outputs by source location, union unique fields,
+// and resolve conflicts by source authority Serena > tree-sitter >
+// ast-grep > diagnostics.  Production wiring of real subprocess clients
+// into the fusion path is deferred to P2-W7-F05 (`find_references`); F02
+// ships only the fusion algorithm + types over a [`G1Outcome`] produced
+// by [`execute_g1`] (which this WO does not modify — see executor.rs
+// preamble paragraph for WO-0047 in `lib.rs`).
+
+/// Source location key used to merge G1 fusion entries.
+///
+/// Master-plan §5.1 line 430 ("merge by location") groups per-source
+/// `G1ToolOutput.payload` entries by `(file_path, start_line,
+/// end_line)` so two sources reporting on the same definition collapse
+/// into one fused entry.  Lines are 1-based; `start_line == end_line`
+/// is permitted (single-line entries).
+///
+/// The `Hash` + `Eq` pair enables `HashMap`-keyed grouping; `Ord`
+/// enables deterministic output sorting via `BTreeMap` iteration.
+/// `Default` is derived transitively to support the `Default` derive
+/// on [`G1FusedEntry`] (per WO-0048 `scope_in`).
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+    Hash,
+    Ord,
+    PartialOrd,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub struct G1FusedLocation {
+    /// Path to the file the entry refers to.  Relative or absolute is
+    /// caller-defined; fusion does not normalise.
+    pub file_path: PathBuf,
+    /// 1-based start line of the entry.
+    pub start_line: u32,
+    /// 1-based end line of the entry.  Equal to `start_line` for
+    /// single-line entries.
+    pub end_line: u32,
+}
+
+/// Per-source location-bearing payload entry consumed by [`fuse_g1`].
+///
+/// Every [`G1ToolOutput::payload`] whose [`G1ToolOutput::status`] is
+/// [`G1ToolStatus::Available`] is expected to deserialize into
+/// `Vec<G1FusionEntry>`.  Production wiring (P2-W7-F05
+/// `find_references`) is responsible for adapting raw source outputs
+/// (Serena hover JSON, tree-sitter AST snippets, ast-grep matches,
+/// diagnostics bundles) into this normalised shape; F02 ships only the
+/// fusion layer that consumes it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct G1FusionEntry {
+    /// Source location of this entry.
+    pub location: G1FusedLocation,
+    /// Free-form per-source fields.  Field-name collisions across
+    /// sources at the same location are resolved by [`authority_rank`]
+    /// during fusion.
+    pub fields: serde_json::Map<String, serde_json::Value>,
+}
+
+/// One field-name conflict recorded during fusion.
+///
+/// Recorded when two or more sources contributed non-equal
+/// `serde_json::Value`s for the same field key at the same location.
+/// `winner` is the higher-authority source per [`authority_rank`];
+/// `losers` carries the lower-authority `(source, value)` pairs whose
+/// values were not equal to `winner_value`, ordered by authority rank
+/// ascending.  Equal-value contributors are corroboration, not
+/// conflicts, and are NOT recorded here.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct G1Conflict {
+    /// Field name where the conflict arose.
+    pub field: String,
+    /// Higher-authority source whose value won.
+    pub winner: G1ToolKind,
+    /// Winning value (also stored under `fields[field]` of the parent
+    /// [`G1FusedEntry`]).
+    pub winner_value: serde_json::Value,
+    /// Lower-authority `(source, value)` pairs whose values were not
+    /// equal to `winner_value`, ordered by authority rank ascending.
+    pub losers: Vec<(G1ToolKind, serde_json::Value)>,
+}
+
+/// One fused entry in the [`fuse_g1`] output — a merged-by-location
+/// projection of every contributing source's [`G1FusionEntry`].
+///
+/// `contributing_sources` is sorted by authority (Serena first,
+/// Diagnostics last) so a reader can spot the highest-authority
+/// contributor without scanning `conflicts`.  `Default` derive enables
+/// the runtime-only mutation variant for AC21 per WO-0046 lessons.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct G1FusedEntry {
+    /// Source location all contributing entries share.
+    pub location: G1FusedLocation,
+    /// Sources that contributed to this entry, ordered by authority
+    /// rank (lowest rank first).
+    pub contributing_sources: Vec<G1ToolKind>,
+    /// Unioned per-source fields with conflicts resolved by source
+    /// authority.
+    pub fields: serde_json::Map<String, serde_json::Value>,
+    /// Field-level conflicts recorded during fusion, ordered by field
+    /// name lexicographically.
+    pub conflicts: Vec<G1Conflict>,
+}
+
+/// Aggregate output of one [`fuse_g1`] call.
+///
+/// `entries` is sorted by `(file_path, start_line, end_line)` for
+/// deterministic output (`BTreeMap` iteration order).  `master_timed_out`
+/// is forwarded from the input [`G1Outcome::master_timed_out`] so
+/// downstream code does not have to thread both.  `source_dispositions`
+/// carries `(kind, status)` pairs in input order so a
+/// [`G1ToolStatus::Errored`] or [`G1ToolStatus::TimedOut`] can be
+/// surfaced even though those sources contribute no entries to the
+/// fused result.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct G1FusedOutcome {
+    /// Fused per-location entries, sorted by location key.
+    pub entries: Vec<G1FusedEntry>,
+    /// Forwarded from the input [`G1Outcome::master_timed_out`].
+    pub master_timed_out: bool,
+    /// Per-source dispositions in input order so downstream code can
+    /// observe degraded paths even though they contribute no entries.
+    pub source_dispositions: Vec<(G1ToolKind, G1ToolStatus)>,
+}
+
 // ── Unit tests ────────────────────────────────────────────────────────────
 //
 // Per DEC-0005 (WO-0006 module-coherence commits), tests live at module
