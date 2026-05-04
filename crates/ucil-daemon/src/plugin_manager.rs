@@ -413,6 +413,20 @@ impl std::fmt::Display for PluginState {
 /// `Arc<RwLock<_>>` so the background idle-monitor task (see
 /// [`PluginManager::run_idle_monitor`]) can drive state transitions
 /// without the caller needing to hand it out a mutable reference.
+///
+/// State machine (master-plan §14.2):
+///
+/// ```text
+/// DISCOVERED → REGISTERED → LOADING → ACTIVE → IDLE → STOPPED
+///                                      ↑       ↓
+///                                      └───────┘  (HOT/COLD via tick + mark_call)
+/// any → ERROR
+/// ```
+///
+/// Transitions are driven by the `register` / `mark_loading` /
+/// `mark_active` / `stop` / `mark_error` methods.  Each successful
+/// transition is logged at `tracing::info!` (or `warn!` for ERROR)
+/// with target `ucil.plugin.lifecycle` per master-plan §15.2.
 #[derive(Debug, Clone)]
 pub struct PluginRuntime {
     /// The manifest that produced this runtime.  Kept by value so the
@@ -429,6 +443,11 @@ pub struct PluginRuntime {
     /// the crate default.  A tick whose `now - last_call` exceeds this
     /// duration demotes the runtime to [`PluginState::Idle`].
     pub idle_timeout: Duration,
+    /// Captured failure message when the runtime is in
+    /// [`PluginState::Error`].  `None` whenever the state has never
+    /// been promoted to ERROR (or has been reset by a successful
+    /// `register()`).
+    pub error_message: Option<String>,
 }
 
 impl PluginRuntime {
@@ -448,7 +467,20 @@ impl PluginRuntime {
             state: PluginState::Registered,
             last_call: Instant::now(),
             idle_timeout,
+            error_message: None,
         }
+    }
+
+    /// Build a runtime that starts in [`PluginState::Discovered`].
+    ///
+    /// Used when the manifest has been found on disk but not yet
+    /// promoted to the registry — call [`Self::register`] to drive
+    /// `Discovered → Registered`.
+    #[must_use]
+    pub fn discovered(manifest: PluginManifest) -> Self {
+        let mut rt = Self::new(manifest);
+        rt.state = PluginState::Discovered;
+        rt
     }
 
     /// Builder helper to override the idle timeout (tests use this for
@@ -487,6 +519,134 @@ impl PluginRuntime {
         }
         None
     }
+
+    // ── Lifecycle state-machine transitions ──────────────────────────────
+
+    /// `Discovered → Registered`.
+    ///
+    /// Resets `error_message` to `None` so a manifest that previously
+    /// failed health checks can be re-registered cleanly.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError::IllegalTransition`] when invoked from a
+    /// state other than [`PluginState::Discovered`].
+    pub fn register(&mut self) -> Result<(), PluginError> {
+        let old = self.state;
+        if !matches!(old, PluginState::Discovered) {
+            return Err(PluginError::IllegalTransition {
+                from: old,
+                to: PluginState::Registered,
+            });
+        }
+        self.state = PluginState::Registered;
+        self.error_message = None;
+        log_transition(&self.manifest.plugin.name, old, self.state);
+        Ok(())
+    }
+
+    /// `Registered | Idle → Loading`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError::IllegalTransition`] when invoked from any
+    /// other state.
+    pub fn mark_loading(&mut self) -> Result<(), PluginError> {
+        let old = self.state;
+        if !matches!(old, PluginState::Registered | PluginState::Idle) {
+            return Err(PluginError::IllegalTransition {
+                from: old,
+                to: PluginState::Loading,
+            });
+        }
+        self.state = PluginState::Loading;
+        log_transition(&self.manifest.plugin.name, old, self.state);
+        Ok(())
+    }
+
+    /// `Loading → Active`. Advances `last_call` so the idle countdown
+    /// restarts from the moment the plugin became available.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError::IllegalTransition`] when invoked from a
+    /// state other than [`PluginState::Loading`].
+    pub fn mark_active(&mut self) -> Result<(), PluginError> {
+        let old = self.state;
+        if !matches!(old, PluginState::Loading) {
+            return Err(PluginError::IllegalTransition {
+                from: old,
+                to: PluginState::Active,
+            });
+        }
+        self.state = PluginState::Active;
+        self.last_call = Instant::now();
+        log_transition(&self.manifest.plugin.name, old, self.state);
+        Ok(())
+    }
+
+    /// Any non-[`PluginState::Error`], non-[`PluginState::Stopped`] →
+    /// [`PluginState::Stopped`].
+    ///
+    /// Stopping an already-Stopped runtime is a no-op (returns `Ok`)
+    /// because manager bookkeeping may attempt redundant stops.
+    /// Stopping a runtime that is in [`PluginState::Error`] is
+    /// rejected — the caller must `register()` (which clears the
+    /// error) first if they want a clean shutdown path.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError::IllegalTransition`] when invoked from
+    /// [`PluginState::Error`].
+    pub fn stop(&mut self) -> Result<(), PluginError> {
+        let old = self.state;
+        if matches!(old, PluginState::Stopped) {
+            return Ok(());
+        }
+        if matches!(old, PluginState::Error) {
+            return Err(PluginError::IllegalTransition {
+                from: old,
+                to: PluginState::Stopped,
+            });
+        }
+        self.state = PluginState::Stopped;
+        log_transition(&self.manifest.plugin.name, old, self.state);
+        Ok(())
+    }
+
+    /// Any → [`PluginState::Error`]. Captures the supplied message in
+    /// [`Self::error_message`] and emits a `tracing::warn!` event.
+    ///
+    /// Never returns an error — the ERROR state is reachable from any
+    /// other state by design (it is the catch-all failure capture).
+    pub fn mark_error(&mut self, msg: impl Into<String>) {
+        let old = self.state;
+        let msg = msg.into();
+        self.state = PluginState::Error;
+        self.error_message = Some(msg.clone());
+        tracing::warn!(
+            target: "ucil.plugin.lifecycle",
+            plugin = %self.manifest.plugin.name,
+            from = %old,
+            to = %PluginState::Error,
+            error = %msg,
+            "plugin entered ERROR state",
+        );
+    }
+}
+
+/// Emit a single `tracing::info!` event for a successful state
+/// transition.  Centralised so every transition method records the
+/// same fields under the same target (`ucil.plugin.lifecycle`,
+/// master-plan §15.2).
+fn log_transition(plugin: &str, from: PluginState, to: PluginState) {
+    tracing::info!(
+        target: "ucil.plugin.lifecycle",
+        plugin = %plugin,
+        from = %from,
+        to = %to,
+        "plugin lifecycle transition",
+    );
 }
 
 // ── Health-check output types ────────────────────────────────────────────────
@@ -571,6 +731,17 @@ pub enum PluginError {
     /// The plugin returned malformed JSON or a JSON-RPC error frame.
     #[error("plugin returned an invalid tools/list response: {0}")]
     ProtocolError(String),
+    /// A lifecycle-state transition was rejected because the source
+    /// state does not permit moving to the target state.  Emitted by
+    /// the [`PluginRuntime`] transition methods (`register`,
+    /// `mark_loading`, `mark_active`, `stop`).
+    #[error("illegal lifecycle transition: {from} → {to}")]
+    IllegalTransition {
+        /// State the runtime was in when the transition was attempted.
+        from: PluginState,
+        /// State the caller asked the runtime to enter.
+        to: PluginState,
+    },
 }
 
 // ── Plugin manager ───────────────────────────────────────────────────────────
