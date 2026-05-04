@@ -3,7 +3,7 @@ ts: 2026-05-05T03:30:00Z
 phase: 2
 session: monitor
 trigger: stop-hook-blocks-on-mid-phase-gate-red
-resolved: false
+resolved: true
 blocks_loop: false
 severity: low
 auto_classify: bucket-A-admin
@@ -30,3 +30,11 @@ state, not a regression.
 `blocks_loop: false`, `severity: low`. Triage applies bucket-A and
 closes on next pass. Each per-turn advisory of this shape only needs
 to survive a single Stop-hook invocation. Fresh one written when needed.
+
+## Resolution
+
+User-resolved 2026-05-05 04:25 IST. Triage pass-3 force-halted on this
+advisory at `97d795a` per the per-phase pass-cap policy. The bypass
+served its purpose; closing it so the loop can resume.
+
+resolved: true
