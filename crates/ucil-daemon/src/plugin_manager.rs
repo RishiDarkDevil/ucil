@@ -73,6 +73,24 @@ pub const HEALTH_CHECK_TIMEOUT_MS: u64 = 5_000;
 /// §14.1 shipped example default).
 pub const DEFAULT_IDLE_TIMEOUT_MINUTES: u64 = 10;
 
+/// Maximum consecutive restart attempts before
+/// [`PluginManager::restart_with_backoff`] trips the circuit breaker
+/// and transitions the runtime to [`PluginState::Error`].
+///
+/// Tracks master-plan §14.2 default `max_restarts = 3`.
+pub const MAX_RESTARTS: u32 = 3;
+
+/// Base backoff, in milliseconds, used by
+/// [`PluginManager::restart_with_backoff`] for exponential backoff.
+///
+/// The actual delay between attempt `n` and attempt `n + 1` is
+/// `base × 2^n`, so attempts complete at base × {1, 2, 4} for the
+/// default [`MAX_RESTARTS`] of 3.  Tests can override the base via
+/// [`PluginManager::with_circuit_breaker_base`] to keep wall-time
+/// inside the fast-test budget.  The production default follows
+/// master-plan §14.2 (1 s base).
+pub const CIRCUIT_BREAKER_BASE_BACKOFF_MS: u64 = 1_000;
+
 // ── Manifest types ───────────────────────────────────────────────────────────
 
 /// Parsed `plugin.toml` manifest.
@@ -427,6 +445,23 @@ impl std::fmt::Display for PluginState {
 /// `mark_active` / `stop` / `mark_error` methods.  Each successful
 /// transition is logged at `tracing::info!` (or `warn!` for ERROR)
 /// with target `ucil.plugin.lifecycle` per master-plan §15.2.
+///
+/// # Hot-reload coordination
+///
+/// `in_flight` is a per-runtime [`tokio::sync::RwLock`] gate: every
+/// caller that issues a tool call against the plugin acquires the read
+/// half for the duration of the call.  [`PluginManager::reload`]
+/// acquires the write half before swapping the child process, which
+/// blocks until every outstanding read-guard has been dropped — i.e.
+/// every in-flight tool call has returned.  This is the master-plan
+/// §14.2 "drain in-flight before swap" semantics.
+///
+/// # Circuit-breaker counter
+///
+/// `restart_attempts` accumulates consecutive failed restart attempts
+/// observed by [`PluginManager::restart_with_backoff`].  It resets to
+/// zero on any successful health check (via `restart_with_backoff` or
+/// [`PluginManager::reload`]).
 #[derive(Debug, Clone)]
 pub struct PluginRuntime {
     /// The manifest that produced this runtime.  Kept by value so the
@@ -448,6 +483,14 @@ pub struct PluginRuntime {
     /// been promoted to ERROR (or has been reset by a successful
     /// `register()`).
     pub error_message: Option<String>,
+    /// Per-runtime in-flight gate. Tool-call dispatch acquires the
+    /// read half; [`PluginManager::reload`] acquires the write half
+    /// to drain readers before swapping the child process.
+    pub in_flight: Arc<RwLock<()>>,
+    /// Consecutive failed restart attempts observed by
+    /// [`PluginManager::restart_with_backoff`].  Resets to zero on a
+    /// successful health check.
+    pub restart_attempts: u32,
 }
 
 impl PluginRuntime {
@@ -468,6 +511,8 @@ impl PluginRuntime {
             last_call: Instant::now(),
             idle_timeout,
             error_message: None,
+            in_flight: Arc::new(RwLock::new(())),
+            restart_attempts: 0,
         }
     }
 
@@ -742,6 +787,25 @@ pub enum PluginError {
         /// State the caller asked the runtime to enter.
         to: PluginState,
     },
+    /// A manager operation that addresses a runtime by name (such as
+    /// [`PluginManager::reload`] or
+    /// [`PluginManager::restart_with_backoff`]) could not find a
+    /// runtime registered under that name.
+    #[error("plugin `{name}` is not registered with this manager")]
+    NotFound {
+        /// Name the caller looked up.
+        name: String,
+    },
+    /// [`PluginManager::restart_with_backoff`] exhausted
+    /// [`MAX_RESTARTS`] consecutive failed restart attempts and
+    /// transitioned the runtime to [`PluginState::Error`].
+    #[error("plugin `{name}` circuit breaker tripped after {attempts} restart attempts")]
+    CircuitBreakerOpen {
+        /// Name of the plugin whose breaker tripped.
+        name: String,
+        /// Number of attempts that were exhausted before the trip.
+        attempts: u32,
+    },
 }
 
 // ── Plugin manager ───────────────────────────────────────────────────────────
@@ -755,9 +819,26 @@ pub enum PluginError {
 /// original skeleton operations ([`Self::discover`], [`Self::spawn`],
 /// [`Self::health_check`]) remain associated functions — none of them
 /// depend on manager state.
-#[derive(Debug, Clone, Default)]
+///
+/// `circuit_breaker_base` configures the starting delay used by
+/// [`Self::restart_with_backoff`] for exponential backoff between
+/// failed attempts.  The production default follows
+/// [`CIRCUIT_BREAKER_BASE_BACKOFF_MS`]; tests shrink it via
+/// [`Self::with_circuit_breaker_base`] to keep wall-time inside the
+/// fast-test budget.
+#[derive(Debug, Clone)]
 pub struct PluginManager {
     runtimes: Arc<RwLock<Vec<PluginRuntime>>>,
+    circuit_breaker_base: Duration,
+}
+
+impl Default for PluginManager {
+    fn default() -> Self {
+        Self {
+            runtimes: Arc::new(RwLock::new(Vec::new())),
+            circuit_breaker_base: Duration::from_millis(CIRCUIT_BREAKER_BASE_BACKOFF_MS),
+        }
+    }
 }
 
 impl PluginManager {
@@ -765,6 +846,21 @@ impl PluginManager {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Override the base delay used for exponential backoff between
+    /// failed restart attempts inside [`Self::restart_with_backoff`].
+    ///
+    /// Production code keeps the default 1 s base; the
+    /// `test_circuit_breaker` acceptance test shrinks the base to a
+    /// few milliseconds so the breaker-trip exercise completes inside
+    /// the fast-test wall-time budget.  The default constructor
+    /// [`Self::new`] continues to use [`CIRCUIT_BREAKER_BASE_BACKOFF_MS`]
+    /// — call this builder explicitly to opt in to a different base.
+    #[must_use]
+    pub const fn with_circuit_breaker_base(mut self, base: Duration) -> Self {
+        self.circuit_breaker_base = base;
+        self
     }
 
     /// Walk `plugins_dir` (non-recursively) for `*.toml` files and parse
@@ -1041,6 +1137,203 @@ impl PluginManager {
         Ok(())
     }
 
+    /// Hot-reload a registered plugin: drain in-flight tool calls,
+    /// re-spawn the child via [`Self::health_check`], then mark the
+    /// runtime [`PluginState::Active`] again — all without restarting
+    /// the daemon (master-plan §14.2 hot-reload semantics).
+    ///
+    /// Behaviour:
+    ///
+    /// 1. Look up the runtime by name; clone its `manifest` and
+    ///    `in_flight` gate, then release the manager's read lock so the
+    ///    drain in step 2 cannot deadlock against another caller.
+    /// 2. Acquire the WRITER half of the runtime's `in_flight` lock —
+    ///    blocks until every outstanding read-guard (i.e. every
+    ///    in-flight tool call) is dropped.  Held for the entire reload
+    ///    window.
+    /// 3. Run `health_check(&manifest)` against the cloned manifest —
+    ///    spawns a fresh child, drives the MCP handshake, kills it.
+    /// 4. On success: re-acquire the manager's write lock; locate the
+    ///    runtime by name; set `state = Active`, `last_call =
+    ///    Instant::now()`, `restart_attempts = 0`.
+    /// 5. On failure: increment `restart_attempts` and propagate the
+    ///    error; the runtime's `state` is left unchanged so the caller
+    ///    can decide whether to escalate to
+    ///    [`Self::restart_with_backoff`].
+    /// 6. The writer guard is released before this function returns,
+    ///    so the next tool call's `in_flight.read().await` can proceed
+    ///    immediately.
+    ///
+    /// # Errors
+    ///
+    /// * [`PluginError::NotFound`] — no runtime registered under
+    ///   `name`.
+    /// * Any error from [`Self::health_check`] — spawn, stdio, timeout,
+    ///   or protocol failure.
+    pub async fn reload(&mut self, name: &str) -> Result<(), PluginError> {
+        // Step 1: snapshot manifest + in_flight gate; the read guard
+        // is dropped at the end of this expression — no `let` binding,
+        // so the lock is held only for the lookup.
+        let (manifest_clone, in_flight) = self
+            .runtimes
+            .read()
+            .await
+            .iter()
+            .find(|rt| rt.manifest.plugin.name == name)
+            .map(|rt| (rt.manifest.clone(), rt.in_flight.clone()))
+            .ok_or_else(|| PluginError::NotFound { name: name.into() })?;
+
+        // Step 2: drain in-flight readers by acquiring the writer half.
+        let _drain_guard = in_flight.write().await;
+
+        // Step 3: real health check (no mocks per rust-style.md).
+        match Self::health_check(&manifest_clone).await {
+            Ok(_health) => {
+                // Step 4: re-acquire manager's write lock and flip state.
+                if let Some(runtime) = self
+                    .runtimes
+                    .write()
+                    .await
+                    .iter_mut()
+                    .find(|rt| rt.manifest.plugin.name == name)
+                {
+                    runtime.state = PluginState::Active;
+                    runtime.last_call = Instant::now();
+                    runtime.restart_attempts = 0;
+                }
+                tracing::info!(
+                    target: "ucil.plugin.lifecycle",
+                    op = "reload",
+                    plugin = %name,
+                    "plugin reload complete",
+                );
+                Ok(())
+            }
+            Err(e) => {
+                // Step 5: bump restart_attempts; leave state unchanged.
+                if let Some(runtime) = self
+                    .runtimes
+                    .write()
+                    .await
+                    .iter_mut()
+                    .find(|rt| rt.manifest.plugin.name == name)
+                {
+                    runtime.restart_attempts = runtime.restart_attempts.saturating_add(1);
+                }
+                tracing::warn!(
+                    target: "ucil.plugin.lifecycle",
+                    op = "reload",
+                    plugin = %name,
+                    error = %e,
+                    "plugin reload failed",
+                );
+                Err(e)
+            }
+        }
+    }
+
+    /// Restart a registered plugin up to [`MAX_RESTARTS`] times with
+    /// exponential backoff; trip the circuit breaker on exhaustion.
+    ///
+    /// Behaviour (master-plan §14.2):
+    ///
+    /// 1. Look up the manifest by name; release the read lock before
+    ///    starting the loop.  Returns [`PluginError::NotFound`] when
+    ///    no runtime matches.
+    /// 2. Iterate `attempt in 0..MAX_RESTARTS`.  Each iteration runs a
+    ///    real [`Self::health_check`].  On `Ok` the runtime flips to
+    ///    [`PluginState::Active`], `last_call` advances,
+    ///    `restart_attempts` resets to zero, and an info-level tracing
+    ///    event records the success.  On `Err` `restart_attempts`
+    ///    increments, then the task sleeps for
+    ///    `circuit_breaker_base × 2^attempt` (i.e. base × {1, 2, 4} at
+    ///    the default base) before the next attempt.
+    /// 3. After [`MAX_RESTARTS`] consecutive failures the breaker
+    ///    trips: the runtime is marked
+    ///    [`PluginState::Error`] via [`PluginRuntime::mark_error`]
+    ///    with a circuit-breaker message, and the function returns
+    ///    [`PluginError::CircuitBreakerOpen`].  A warn-level tracing
+    ///    event records the trip.
+    ///
+    /// # Errors
+    ///
+    /// * [`PluginError::NotFound`] — no runtime registered under
+    ///   `name`.
+    /// * [`PluginError::CircuitBreakerOpen`] — every attempt failed.
+    pub async fn restart_with_backoff(&mut self, name: &str) -> Result<(), PluginError> {
+        // Step 1: snapshot the manifest. The read guard drops at the
+        // end of the expression — the lock is held only for lookup.
+        let manifest = self
+            .runtimes
+            .read()
+            .await
+            .iter()
+            .find(|rt| rt.manifest.plugin.name == name)
+            .map(|rt| rt.manifest.clone())
+            .ok_or_else(|| PluginError::NotFound { name: name.into() })?;
+
+        let base = self.circuit_breaker_base;
+
+        // Step 2: bounded restart loop with exponential backoff.
+        for attempt in 0..MAX_RESTARTS {
+            if Self::health_check(&manifest).await.is_ok() {
+                if let Some(runtime) = self
+                    .runtimes
+                    .write()
+                    .await
+                    .iter_mut()
+                    .find(|rt| rt.manifest.plugin.name == name)
+                {
+                    runtime.state = PluginState::Active;
+                    runtime.last_call = Instant::now();
+                    runtime.restart_attempts = 0;
+                }
+                tracing::info!(
+                    target: "ucil.plugin.lifecycle",
+                    op = "restart_with_backoff",
+                    plugin = %name,
+                    attempts = attempt + 1,
+                    "plugin restart succeeded",
+                );
+                return Ok(());
+            }
+            if let Some(runtime) = self
+                .runtimes
+                .write()
+                .await
+                .iter_mut()
+                .find(|rt| rt.manifest.plugin.name == name)
+            {
+                runtime.restart_attempts = runtime.restart_attempts.saturating_add(1);
+            }
+            tokio::time::sleep(base * 2u32.pow(attempt)).await;
+        }
+
+        // Step 3: breaker trip — mark the runtime ERROR and surface it.
+        if let Some(runtime) = self
+            .runtimes
+            .write()
+            .await
+            .iter_mut()
+            .find(|rt| rt.manifest.plugin.name == name)
+        {
+            runtime.mark_error(format!(
+                "circuit breaker tripped after {MAX_RESTARTS} restart attempts"
+            ));
+        }
+        tracing::warn!(
+            target: "ucil.plugin.lifecycle",
+            op = "restart_with_backoff",
+            plugin = %name,
+            attempts = MAX_RESTARTS,
+            "plugin circuit breaker tripped",
+        );
+        Err(PluginError::CircuitBreakerOpen {
+            name: name.into(),
+            attempts: MAX_RESTARTS,
+        })
+    }
+
     /// Spawn a background task that periodically calls
     /// [`PluginRuntime::tick`] on every registered runtime.
     ///
@@ -1075,6 +1368,38 @@ impl PluginManager {
     /// it does NOT propagate back to the manager.
     pub async fn registered_runtimes(&self) -> Vec<PluginRuntime> {
         self.runtimes.read().await.clone()
+    }
+
+    /// Register a pre-built [`PluginRuntime`] with the manager without
+    /// going through [`Self::activate`].
+    ///
+    /// Complements `activate`: `activate` requires a successful
+    /// `health_check` against a real MCP child, which is too heavy for
+    /// callers (and tests) that already have a runtime in hand and
+    /// want to exercise [`Self::restart_with_backoff`] or
+    /// [`Self::reload`] against it directly.  This is also the natural
+    /// hook for the future `ucil plugin install <name>` flow which
+    /// will register a runtime declaratively before running the first
+    /// health check.
+    ///
+    /// Synchronous by design: `add` is called during manager setup,
+    /// before any task is reading the runtimes list, so the underlying
+    /// `try_write` cannot contend in normal use.  If the lock IS
+    /// contended (unexpected — programmer error) the runtime is NOT
+    /// registered and a `tracing::warn!` event is emitted rather than
+    /// panicking; the caller can detect the omission via
+    /// [`Self::registered_runtimes`].
+    pub fn add(&mut self, runtime: PluginRuntime) {
+        match self.runtimes.try_write() {
+            Ok(mut guard) => guard.push(runtime),
+            Err(_) => {
+                tracing::warn!(
+                    target: "ucil.plugin.lifecycle",
+                    plugin = %runtime.manifest.plugin.name,
+                    "PluginManager::add: runtimes lock contended; runtime not registered",
+                );
+            }
+        }
     }
 }
 
@@ -1271,6 +1596,214 @@ async fn test_hot_cold_lifecycle() {
         runtime.state,
         PluginState::Active,
         "wake must drive Loading → Active via a real health check",
+    );
+}
+
+/// Acceptance test for `P2-W6-F03` — hot-reload of a live plugin
+/// without restarting the daemon, with proper draining of in-flight
+/// tool calls before the swap.
+///
+/// Frozen selector: `plugin_manager::test_hot_reload`.
+///
+/// Walks a real runtime through:
+///
+/// 1. `PluginManager::activate` registers a runtime in `Active` against
+///    the real `mock-mcp-plugin` binary (no mocks).
+/// 2. A background task acquires the runtime's `in_flight.read()`
+///    guard and holds it for ~100 ms — simulating an in-flight tool
+///    call.
+/// 3. The main task calls `mgr.reload(...)`. The writer-side gate must
+///    BLOCK until the background reader drops its guard, then run a
+///    real `health_check`, then flip the runtime back to `Active`.
+/// 4. After the reload returns, `in_flight.read()` must succeed
+///    immediately (proves the writer guard was released).
+#[cfg(test)]
+#[tokio::test]
+async fn test_hot_reload() {
+    use std::time::Duration as Dur;
+
+    let mock = mock_mcp_plugin_path();
+    assert!(
+        mock.exists(),
+        "expected mock-mcp-plugin binary at {} — run `cargo build -p ucil-daemon --bin mock-mcp-plugin` first",
+        mock.display()
+    );
+
+    let manifest = PluginManifest {
+        plugin: PluginSection {
+            name: "hot-reload-fixture".into(),
+            version: "0.1.0".into(),
+            description: Some("hot-reload acceptance test manifest".into()),
+        },
+        capabilities: CapabilitiesSection::default(),
+        transport: TransportSection {
+            kind: "stdio".into(),
+            command: mock.to_string_lossy().into_owned(),
+            args: vec![],
+        },
+        resources: None,
+        lifecycle: None,
+    };
+
+    let mut mgr = PluginManager::new();
+    let runtime = mgr
+        .activate(&manifest)
+        .await
+        .expect("activate must succeed against the real mock plugin");
+    assert_eq!(runtime.state, PluginState::Active);
+
+    // Capture the in_flight gate from the registered runtime so the
+    // background task and the post-reload re-acquisition both share
+    // the SAME Arc<RwLock<()>> the manager will drain.
+    let in_flight = mgr.registered_runtimes().await[0].in_flight.clone();
+
+    // Background reader holds the read half for ~100 ms. The reload
+    // call from the main task must wait at least that long before it
+    // can proceed.
+    let reader_handle = {
+        let in_flight = in_flight.clone();
+        tokio::spawn(async move {
+            let _read_guard = in_flight.read().await;
+            tokio::time::sleep(Dur::from_millis(100)).await;
+            // Read guard drops here.
+        })
+    };
+
+    // Yield once so the spawned reader has a chance to acquire its
+    // guard before the writer below queues up.
+    tokio::task::yield_now().await;
+
+    let start = Instant::now();
+    mgr.reload("hot-reload-fixture")
+        .await
+        .expect("reload must succeed");
+    let elapsed = start.elapsed();
+
+    // The reader is done by the time the writer succeeds, but join
+    // explicitly so any panic surfaces.
+    reader_handle.await.expect("reader task did not panic");
+
+    assert!(
+        elapsed >= Dur::from_millis(100),
+        "reload must wait for the in-flight reader to drop its guard (elapsed {elapsed:?})",
+    );
+    assert!(
+        elapsed < Dur::from_secs(2),
+        "reload must complete inside the test wall-time budget (elapsed {elapsed:?})",
+    );
+
+    let snapshot = mgr.registered_runtimes().await;
+    assert_eq!(snapshot.len(), 1, "manager retains exactly one runtime");
+    assert_eq!(
+        snapshot[0].state,
+        PluginState::Active,
+        "after a successful reload the runtime must be Active",
+    );
+    assert_eq!(
+        snapshot[0].restart_attempts, 0,
+        "successful reload must reset restart_attempts to zero",
+    );
+    assert!(
+        snapshot[0].last_call > start,
+        "reload must advance last_call past the start of the reload window",
+    );
+
+    // Post-reload: the writer guard was dropped before reload returned,
+    // so a fresh read must succeed immediately. tokio::time::timeout
+    // bounds the wait so a regression here doesn't hang the suite.
+    let _post_read = tokio::time::timeout(Dur::from_secs(1), in_flight.read())
+        .await
+        .expect("post-reload in_flight.read() must not block on a leaked writer guard");
+}
+
+/// Acceptance test for `P2-W6-F04` — circuit-breaker trip after
+/// [`MAX_RESTARTS`] consecutive failed restart attempts with exponential
+/// backoff between attempts.
+///
+/// Frozen selector: `plugin_manager::test_circuit_breaker`.
+///
+/// Builds a manifest pointing at a non-existent binary so every
+/// `health_check` call inside `restart_with_backoff` fails with
+/// `PluginError::Spawn { source: ENOENT }`.  Configures the manager
+/// with `with_circuit_breaker_base(Duration::from_millis(5))` so the
+/// {1, 2, 4} second production backoffs become {5, 10, 20} ms inside
+/// the test — total wall-time ≤ 50 ms.
+///
+/// Asserts:
+/// - the call returns `Err(PluginError::CircuitBreakerOpen { .. })`,
+/// - the runtime is now in `PluginState::Error`,
+/// - `restart_attempts == MAX_RESTARTS`,
+/// - `error_message` contains the phrase "circuit breaker",
+/// - elapsed ≥ 35 ms (5 + 10 + 20) — proves backoff occurred,
+/// - elapsed < 2 s — fast-test invariant.
+#[cfg(test)]
+#[tokio::test]
+async fn test_circuit_breaker() {
+    use std::time::Duration as Dur;
+
+    let manifest = PluginManifest {
+        plugin: PluginSection {
+            name: "breaker-fixture".into(),
+            version: "0.1.0".into(),
+            description: Some("circuit-breaker acceptance test manifest".into()),
+        },
+        capabilities: CapabilitiesSection::default(),
+        transport: TransportSection {
+            kind: "stdio".into(),
+            // Deliberately unreachable path so every spawn ENOENTs.
+            command: "/__ucil_test_nonexistent_breaker_binary__".into(),
+            args: vec![],
+        },
+        resources: None,
+        lifecycle: None,
+    };
+
+    let runtime = PluginRuntime::new(manifest);
+    let mut mgr = PluginManager::new().with_circuit_breaker_base(Dur::from_millis(5));
+    mgr.add(runtime);
+
+    let start = Instant::now();
+    let result = mgr.restart_with_backoff("breaker-fixture").await;
+    let elapsed = start.elapsed();
+
+    match result {
+        Err(PluginError::CircuitBreakerOpen { ref name, attempts }) => {
+            assert_eq!(name, "breaker-fixture");
+            assert_eq!(attempts, MAX_RESTARTS);
+        }
+        other => panic!("expected CircuitBreakerOpen, got {other:?}"),
+    }
+
+    let snapshot = mgr.registered_runtimes().await;
+    assert_eq!(snapshot.len(), 1, "manager retains the registered runtime");
+    assert_eq!(
+        snapshot[0].state,
+        PluginState::Error,
+        "circuit-breaker trip must transition the runtime to Error",
+    );
+    assert_eq!(
+        snapshot[0].restart_attempts, MAX_RESTARTS,
+        "every failed attempt must increment restart_attempts",
+    );
+    assert!(
+        snapshot[0]
+            .error_message
+            .as_deref()
+            .is_some_and(|m| m.contains("circuit breaker")),
+        "error_message must mention the breaker trip; got {:?}",
+        snapshot[0].error_message,
+    );
+
+    // Backoff floor: base × (1 + 2 + 4) = 5 × 7 = 35 ms minimum
+    // sleeping inside the loop. The actual wall-time is slightly
+    // higher because each spawn-ENOENT also takes a few ms.
+    assert!(
+        elapsed >= Dur::from_millis(35),
+        "exponential backoff must accumulate at least 35 ms (got {elapsed:?})",
+    );
+    assert!(
+        elapsed < Dur::from_secs(2),
+        "circuit-breaker test must complete inside the fast-test budget (got {elapsed:?})",
     );
 }
 
