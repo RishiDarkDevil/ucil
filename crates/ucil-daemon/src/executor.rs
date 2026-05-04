@@ -67,9 +67,12 @@
 #![allow(clippy::module_name_repetitions)]
 
 use std::collections::hash_map::DefaultHasher;
+use std::future::Future;
 use std::hash::{Hash as _, Hasher as _};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
+use std::task::Poll;
 use std::time::Duration;
 
 use thiserror::Error;
@@ -972,6 +975,186 @@ pub trait G1Source: Send + Sync {
     /// [`G1ToolStatus::TimedOut`] when its per-source
     /// `tokio::time::timeout` elapses.
     async fn execute(&self, query: &G1Query) -> G1ToolOutput;
+}
+
+/// Run one source under [`G1_PER_SOURCE_DEADLINE`] (or `deadline`,
+/// whichever is smaller), converting a per-source timeout into a
+/// [`G1ToolStatus::TimedOut`] [`G1ToolOutput`] without ever panicking.
+///
+/// The helper keeps [`execute_g1`] focused on the fan-out shape —
+/// per-source timeout handling lives here so the orchestrator does
+/// not need a `match` arm per disposition.
+async fn run_g1_source<S>(
+    source: &S,
+    query: &G1Query,
+    per_source_deadline: Duration,
+) -> G1ToolOutput
+where
+    S: G1Source + ?Sized,
+{
+    let kind = source.kind();
+    let start = std::time::Instant::now();
+    tokio::time::timeout(per_source_deadline, source.execute(query))
+        .await
+        .unwrap_or_else(|_| {
+            let elapsed_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+            G1ToolOutput {
+                kind,
+                status: G1ToolStatus::TimedOut,
+                elapsed_ms,
+                payload: serde_json::Value::Null,
+                error: Some(format!(
+                    "per-source deadline {} ms exceeded",
+                    per_source_deadline.as_millis()
+                )),
+            }
+        })
+}
+
+/// Poll a `Vec` of pinned-boxed futures concurrently and collect every
+/// output once all are ready.
+///
+/// Behaviourally equivalent to `futures::future::join_all` but avoids
+/// pulling the `futures` crate as a workspace dependency (per WO-0047
+/// `acceptance` AC18 — `tokio` ships everything we need for a 4-way
+/// fan-out).  Each `poll_fn` cycle iterates every still-pending
+/// future and re-registers their wakers, so the moment any inner
+/// `tokio::time::sleep` fires the outer future is re-polled and the
+/// newly-ready slots are drained.
+async fn join_all_g1<'a, T>(
+    mut futures: Vec<Pin<Box<dyn Future<Output = T> + Send + 'a>>>,
+) -> Vec<T>
+where
+    T: 'a,
+{
+    let len = futures.len();
+    let mut slots: Vec<Option<T>> = (0..len).map(|_| None).collect();
+    std::future::poll_fn(|cx| {
+        let mut any_pending = false;
+        for (i, fut) in futures.iter_mut().enumerate() {
+            if slots[i].is_some() {
+                continue;
+            }
+            match fut.as_mut().poll(cx) {
+                Poll::Ready(out) => {
+                    slots[i] = Some(out);
+                }
+                Poll::Pending => {
+                    any_pending = true;
+                }
+            }
+        }
+        if any_pending {
+            Poll::Pending
+        } else {
+            Poll::Ready(())
+        }
+    })
+    .await;
+    slots
+        .into_iter()
+        .map(|r| r.expect("join_all_g1: every slot must be filled before returning"))
+        .collect()
+}
+
+/// G1 (Structural) parallel-execution orchestrator.
+///
+/// Master-plan §5.1 lines 420-446 prescribes the fan-out shape:
+/// `Query → ALL of {tree-sitter, Serena, ast-grep, diagnostics-bridge}
+/// run in parallel`, with a 5 s overall deadline so partial outcomes
+/// stay usable when one source stalls.
+///
+/// Implementation:
+///
+/// 1. Cap each source's per-call timeout at `min(deadline,
+///    G1_PER_SOURCE_DEADLINE)` so the master deadline always wins
+///    on a true global stall.
+/// 2. Build one boxed future per source via [`run_g1_source`] and
+///    poll them concurrently through `join_all_g1` (single-task
+///    poll-fn fan-out — equivalent to `futures::join_all` but
+///    pulls in zero new dependencies, per WO-0047 AC18).
+/// 3. Wrap the whole join in an outer `tokio::time::timeout(deadline,
+///    ...)`.  On `Err(Elapsed)`, return a [`G1Outcome`] with
+///    [`G1ToolStatus::TimedOut`] placeholders for every source and
+///    `master_timed_out = true` so downstream code never sees an
+///    empty result vector when the master deadline fires.
+///
+/// The orchestrator never `panic!`s and never `?` propagates an error
+/// out — partial results are valid output per master-plan §5.1.
+///
+/// # Examples
+///
+/// ```no_run
+/// use std::time::Duration;
+/// use ucil_daemon::executor::{
+///     execute_g1, G1Query, G1Source, G1_MASTER_DEADLINE,
+/// };
+///
+/// # async fn demo(sources: Vec<Box<dyn G1Source>>) {
+/// let q = G1Query {
+///     symbol: "foo".to_owned(),
+///     file_path: std::path::PathBuf::from("src/lib.rs"),
+///     line: 1,
+///     column: 1,
+/// };
+/// let outcome = execute_g1(q, sources, G1_MASTER_DEADLINE).await;
+/// assert!(!outcome.master_timed_out || !outcome.results.is_empty());
+/// # }
+/// ```
+#[tracing::instrument(
+    name = "ucil.group.structural",
+    level = "debug",
+    skip(sources),
+    fields(symbol = %query.symbol, source_count = sources.len()),
+)]
+pub async fn execute_g1<S>(query: G1Query, sources: Vec<Box<S>>, deadline: Duration) -> G1Outcome
+where
+    S: G1Source + ?Sized,
+{
+    let per_source_deadline = std::cmp::min(deadline, G1_PER_SOURCE_DEADLINE);
+    let start = std::time::Instant::now();
+
+    let mut futures: Vec<Pin<Box<dyn Future<Output = G1ToolOutput> + Send + '_>>> =
+        Vec::with_capacity(sources.len());
+    let q_ref = &query;
+    for s in &sources {
+        futures.push(Box::pin(run_g1_source(
+            s.as_ref(),
+            q_ref,
+            per_source_deadline,
+        )));
+    }
+
+    let outer = tokio::time::timeout(deadline, join_all_g1(futures)).await;
+    let wall_elapsed_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+
+    outer.map_or_else(
+        |_| {
+            let results = sources
+                .iter()
+                .map(|s| G1ToolOutput {
+                    kind: s.kind(),
+                    status: G1ToolStatus::TimedOut,
+                    elapsed_ms: wall_elapsed_ms,
+                    payload: serde_json::Value::Null,
+                    error: Some(format!(
+                        "G1 master deadline {} ms elapsed",
+                        deadline.as_millis()
+                    )),
+                })
+                .collect();
+            G1Outcome {
+                results,
+                wall_elapsed_ms,
+                master_timed_out: true,
+            }
+        },
+        |results| G1Outcome {
+            results,
+            wall_elapsed_ms,
+            master_timed_out: false,
+        },
+    )
 }
 
 // ── Unit tests ────────────────────────────────────────────────────────────
