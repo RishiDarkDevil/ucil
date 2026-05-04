@@ -53,6 +53,45 @@ Plugin system operational. G1 (Structural) and G2 (Search) fully working. Embedd
 4. **No regressions on Phase 1 acceptance** — `cargo test --workspace --no-fail-fast` stays
    green at every WO boundary; verifier reruns the Phase 1 gate scripts.
 
-## Lessons Learned (seeded by planner; appended by executors)
+# Lessons Learned Log
 
-_(none yet — first WO of Phase 2 is WO-0042)_
+(Seeded by planner; appended by docs-writer after each WO merges.)
+
+## Lessons Learned (WO-0042 — plugin-manifest-and-lifecycle-statemachine)
+
+**Features**: P2-W6-F01 (manifest parser), P2-W6-F02 (lifecycle state machine)
+**Rejections**: 0 (verifier-green on first attempt)
+**Critic blockers**: none — two soft warnings on commit cadence (`7c272a4` +171 LOC, `c0de35f` +116 LOC), both ineligible for in-place fix post-push, both covered by DEC-0005 spirit (≈45% rustdoc inflation)
+**ADRs raised**: none
+**Coverage**: 89.68% line for `ucil-daemon` (+4.68 pp above 85% floor); `plugin_manager.rs` 87.71% line / 88.06% function
+
+### What worked
+
+- **Single-file-edit blast radius.** Whole WO touched exactly one source file (`crates/ucil-daemon/src/plugin_manager.rs`, +681/-5) plus the ready-for-review marker. The 35-entry `forbidden_paths` list made the executor's scope unambiguous and trivially auditable by the critic. No cross-module surprise.
+- **Pre-baked mutation checks in `acceptance`.** Two function-body mutations named explicitly (`PluginRuntime::register` body → no-op; `PluginManifest::validate` body → `Ok(())`) so the verifier did not have to invent the mutation patch. Both stashes failed on the targeted assertions; both restores went green. This is the correct pattern when DEC-0007 has removed the per-WO cargo-mutants gate — pre-baked function-body mutations are the authoritative anti-laziness layer.
+- **Module-root frozen-selector placement (DEC-0007).** Both new tests landed at the module root of `plugin_manager.rs` (NOT inside `mod tests {}`), exactly matching the feature-list selectors `plugin_manager::test_manifest_parser` and `plugin_manager::test_lifecycle_state_machine`. Same pattern as the existing `test_hot_cold_lifecycle`. Zero selector drift between feature-list and nextest output.
+- **Backward-compat via `#[serde(default)]` on every new manifest section** (`CapabilitiesSection`, `ResourcesSection`, `LifecycleSection`). Existing minimal manifests in `tests/plugin_manager.rs` (only `[plugin]` + `[transport]`) parsed unchanged. Acceptance criterion AC06 ran the existing integration test as an explicit regression guard — `3 passed; 0 failed` confirms the invariant.
+- **Centralised `log_transition` helper** for tracing emission. Every transition method routed through one private helper, so the `target = "ucil.plugin.lifecycle"` and `plugin / from / to` field set stayed consistent across `register / mark_loading / mark_active / stop / mark_error`. Master-plan §15.2 (`ucil.<layer>.<op>`) compliance through one call site, not five.
+- **Cargo-test summary-line regex with alternation** (`grep -Eq 'test result: ok\. ... 0 failed|... tests run: ... passed'`) matched both `cargo test` and `cargo nextest` shapes — lesson carried from WO-0038/WO-0039 retries continues to hold.
+
+### What to carry forward
+
+**For planner**:
+- WOs introducing a state machine SHOULD pre-bake mutation checks naming specific transition methods to stash. The planner already knows which lines are load-bearing; the verifier should not have to discover them. Use the WO-0042 `acceptance` block as the template (one mutation per feature, with the expected-failure assertion line cited).
+- WOs extending a TOML schema with new sections MUST include an acceptance_criterion that runs the EXISTING integration test using the OLD schema (here: `cargo test -p ucil-daemon --test plugin_manager`). Forces backward-compat to be tested mechanically, not assumed.
+- **P2-W6-F07 (`ucil plugin` CLI subcommand) MUST add explicit `pub use` lines** to `crates/ucil-daemon/src/lib.rs` for `CapabilitiesSection`, `ActivationSection`, `ResourcesSection`. WO-0042 deliberately deferred this (no consumer in scope), and the existing `lib.rs:105–109` re-export is a named list, not a glob. Plan that surface change explicitly into the F07 WO so it's not surprise scope.
+
+**For executor**:
+- When a feature commit exceeds the ~50 LOC soft target by mostly rustdoc (≈45% of diff), DEC-0005 spirit covers it — but FLAG it in the ready-for-review note so the critic doesn't have to discover it. Cleaner split for the next state-machine-style WO: (1) error variant + helper, (2) happy-path transitions, (3) catch-all error-state transition.
+- Crate-level `#![deny(rustdoc::broken_intra_doc_links)]` (set by Phase 1) means rustdoc additions MUST use plain backticks or fully qualified intra-doc links only — shorthand `[Foo]` will fail `cargo doc`. Cumulative lesson from WO-0009 / WO-0024 / WO-0025 / WO-0027 / WO-0039 rejections.
+- **When adding fields to an existing struct used by tests, every struct literal in `mod tests {}` MUST be updated with the new field initialiser.** WO-0042 added `error_message: Option<String>` to `PluginRuntime`; two test-body literals at `plugin_manager.rs:1697` and `:1754` needed the additive `capabilities: CapabilitiesSection::default(), resources: None` shape. Missing one breaks the test build invisibly until the verifier's clean-slate run catches it.
+
+**For verifier**:
+- `scripts/verify/coverage-gate.sh` REMAINS BROKEN (RUSTC_WRAPPER + corrupt-header profraw issue carried from WO-0039 retry-1). Documented workaround: `env -u RUSTC_WRAPPER cargo llvm-cov --package <crate> --summary-only --json` restores correct numbers (here: 5,686 instrumented lines vs. the script's 249). Keep applying until escalation `20260419-0152-monitor-phase1-gate-red-integration-gaps.md` is resolved.
+- `scripts/reality-check.sh <FEATURE>` reports script-level "FAILURE" on multi-feature WOs where multiple feature-trailed commits touch the same file. The script picks the NEWEST commit and rolls the file to its parent, which still contains all the feature implementation. This is a script limitation, not a feature defect. Pre-baked function-body mutation checks (per the WO `acceptance` block) provide tighter, authoritative coverage. Same handling as WO-0040 / WO-0041.
+- **State-machine acceptance test checklist** (template for siblings P2-W6-F03..F08): (a) every `transition() → state` assertion uses `assert_eq!(runtime.state, PluginState::X)` not `matches!()` so panics print the actual state; (b) at least one illegal-transition assertion using `expect_err` + `match` arm pinning `IllegalTransition { from, to }` to specific `(PluginState, PluginState)` pairs; (c) `error_message` field check via `.as_deref() == Some("...")`; (d) NO global tracing-subscriber install (avoids cross-test contamination — assert state directly).
+
+### Technical debt incurred
+
+- `lib.rs` re-exports for the three new manifest types (`CapabilitiesSection`, `ActivationSection`, `ResourcesSection`) deferred to the `ucil plugin` CLI WO (P2-W6-F07). Documented in WO-0042 ready-for-review note (lines 80–105).
+- Local `Duration as Dur` alias inside `test_lifecycle_state_machine` (line 1480) shadows the module-scope `std::time::Duration` import. Cosmetic; no follow-up.
