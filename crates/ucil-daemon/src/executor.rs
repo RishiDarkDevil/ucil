@@ -67,6 +67,7 @@
 #![allow(clippy::module_name_repetitions)]
 
 use std::collections::hash_map::DefaultHasher;
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::hash::{Hash as _, Hasher as _};
 use std::io;
@@ -1286,6 +1287,198 @@ pub struct G1FusedOutcome {
     /// Per-source dispositions in input order so downstream code can
     /// observe degraded paths even though they contribute no entries.
     pub source_dispositions: Vec<(G1ToolKind, G1ToolStatus)>,
+}
+
+/// Authority rank for a [`G1ToolKind`] — lower is higher authority.
+///
+/// Master-plan §5.1 prescribes Serena > tree-sitter > ast-grep >
+/// diagnostics; we encode this as `0` through `3` so the natural
+/// ordering on `u8` matches the authority ordering.  The exhaustive
+/// `match` is the compile-time guarantee that any future
+/// [`G1ToolKind`] variant gains an explicit rank — adding a variant
+/// without updating this function fails the build.
+const fn authority_rank(kind: G1ToolKind) -> u8 {
+    match kind {
+        G1ToolKind::Serena => 0,
+        G1ToolKind::TreeSitter => 1,
+        G1ToolKind::AstGrep => 2,
+        G1ToolKind::Diagnostics => 3,
+    }
+}
+
+/// Fuse a [`G1Outcome`] into a [`G1FusedOutcome`] per master-plan §5.1
+/// lines 430-442.
+///
+/// Algorithm:
+///
+/// 1. Build `source_dispositions` from `outcome.results` in input
+///    order so callers can observe degraded paths (e.g. a
+///    [`G1ToolStatus::TimedOut`] source) even when no entries from
+///    that source land in the fused output.
+/// 2. For each [`G1ToolStatus::Available`] result, attempt to decode
+///    `payload` as `Vec<G1FusionEntry>`.  Decode failures are logged
+///    at `warn!` and the source is silently skipped — partial results
+///    are valid output (master-plan §5.1 line 445), and a misshapen
+///    payload from one source MUST NOT poison fusion of the rest.
+/// 3. Group entries by [`G1FusedLocation`] (file + line range).
+/// 4. Within each group, union the per-entry `fields` map.  On
+///    field-name collision with non-equal values, the higher-authority
+///    source wins via [`authority_rank`] and a [`G1Conflict`] row is
+///    recorded.  Equal-value contributors are corroboration, not
+///    conflicts, and are not recorded.
+/// 5. Sort fused entries by location for deterministic output —
+///    `BTreeMap` iteration order makes this free.
+///
+/// Pure CPU-bound transform on the input — no `tokio::spawn`, no
+/// `tokio::time::timeout`.  The orchestrator ([`execute_g1`]) already
+/// owns the deadline guard.  The function never `panic!`s and never
+/// `?`-propagates an error out — partial results are valid output.
+///
+/// # Examples
+///
+/// ```no_run
+/// use std::path::PathBuf;
+/// use ucil_daemon::executor::{
+///     execute_g1, fuse_g1, G1Query, G1Source, G1_MASTER_DEADLINE,
+/// };
+///
+/// # async fn demo(sources: Vec<Box<dyn G1Source>>) {
+/// let q = G1Query {
+///     symbol: "foo".to_owned(),
+///     file_path: PathBuf::from("src/lib.rs"),
+///     line: 1,
+///     column: 1,
+/// };
+/// let raw = execute_g1(q, sources, G1_MASTER_DEADLINE).await;
+/// let fused = fuse_g1(&raw);
+/// assert!(fused
+///     .entries
+///     .iter()
+///     .all(|e| !e.contributing_sources.is_empty()));
+/// # }
+/// ```
+#[tracing::instrument(
+    name = "ucil.group.structural.fusion",
+    level = "debug",
+    skip(outcome),
+    fields(
+        input_results = outcome.results.len(),
+        input_master_timed_out = outcome.master_timed_out,
+    ),
+)]
+pub fn fuse_g1(outcome: &G1Outcome) -> G1FusedOutcome {
+    // Step 1: dispositions in input order.  `G1ToolKind` is `Copy`
+    // (per its derive); `G1ToolStatus` is `Clone`-only so we clone
+    // the status field explicitly.
+    let source_dispositions: Vec<(G1ToolKind, G1ToolStatus)> = outcome
+        .results
+        .iter()
+        .map(|r| (r.kind, r.status.clone()))
+        .collect();
+
+    // Step 2: decode each Available source's payload into
+    // `Vec<G1FusionEntry>`.  A decode failure on one source is logged
+    // and the source skipped — partial-results semantics per
+    // master-plan §5.1 line 445.
+    let mut per_source: Vec<(G1ToolKind, Vec<G1FusionEntry>)> = Vec::new();
+    for output in &outcome.results {
+        if output.status != G1ToolStatus::Available {
+            continue;
+        }
+        match serde_json::from_value::<Vec<G1FusionEntry>>(output.payload.clone()) {
+            Ok(entries) => per_source.push((output.kind, entries)),
+            Err(e) => tracing::warn!(
+                target = "ucil.group.structural.fusion",
+                kind = ?output.kind,
+                err = %e,
+                "payload decode failed; source skipped",
+            ),
+        }
+    }
+
+    // Step 3: group by location.  `BTreeMap` (not `HashMap`) so
+    // iteration order is the deterministic `G1FusedLocation` ordering
+    // — eliminates a sort pass at the end.  `type_complexity` allowed
+    // here: a top-level type alias would need a `'_` lifetime
+    // parameter and noises up the public surface for a single-use
+    // intermediate.
+    #[allow(clippy::type_complexity)]
+    let mut groups: BTreeMap<
+        G1FusedLocation,
+        Vec<(G1ToolKind, &serde_json::Map<String, serde_json::Value>)>,
+    > = BTreeMap::new();
+    for (kind, entries) in &per_source {
+        for entry in entries {
+            groups
+                .entry(entry.location.clone())
+                .or_default()
+                .push((*kind, &entry.fields));
+        }
+    }
+
+    // Step 4: per-group fusion.
+    let mut entries: Vec<G1FusedEntry> = Vec::with_capacity(groups.len());
+    for (location, contributors) in groups {
+        // contributing_sources, sorted by authority rank ascending.
+        let mut contributing_sources: Vec<G1ToolKind> =
+            contributors.iter().map(|(k, _)| *k).collect();
+        contributing_sources.sort_by_key(|k| authority_rank(*k));
+
+        // Per-field grouping inside this location: `BTreeMap` keyed by
+        // field name so the `conflicts` Vec ends up in field-name
+        // lexicographic order without an explicit sort.
+        let mut by_field: BTreeMap<String, Vec<(G1ToolKind, &serde_json::Value)>> = BTreeMap::new();
+        for (kind, map) in &contributors {
+            for (name, value) in *map {
+                by_field
+                    .entry(name.clone())
+                    .or_default()
+                    .push((*kind, value));
+            }
+        }
+
+        let mut fields: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+        let mut conflicts: Vec<G1Conflict> = Vec::new();
+        for (name, candidates) in by_field {
+            if candidates.len() == 1 {
+                // Single contributor: copy verbatim, no conflict.
+                let (_kind, value) = candidates[0];
+                fields.insert(name, value.clone());
+            } else {
+                // Multiple contributors: highest-authority wins.
+                let mut sorted = candidates;
+                sorted.sort_by_key(|(k, _)| authority_rank(*k));
+                let (winner_kind, winner_value) = sorted[0];
+                fields.insert(name.clone(), winner_value.clone());
+                let losers: Vec<(G1ToolKind, serde_json::Value)> = sorted[1..]
+                    .iter()
+                    .filter(|(_, v)| *v != winner_value)
+                    .map(|(k, v)| (*k, (*v).clone()))
+                    .collect();
+                if !losers.is_empty() {
+                    conflicts.push(G1Conflict {
+                        field: name,
+                        winner: winner_kind,
+                        winner_value: winner_value.clone(),
+                        losers,
+                    });
+                }
+            }
+        }
+
+        entries.push(G1FusedEntry {
+            location,
+            contributing_sources,
+            fields,
+            conflicts,
+        });
+    }
+
+    G1FusedOutcome {
+        entries,
+        master_timed_out: outcome.master_timed_out,
+        source_dispositions,
+    }
 }
 
 // ── Unit tests ────────────────────────────────────────────────────────────
