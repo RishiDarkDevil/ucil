@@ -1,0 +1,62 @@
+# Probe MCP plugin manifest (master-plan §14.1 category = "search").
+#
+# pinned 2026-05-04: @probelabs/probe v0.6.0-rc315 (probe-code 0.6.0 binary)
+#   source          : https://github.com/probelabs/probe (formerly buger/probe)
+#   npm package     : https://www.npmjs.com/package/@probelabs/probe
+#   pinned tag      : 0.6.0-rc315 — current latest published 2026-04-07.
+#                     Published binary reports `probe-code 0.6.0`; the npm
+#                     `version` is the pinned upstream package release.
+#   binary launch   : `npx -y @probelabs/probe@0.6.0-rc315 mcp` — runs the
+#                     stdio MCP server bundled inside the package.
+#   advertised tools: search_code, extract_code, grep (3 total — verified
+#                     end-to-end via PluginManager::health_check; see
+#                     crates/ucil-daemon/tests/plugin_manifests.rs).
+#   transport       : stdio (master-plan §13; no HTTP in Phase 2).
+#
+# Reproducibility: the deprecated @buger/probe-mcp@1.0.0 package's npm view
+# explicitly redirects callers to `npm install @probelabs/probe` and
+# `probe mcp`. UCIL therefore depends on the @probelabs/probe-shipped MCP
+# server, pinned to an immutable release tag rather than the floating
+# `latest` dist-tag — `.claude/rules/commit-style.md` forbids moving refs.
+# When upstream cuts a stable 0.6.0 (or later), supersede this manifest in
+# a new ADR and bump the pinned version.
+#
+# Why a single npm package and not a separate `probe-mcp` binary:
+# v1.x of @buger/probe-mcp shipped a `probe-mcp` binary; the rebrand to
+# @probelabs/probe consolidated the MCP server under the main `probe`
+# binary as `probe mcp`. This manifest follows the consolidated form
+# (single npm install gives both the CLI used by scripts/verify/P2-W6-F06.sh
+# and the MCP server used by PluginManager::health_check).
+
+[plugin]
+name = "probe"
+version = "0.6.0-rc315"
+description = "AST-aware code search with token-budgeted complete function-body extraction (probelabs/probe)."
+
+[capabilities]
+provides = ["search.semantic", "search.text"]
+languages = [
+    "rust",
+    "typescript",
+    "javascript",
+    "tsx",
+    "python",
+    "go",
+    "java",
+    "ruby",
+    "c",
+    "cpp",
+]
+
+[transport]
+type = "stdio"
+command = "npx"
+args = [
+    "-y",
+    "@probelabs/probe@0.6.0-rc315",
+    "mcp",
+]
+
+[lifecycle]
+hot_cold = true
+idle_timeout_minutes = 10
