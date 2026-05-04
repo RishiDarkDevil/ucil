@@ -1,0 +1,148 @@
+//! End-to-end integration tests for the on-disk ast-grep + probe plugin
+//! manifests (P2-W6-F05 / P2-W6-F06).
+//!
+//! Each test loads the on-disk manifest at
+//! `plugins/<group>/<name>/plugin.toml`, drives the manifest's
+//! `transport.command` as a real subprocess via
+//! [`ucil_daemon::PluginManager::health_check_with_timeout`], and
+//! asserts the live `tools/list` reply contains an expected tool name.
+//!
+//! Mocking `tokio::process::Command`, the spawned MCP server, or the
+//! JSON-RPC dialogue is forbidden — the WO-0044 contract is precisely
+//! that real MCP-server subprocesses speak real JSON-RPC over stdio
+//! exactly the same way a Claude Code / Cursor / Cline client would
+//! consume them at runtime. The test exercises the full handshake
+//! [`ucil_daemon::PluginManager::health_check`] performs (`initialize`
+//! → `notifications/initialized` → `tools/list`) end-to-end against the
+//! real `npx -y @notprolands/ast-grep-mcp@1.1.1` /
+//! `npx -y @probelabs/probe@0.6.0-rc315 mcp` invocations.
+//!
+//! Workspace fixtures exercised by the partner verify scripts
+//! (`scripts/verify/P2-W6-F05.sh`, `scripts/verify/P2-W6-F06.sh`):
+//! `tests/fixtures/typescript-project` for ast-grep structural search,
+//! `tests/fixtures/rust-project` for probe function-body extraction.
+//!
+//! Set `UCIL_SKIP_EXTERNAL_PLUGIN_TESTS=1` only on truly offline CI
+//! builds — the verifier MUST NOT set the skip env, per WO-0044
+//! `scope_in`.
+//!
+//! Tests are wrapped in `mod plugin_manifests` so nextest reports them
+//! as `plugin_manifests::ast_grep_manifest_health_check` and
+//! `plugin_manifests::probe_manifest_health_check`, matching the
+//! WO-0044 acceptance selectors. Same wrapper pattern as the existing
+//! `mod plugin_manager` block in `tests/plugin_manager.rs:21`
+//! (DEC-0007 frozen-selector module-root placement).
+
+mod plugin_manifests {
+    use std::path::PathBuf;
+
+    use ucil_daemon::{HealthStatus, PluginManager, PluginManifest};
+
+    /// Generous first-run npx download budget — `npx -y <pkg>` may
+    /// fetch dozens of megabytes on a cold cache. Subsequent runs hit
+    /// the npx cache and complete in well under a second; the
+    /// production-default `HEALTH_CHECK_TIMEOUT_MS` (5 s) is therefore
+    /// fine for steady-state daemon ticks but inadequate for the very
+    /// first post-install integration-test run on a fresh workstation.
+    const FIRST_RUN_TIMEOUT_MS: u64 = 90_000;
+
+    /// Walks up from this crate's manifest dir (`crates/ucil-daemon`) to
+    /// the workspace root so the on-disk plugin manifests can be loaded
+    /// regardless of the directory `cargo test` is invoked from.
+    fn repo_root() -> PathBuf {
+        // `CARGO_MANIFEST_DIR` for ucil-daemon is `<repo>/crates/ucil-daemon`;
+        // two parents up is the workspace root.
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(2)
+            .expect("workspace root above crates/ucil-daemon")
+            .to_path_buf()
+    }
+
+    /// Honours the `UCIL_SKIP_EXTERNAL_PLUGIN_TESTS` opt-out for
+    /// air-gapped CI runners that cannot reach the npm registry. The
+    /// verifier MUST NOT set this env var.
+    fn skip_via_env() -> bool {
+        std::env::var("UCIL_SKIP_EXTERNAL_PLUGIN_TESTS").is_ok()
+    }
+
+    #[tokio::test]
+    async fn ast_grep_manifest_health_check() {
+        if skip_via_env() {
+            return;
+        }
+        let manifest_path = repo_root().join("plugins/structural/ast-grep/plugin.toml");
+        let manifest =
+            PluginManifest::from_path(&manifest_path).expect("parse ast-grep plugin.toml");
+
+        // Manifest sanity (cheap pre-flight before paying the npx cost).
+        assert_eq!(manifest.plugin.name, "ast-grep");
+        assert_eq!(manifest.transport.kind, "stdio");
+        assert!(
+            !manifest.capabilities.provides.is_empty(),
+            "ast-grep manifest must declare at least one provided capability",
+        );
+
+        let health = PluginManager::health_check_with_timeout(&manifest, FIRST_RUN_TIMEOUT_MS)
+            .await
+            .expect("health-check ast-grep MCP server");
+
+        assert_eq!(health.name, "ast-grep");
+        assert_eq!(
+            health.status,
+            HealthStatus::Ok,
+            "ast-grep health-check returned non-Ok status: {:?}",
+            health.status,
+        );
+        assert!(!health.tools.is_empty(), "ast-grep advertised zero tools",);
+        // `find_code` is the canonical structural-search tool advertised
+        // by `@notprolands/ast-grep-mcp@1.1.1` (alongside
+        // `dump_syntax_tree`, `rewrite_code`, …); pinning on the
+        // existence of this exact name makes the test fail loudly if
+        // the upstream package's tool surface drifts.
+        assert!(
+            health.tools.iter().any(|t| t == "find_code"),
+            "expected `find_code` tool in advertised set, got: {:?}",
+            health.tools,
+        );
+    }
+
+    #[tokio::test]
+    async fn probe_manifest_health_check() {
+        if skip_via_env() {
+            return;
+        }
+        let manifest_path = repo_root().join("plugins/search/probe/plugin.toml");
+        let manifest = PluginManifest::from_path(&manifest_path).expect("parse probe plugin.toml");
+
+        // Manifest sanity (cheap pre-flight before paying the npx cost).
+        assert_eq!(manifest.plugin.name, "probe");
+        assert_eq!(manifest.transport.kind, "stdio");
+        assert!(
+            !manifest.capabilities.provides.is_empty(),
+            "probe manifest must declare at least one provided capability",
+        );
+
+        let health = PluginManager::health_check_with_timeout(&manifest, FIRST_RUN_TIMEOUT_MS)
+            .await
+            .expect("health-check probe MCP server");
+
+        assert_eq!(health.name, "probe");
+        assert_eq!(
+            health.status,
+            HealthStatus::Ok,
+            "probe health-check returned non-Ok status: {:?}",
+            health.status,
+        );
+        assert!(!health.tools.is_empty(), "probe advertised zero tools",);
+        // `search_code` is the canonical semantic-search tool advertised
+        // by `probe mcp` from `@probelabs/probe@0.6.0-rc315` (alongside
+        // `extract_code`, `grep`); pinning on this exact name surfaces
+        // upstream tool-surface drift loudly.
+        assert!(
+            health.tools.iter().any(|t| t == "search_code"),
+            "expected `search_code` tool in advertised set, got: {:?}",
+            health.tools,
+        );
+    }
+}
