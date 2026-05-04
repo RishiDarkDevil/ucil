@@ -70,6 +70,14 @@ pub enum PluginSubcommand {
     /// the per-plugin state file. Manifests with no state row default
     /// to `installed=false, enabled=false`.
     List(ListArgs),
+    /// Mark the named plugin as `installed=false` in the state file.
+    /// Does NOT remove the manifest from disk — the operator decides
+    /// when to delete the directory.
+    Uninstall(UninstallArgs),
+    /// Mark the named plugin as `enabled=true` in the state file.
+    Enable(EnableArgs),
+    /// Mark the named plugin as `enabled=false` in the state file.
+    Disable(DisableArgs),
 }
 
 /// Arguments for `ucil plugin install <name>`.
@@ -111,6 +119,61 @@ pub struct InstallArgs {
 pub struct ListArgs {
     /// Directory to search for `plugin.toml` manifests (max-depth 3,
     /// matching `install`).
+    #[arg(long, default_value = "./plugins")]
+    pub plugins_dir: PathBuf,
+    /// How to format the CLI's stdout report.
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    pub format: OutputFormat,
+}
+
+/// Arguments for `ucil plugin uninstall <name>`.
+///
+/// # JSON output
+///
+/// `{ "name": "...", "status": "uninstalled", "installed": false,
+/// "enabled": bool }`
+#[derive(Args, Debug)]
+pub struct UninstallArgs {
+    /// Plugin identifier (the `[plugin] name` field of the target
+    /// manifest).
+    pub name: String,
+    /// Directory holding the state file.
+    #[arg(long, default_value = "./plugins")]
+    pub plugins_dir: PathBuf,
+    /// How to format the CLI's stdout report.
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    pub format: OutputFormat,
+}
+
+/// Arguments for `ucil plugin enable <name>`.
+///
+/// # JSON output
+///
+/// `{ "name": "...", "status": "enabled", "enabled": true,
+/// "installed": bool }`
+#[derive(Args, Debug)]
+pub struct EnableArgs {
+    /// Plugin identifier.
+    pub name: String,
+    /// Directory holding the state file.
+    #[arg(long, default_value = "./plugins")]
+    pub plugins_dir: PathBuf,
+    /// How to format the CLI's stdout report.
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    pub format: OutputFormat,
+}
+
+/// Arguments for `ucil plugin disable <name>`.
+///
+/// # JSON output
+///
+/// `{ "name": "...", "status": "disabled", "enabled": false,
+/// "installed": bool }`
+#[derive(Args, Debug)]
+pub struct DisableArgs {
+    /// Plugin identifier.
+    pub name: String,
+    /// Directory holding the state file.
     #[arg(long, default_value = "./plugins")]
     pub plugins_dir: PathBuf,
     /// How to format the CLI's stdout report.
@@ -282,6 +345,30 @@ pub async fn run_with_writer<W: Write>(args: PluginArgs, mut writer: W) -> Resul
                 .context("failed to write plugin list report")?;
             Ok(())
         }
+        PluginSubcommand::Uninstall(uninstall) => {
+            let outcome = uninstall_plugin(&uninstall)
+                .await
+                .with_context(|| format!("plugin uninstall `{}`", uninstall.name))?;
+            emit_state_change(uninstall.format, &outcome, &mut writer)
+                .context("failed to write plugin uninstall report")?;
+            Ok(())
+        }
+        PluginSubcommand::Enable(enable) => {
+            let outcome = enable_plugin(&enable)
+                .await
+                .with_context(|| format!("plugin enable `{}`", enable.name))?;
+            emit_state_change(enable.format, &outcome, &mut writer)
+                .context("failed to write plugin enable report")?;
+            Ok(())
+        }
+        PluginSubcommand::Disable(disable) => {
+            let outcome = disable_plugin(&disable)
+                .await
+                .with_context(|| format!("plugin disable `{}`", disable.name))?;
+            emit_state_change(disable.format, &outcome, &mut writer)
+                .context("failed to write plugin disable report")?;
+            Ok(())
+        }
     }
 }
 
@@ -416,6 +503,50 @@ async fn list_plugins(args: &ListArgs) -> Result<ListOutcome, PluginCmdError> {
     Ok(ListOutcome { rows })
 }
 
+// ── State-mutating subcommands ──────────────────────────────────────────────
+
+/// Result of a state-only mutation (`uninstall` / `enable` / `disable`).
+/// Holds the post-mutation row plus the static status label so emission
+/// is parameter-free.
+#[derive(Debug, Clone)]
+struct StateChangeOutcome {
+    entry: PluginStateEntry,
+    status_label: &'static str,
+}
+
+async fn uninstall_plugin(args: &UninstallArgs) -> Result<StateChangeOutcome, PluginCmdError> {
+    let entry = mutate_state(&args.plugins_dir, &args.name, |row| {
+        row.installed = false;
+    })
+    .await?;
+    Ok(StateChangeOutcome {
+        entry,
+        status_label: "uninstalled",
+    })
+}
+
+async fn enable_plugin(args: &EnableArgs) -> Result<StateChangeOutcome, PluginCmdError> {
+    let entry = mutate_state(&args.plugins_dir, &args.name, |row| {
+        row.enabled = true;
+    })
+    .await?;
+    Ok(StateChangeOutcome {
+        entry,
+        status_label: "enabled",
+    })
+}
+
+async fn disable_plugin(args: &DisableArgs) -> Result<StateChangeOutcome, PluginCmdError> {
+    let entry = mutate_state(&args.plugins_dir, &args.name, |row| {
+        row.enabled = false;
+    })
+    .await?;
+    Ok(StateChangeOutcome {
+        entry,
+        status_label: "disabled",
+    })
+}
+
 // ── Emission ────────────────────────────────────────────────────────────────
 
 fn emit_report<W: Write>(
@@ -487,6 +618,53 @@ fn emit_list_text<W: Write>(outcome: &ListOutcome, writer: &mut W) -> std::io::R
 fn emit_list_json<W: Write>(outcome: &ListOutcome, writer: &mut W) -> std::io::Result<()> {
     let report = ListReport {
         plugins: &outcome.rows,
+    };
+    serde_json::to_writer_pretty(&mut *writer, &report).map_err(std::io::Error::other)?;
+    writeln!(writer)?;
+    Ok(())
+}
+
+// ── State-change emission ──────────────────────────────────────────────────
+
+#[derive(Debug, Serialize)]
+struct StateChangeReport<'a> {
+    name: &'a str,
+    status: &'a str,
+    installed: bool,
+    enabled: bool,
+}
+
+fn emit_state_change<W: Write>(
+    format: OutputFormat,
+    outcome: &StateChangeOutcome,
+    writer: &mut W,
+) -> std::io::Result<()> {
+    match format {
+        OutputFormat::Text => emit_state_change_text(outcome, writer),
+        OutputFormat::Json => emit_state_change_json(outcome, writer),
+    }
+}
+
+fn emit_state_change_text<W: Write>(
+    outcome: &StateChangeOutcome,
+    writer: &mut W,
+) -> std::io::Result<()> {
+    writeln!(
+        writer,
+        "plugin `{}` {} (installed={}, enabled={})",
+        outcome.entry.name, outcome.status_label, outcome.entry.installed, outcome.entry.enabled
+    )
+}
+
+fn emit_state_change_json<W: Write>(
+    outcome: &StateChangeOutcome,
+    writer: &mut W,
+) -> std::io::Result<()> {
+    let report = StateChangeReport {
+        name: &outcome.entry.name,
+        status: outcome.status_label,
+        installed: outcome.entry.installed,
+        enabled: outcome.entry.enabled,
     };
     serde_json::to_writer_pretty(&mut *writer, &report).map_err(std::io::Error::other)?;
     writeln!(writer)?;
