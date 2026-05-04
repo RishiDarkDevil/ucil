@@ -788,6 +788,25 @@ pub enum PluginError {
         /// State the caller asked the runtime to enter.
         to: PluginState,
     },
+    /// A manager operation that addresses a runtime by name (such as
+    /// [`PluginManager::reload`] or
+    /// [`PluginManager::restart_with_backoff`]) could not find a
+    /// runtime registered under that name.
+    #[error("plugin `{name}` is not registered with this manager")]
+    NotFound {
+        /// Name the caller looked up.
+        name: String,
+    },
+    /// [`PluginManager::restart_with_backoff`] exhausted
+    /// [`MAX_RESTARTS`] consecutive failed restart attempts and
+    /// transitioned the runtime to [`PluginState::Error`].
+    #[error("plugin `{name}` circuit breaker tripped after {attempts} restart attempts")]
+    CircuitBreakerOpen {
+        /// Name of the plugin whose breaker tripped.
+        name: String,
+        /// Number of attempts that were exhausted before the trip.
+        attempts: u32,
+    },
 }
 
 // ── Plugin manager ───────────────────────────────────────────────────────────
