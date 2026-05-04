@@ -78,6 +78,10 @@ pub enum PluginSubcommand {
     Enable(EnableArgs),
     /// Mark the named plugin as `enabled=false` in the state file.
     Disable(DisableArgs),
+    /// Re-run the health probe against the named plugin and persist
+    /// `installed=true` on success. In-process re-probe; the daemon
+    /// has no IPC reload channel in Phase 2.
+    Reload(ReloadArgs),
 }
 
 /// Arguments for `ucil plugin install <name>`.
@@ -176,6 +180,28 @@ pub struct DisableArgs {
     /// Directory holding the state file.
     #[arg(long, default_value = "./plugins")]
     pub plugins_dir: PathBuf,
+    /// How to format the CLI's stdout report.
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    pub format: OutputFormat,
+}
+
+/// Arguments for `ucil plugin reload <name>`.
+///
+/// # JSON output
+///
+/// `{ "name": "...", "status": "reloaded", "tool_count": <usize>,
+/// "tools": [...], "installed": true }`
+#[derive(Args, Debug)]
+pub struct ReloadArgs {
+    /// Plugin identifier.
+    pub name: String,
+    /// Directory holding the manifest index AND the state file.
+    #[arg(long, default_value = "./plugins")]
+    pub plugins_dir: PathBuf,
+    /// Timeout budget, in milliseconds, for the spawn → `tools/list`
+    /// round-trip. Same default as `install`.
+    #[arg(long, default_value_t = 180_000)]
+    pub timeout_ms: u64,
     /// How to format the CLI's stdout report.
     #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
     pub format: OutputFormat,
@@ -369,6 +395,14 @@ pub async fn run_with_writer<W: Write>(args: PluginArgs, mut writer: W) -> Resul
                 .context("failed to write plugin disable report")?;
             Ok(())
         }
+        PluginSubcommand::Reload(reload) => {
+            let outcome = reload_plugin(&reload)
+                .await
+                .with_context(|| format!("plugin reload `{}`", reload.name))?;
+            emit_reload(reload.format, &outcome, &mut writer)
+                .context("failed to write plugin reload report")?;
+            Ok(())
+        }
     }
 }
 
@@ -547,6 +581,59 @@ async fn disable_plugin(args: &DisableArgs) -> Result<StateChangeOutcome, Plugin
     })
 }
 
+// ── `reload` core ───────────────────────────────────────────────────────────
+
+/// Runtime result of a successful `reload` — the freshly-probed tool
+/// list plus the post-mutation state row. `tool_count` is on the
+/// outcome explicitly so the verifier mutation check (replace body
+/// with `Ok(ReloadOutcome { tool_count: 0, .. })`) trips a tight
+/// assertion.
+#[derive(Debug, Clone, Default)]
+struct ReloadOutcome {
+    name: String,
+    tools: Vec<String>,
+    tool_count: usize,
+    installed: bool,
+    enabled: bool,
+}
+
+async fn reload_plugin(args: &ReloadArgs) -> Result<ReloadOutcome, PluginCmdError> {
+    let manifest = resolve_manifest(&args.name, &args.plugins_dir)?;
+    let health = PluginManager::health_check_with_timeout(&manifest, args.timeout_ms)
+        .await
+        .map_err(|source| PluginCmdError::Health {
+            name: manifest.plugin.name.clone(),
+            source: Box::new(source),
+        })?;
+
+    let tool_count = health.tools.len();
+    match health.status {
+        HealthStatus::Ok if tool_count >= 1 => {
+            let entry = mutate_state(&args.plugins_dir, &health.name, |row| {
+                row.installed = true;
+            })
+            .await?;
+            Ok(ReloadOutcome {
+                name: health.name,
+                tools: health.tools,
+                tool_count,
+                installed: entry.installed,
+                enabled: entry.enabled,
+            })
+        }
+        HealthStatus::Ok => Err(PluginCmdError::Degraded {
+            name: health.name,
+            message: "plugin reported Ok status but zero tools".to_owned(),
+            tool_count,
+        }),
+        HealthStatus::Degraded(message) => Err(PluginCmdError::Degraded {
+            name: health.name,
+            message,
+            tool_count,
+        }),
+    }
+}
+
 // ── Emission ────────────────────────────────────────────────────────────────
 
 fn emit_report<W: Write>(
@@ -665,6 +752,55 @@ fn emit_state_change_json<W: Write>(
         status: outcome.status_label,
         installed: outcome.entry.installed,
         enabled: outcome.entry.enabled,
+    };
+    serde_json::to_writer_pretty(&mut *writer, &report).map_err(std::io::Error::other)?;
+    writeln!(writer)?;
+    Ok(())
+}
+
+// ── Reload emission ────────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize)]
+struct ReloadReport<'a> {
+    name: &'a str,
+    status: &'a str,
+    tools: &'a [String],
+    tool_count: usize,
+    installed: bool,
+    enabled: bool,
+}
+
+fn emit_reload<W: Write>(
+    format: OutputFormat,
+    outcome: &ReloadOutcome,
+    writer: &mut W,
+) -> std::io::Result<()> {
+    match format {
+        OutputFormat::Text => emit_reload_text(outcome, writer),
+        OutputFormat::Json => emit_reload_json(outcome, writer),
+    }
+}
+
+fn emit_reload_text<W: Write>(outcome: &ReloadOutcome, writer: &mut W) -> std::io::Result<()> {
+    writeln!(
+        writer,
+        "plugin `{}` RELOADED: {} tools (installed={}, enabled={})",
+        outcome.name, outcome.tool_count, outcome.installed, outcome.enabled
+    )?;
+    for tool in &outcome.tools {
+        writeln!(writer, "  - {tool}")?;
+    }
+    Ok(())
+}
+
+fn emit_reload_json<W: Write>(outcome: &ReloadOutcome, writer: &mut W) -> std::io::Result<()> {
+    let report = ReloadReport {
+        name: &outcome.name,
+        status: "reloaded",
+        tools: &outcome.tools,
+        tool_count: outcome.tool_count,
+        installed: outcome.installed,
+        enabled: outcome.enabled,
     };
     serde_json::to_writer_pretty(&mut *writer, &report).map_err(std::io::Error::other)?;
     writeln!(writer)?;
