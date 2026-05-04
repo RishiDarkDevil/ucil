@@ -1274,22 +1274,9 @@ async fn test_hot_cold_lifecycle() {
     );
 }
 
-/// Acceptance test for `P2-W6-F01` — `[capabilities]` + `[resources]`
-/// manifest parsing.
-///
-/// Frozen selector: `plugin_manager::test_manifest_parser`.
-///
-/// Walks `PluginManifest::from_path` against a fixture covering every
-/// master-plan §14.1 section (`[plugin]`, `[capabilities]` with nested
-/// `[capabilities.activation]`, `[transport]`, `[resources]`,
-/// `[lifecycle]`).  Then exercises the sad path
-/// (`PluginError::InvalidManifest`) and the activation helpers.
+/// Master-plan §14.1-complete fixture body for `test_manifest_parser`.
 #[cfg(test)]
-#[test]
-fn test_manifest_parser() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("semgrep.toml");
-    let body = r#"[plugin]
+const FIXTURE_14_1_BODY: &str = r#"[plugin]
 name = "semgrep-fixture"
 version = "1.2.3"
 description = "Test fixture covering every §14.1 section."
@@ -1317,11 +1304,11 @@ typical_query_ms = 50
 hot_cold = true
 idle_timeout_minutes = 5
 "#;
-    std::fs::write(&path, body).expect("write fixture manifest");
 
-    let manifest = PluginManifest::from_path(&path).expect("parse §14.1 fixture");
-
-    // ── [plugin] ────────────────────────────────────────────────────
+/// Assert every field of the §14.1-complete fixture manifest.
+#[cfg(test)]
+fn assert_fixture_fields(manifest: &PluginManifest) {
+    // [plugin]
     assert_eq!(manifest.plugin.name, "semgrep-fixture");
     assert_eq!(manifest.plugin.version, "1.2.3");
     assert_eq!(
@@ -1329,7 +1316,7 @@ idle_timeout_minutes = 5
         Some("Test fixture covering every §14.1 section.")
     );
 
-    // ── [capabilities] ──────────────────────────────────────────────
+    // [capabilities] + [capabilities.activation]
     assert_eq!(
         manifest.capabilities.provides,
         vec!["search_code".to_owned(), "scan_security".to_owned()],
@@ -1352,12 +1339,12 @@ idle_timeout_minutes = 5
     );
     assert!(!manifest.capabilities.activation.eager);
 
-    // ── [transport] ─────────────────────────────────────────────────
+    // [transport]
     assert_eq!(manifest.transport.kind, "stdio");
     assert_eq!(manifest.transport.command, "/usr/local/bin/semgrep");
     assert_eq!(manifest.transport.args, vec!["--mcp".to_owned()]);
 
-    // ── [resources] ─────────────────────────────────────────────────
+    // [resources]
     let resources = manifest
         .resources
         .as_ref()
@@ -1366,21 +1353,20 @@ idle_timeout_minutes = 5
     assert_eq!(resources.startup_time_ms, Some(300));
     assert_eq!(resources.typical_query_ms, Some(50));
 
-    // ── [lifecycle] ─────────────────────────────────────────────────
+    // [lifecycle]
     let lifecycle = manifest
         .lifecycle
         .as_ref()
         .expect("[lifecycle] table must parse");
     assert!(lifecycle.hot_cold);
     assert_eq!(lifecycle.idle_timeout_minutes, Some(5));
+}
 
-    // ── happy validate() ────────────────────────────────────────────
-    manifest
-        .validate()
-        .expect("§14.1-complete manifest must validate");
-
-    // ── sad path: empty plugin.name ─────────────────────────────────
-    let bad_path = dir.path().join("bad.toml");
+/// Assert that an empty `plugin.name` is rejected by
+/// [`PluginManifest::from_path`] with the right field.
+#[cfg(test)]
+fn assert_empty_plugin_name_rejected(dir: &std::path::Path) {
+    let bad_path = dir.join("bad.toml");
     std::fs::write(
         &bad_path,
         r#"[plugin]
@@ -1404,9 +1390,13 @@ command = "/usr/bin/true"
         }
         other => panic!("expected InvalidManifest {{ field: \"plugin.name\", .. }}, got {other:?}"),
     }
+}
 
-    // ── activation helpers via struct-literal manifest ──────────────
-    let m = PluginManifest {
+/// Build the struct-literal manifest used by the activation-helper
+/// assertions in `test_manifest_parser`.
+#[cfg(test)]
+fn helper_manifest() -> PluginManifest {
+    PluginManifest {
         plugin: PluginSection {
             name: "helper-only".into(),
             version: "0.1.0".into(),
@@ -1428,7 +1418,35 @@ command = "/usr/bin/true"
         },
         resources: None,
         lifecycle: None,
-    };
+    }
+}
+
+/// Acceptance test for `P2-W6-F01` — `[capabilities]` + `[resources]`
+/// manifest parsing.
+///
+/// Frozen selector: `plugin_manager::test_manifest_parser`.
+///
+/// Walks `PluginManifest::from_path` against a fixture covering every
+/// master-plan §14.1 section (`[plugin]`, `[capabilities]` with nested
+/// `[capabilities.activation]`, `[transport]`, `[resources]`,
+/// `[lifecycle]`).  Then exercises the sad path
+/// (`PluginError::InvalidManifest`) and the activation helpers.
+#[cfg(test)]
+#[test]
+fn test_manifest_parser() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("semgrep.toml");
+    std::fs::write(&path, FIXTURE_14_1_BODY).expect("write fixture manifest");
+
+    let manifest = PluginManifest::from_path(&path).expect("parse §14.1 fixture");
+    assert_fixture_fields(&manifest);
+    manifest
+        .validate()
+        .expect("§14.1-complete manifest must validate");
+
+    assert_empty_plugin_name_rejected(dir.path());
+
+    let m = helper_manifest();
     assert!(
         m.activates_for_language("rust"),
         "rust is in on_language → activates",
