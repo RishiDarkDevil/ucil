@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
 use clap::{Args, Subcommand, ValueEnum};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use walkdir::WalkDir;
 
@@ -158,6 +158,46 @@ pub enum PluginCmdError {
         /// Number of tools reported (may be zero).
         tool_count: usize,
     },
+    /// IO error while reading or writing the plugin state file
+    /// (`<plugins_dir>/.ucil-plugin-state.toml`).
+    #[error("failed to read plugin state at {}: {source}", path.display())]
+    StateRead {
+        /// State-file path that failed.
+        path: PathBuf,
+        /// Underlying IO error.
+        #[source]
+        source: std::io::Error,
+    },
+    /// Failure parsing or serialising the plugin state file.
+    #[error("failed to (de)serialise plugin state at {}: {source}", path.display())]
+    StateFormat {
+        /// State-file path that failed.
+        path: PathBuf,
+        /// Human-readable diagnostic for the underlying TOML error.
+        #[source]
+        source: StateFormatError,
+    },
+    /// Atomic-rename step of the state-file write failed.
+    #[error("failed to write plugin state to {}: {source}", path.display())]
+    StateWrite {
+        /// State-file path that failed.
+        path: PathBuf,
+        /// Underlying IO error from the rename or temp-file write.
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+/// Wrapper error around `toml::de::Error` / `toml::ser::Error` so the
+/// outer [`PluginCmdError`] can stay one enum.
+#[derive(Debug, Error)]
+pub enum StateFormatError {
+    /// Failed to parse TOML on read.
+    #[error("invalid TOML: {0}")]
+    De(#[from] toml::de::Error),
+    /// Failed to serialise TOML on write.
+    #[error("invalid TOML: {0}")]
+    Ser(#[from] toml::ser::Error),
 }
 
 // ── JSON output shape ───────────────────────────────────────────────────────
@@ -235,11 +275,17 @@ async fn install_plugin(args: &InstallArgs) -> Result<InstallOutcome, PluginCmdE
 
     let tool_count = health.tools.len();
     match health.status {
-        HealthStatus::Ok if tool_count >= 1 => Ok(InstallOutcome {
-            name: health.name,
-            tools: health.tools,
-            status_label: "ok",
-        }),
+        HealthStatus::Ok if tool_count >= 1 => {
+            mutate_state(&args.plugins_dir, &health.name, |row| {
+                row.installed = true;
+            })
+            .await?;
+            Ok(InstallOutcome {
+                name: health.name,
+                tools: health.tools,
+                status_label: "ok",
+            })
+        }
         HealthStatus::Ok => Err(PluginCmdError::Degraded {
             name: health.name,
             message: "plugin reported Ok status but zero tools".to_owned(),
@@ -333,6 +379,144 @@ fn emit_json<W: Write>(outcome: &InstallOutcome, writer: &mut W) -> std::io::Res
     serde_json::to_writer_pretty(&mut *writer, &report).map_err(std::io::Error::other)?;
     writeln!(writer)?;
     Ok(())
+}
+
+// ── State persistence ───────────────────────────────────────────────────────
+//
+// Per-plugin `installed` / `enabled` flags are persisted in a single
+// TOML file at `<plugins_dir>/.ucil-plugin-state.toml`. Writes go
+// through tempfile-then-rename so a concurrent `list` either sees the
+// old state or the new state — never a torn read. The file is created
+// lazily on first mutation; absence is equivalent to `Vec::new()`.
+
+/// One row of the plugin state file. Frozen field set so the on-disk
+/// layout is stable across releases. Adding a field is a breaking
+/// change requiring an ADR + a tombstone-compatible migration.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+struct PluginStateEntry {
+    /// Plugin name from the manifest's `[plugin] name` field.
+    name: String,
+    /// Whether the operator has installed the plugin
+    /// (manifest passed health probe via `install` / `reload`).
+    #[serde(default)]
+    installed: bool,
+    /// Whether the operator has enabled the plugin (the daemon should
+    /// route activation rules through it). Disabled plugins remain on
+    /// disk but UCIL skips them at runtime.
+    #[serde(default)]
+    enabled: bool,
+}
+
+/// On-disk wrapper over the state file. Lives only for the lifetime of
+/// a (de)serialise round-trip — callers operate on the inner
+/// `Vec<PluginStateEntry>`.
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct PluginStateFile {
+    #[serde(default)]
+    plugins: Vec<PluginStateEntry>,
+}
+
+/// Path to the plugin state file relative to `plugins_dir`.
+fn state_file_path(plugins_dir: &Path) -> PathBuf {
+    plugins_dir.join(".ucil-plugin-state.toml")
+}
+
+/// Read the plugin state file. Returns `Ok(vec![])` when the file is
+/// absent so first-mutation flows do not require pre-creation.
+async fn read_state(plugins_dir: &Path) -> Result<Vec<PluginStateEntry>, PluginCmdError> {
+    let path = state_file_path(plugins_dir);
+    let bytes = match tokio::fs::read(&path).await {
+        Ok(bytes) => bytes,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => {
+            return Err(PluginCmdError::StateRead {
+                path: path.clone(),
+                source: err,
+            });
+        }
+    };
+    let text = std::str::from_utf8(&bytes).map_err(|err| PluginCmdError::StateRead {
+        path: path.clone(),
+        source: std::io::Error::new(std::io::ErrorKind::InvalidData, err),
+    })?;
+    let parsed: PluginStateFile =
+        toml::from_str(text).map_err(|err| PluginCmdError::StateFormat {
+            path: path.clone(),
+            source: StateFormatError::De(err),
+        })?;
+    Ok(parsed.plugins)
+}
+
+/// Write the plugin state file atomically: serialise to TOML, write to
+/// a sibling tempfile, then `tokio::fs::rename` so a concurrent reader
+/// either sees the old file or the new file — never a half-written one.
+/// Creates `plugins_dir` if it does not yet exist (mirrors the
+/// `WalkDir`-tolerant behaviour of `resolve_manifest`).
+async fn write_state(
+    plugins_dir: &Path,
+    entries: &[PluginStateEntry],
+) -> Result<(), PluginCmdError> {
+    let path = state_file_path(plugins_dir);
+    let file = PluginStateFile {
+        plugins: entries.to_vec(),
+    };
+    let body = toml::to_string_pretty(&file).map_err(|err| PluginCmdError::StateFormat {
+        path: path.clone(),
+        source: StateFormatError::Ser(err),
+    })?;
+
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|err| PluginCmdError::StateWrite {
+                    path: path.clone(),
+                    source: err,
+                })?;
+        }
+    }
+
+    let tmp_path = path.with_extension("toml.tmp");
+    tokio::fs::write(&tmp_path, body.as_bytes())
+        .await
+        .map_err(|err| PluginCmdError::StateWrite {
+            path: tmp_path.clone(),
+            source: err,
+        })?;
+    tokio::fs::rename(&tmp_path, &path)
+        .await
+        .map_err(|err| PluginCmdError::StateWrite {
+            path: path.clone(),
+            source: err,
+        })?;
+    Ok(())
+}
+
+/// Apply a mutation to the named plugin's state row. Adds a new row if
+/// none exists, otherwise updates in place. Returns the resulting row
+/// for downstream JSON / text emission.
+async fn mutate_state(
+    plugins_dir: &Path,
+    name: &str,
+    mutate: impl FnOnce(&mut PluginStateEntry),
+) -> Result<PluginStateEntry, PluginCmdError> {
+    let mut entries = read_state(plugins_dir).await?;
+    let idx = entries.iter().position(|e| e.name == name);
+    let updated = if let Some(i) = idx {
+        mutate(&mut entries[i]);
+        entries[i].clone()
+    } else {
+        let mut row = PluginStateEntry {
+            name: name.to_owned(),
+            installed: false,
+            enabled: false,
+        };
+        mutate(&mut row);
+        entries.push(row.clone());
+        row
+    };
+    write_state(plugins_dir, &entries).await?;
+    Ok(updated)
 }
 
 // ── Branch parity marker ────────────────────────────────────────────────────
