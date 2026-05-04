@@ -75,18 +75,29 @@ pub const DEFAULT_IDLE_TIMEOUT_MINUTES: u64 = 10;
 
 // ── Manifest types ───────────────────────────────────────────────────────────
 
-/// Parsed `plugin.toml` manifest — subset required by this WO.
+/// Parsed `plugin.toml` manifest.
 ///
-/// Three of the master-plan §14.1 top-level tables are modelled here:
-/// `[plugin]`, `[transport]`, and the optional `[lifecycle]`.  The
-/// remaining tables (resources, prompts, capabilities …) will be layered
-/// on in Phase 2 once real plugins ship.
+/// Models the master-plan §14.1 top-level tables: `[plugin]`,
+/// `[capabilities]` (with nested `[capabilities.activation]`),
+/// `[transport]`, the optional `[resources]`, and the optional
+/// `[lifecycle]`. `[capabilities]` and `[resources]` were added in
+/// Phase 2 Week 6 (P2-W6-F01); `#[serde(default)]` on both keeps
+/// minimal Phase-1 manifests parsing without edits.
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq, Default)]
 pub struct PluginManifest {
     /// Identity table.
     pub plugin: PluginSection,
+    /// `[capabilities]` table — provides / languages / activation
+    /// rules. Defaults to an empty section so older minimal manifests
+    /// still parse.
+    #[serde(default)]
+    pub capabilities: CapabilitiesSection,
     /// How to launch the plugin and what wire protocol to use.
     pub transport: TransportSection,
+    /// Optional `[resources]` table — soft hints used by the daemon's
+    /// scheduler to size sandbox + memory caps.
+    #[serde(default)]
+    pub resources: Option<ResourcesSection>,
     /// Optional `[lifecycle]` table: HOT/COLD mode + idle-timeout knobs.
     #[serde(default)]
     pub lifecycle: Option<LifecycleSection>,
@@ -124,6 +135,65 @@ pub struct TransportSection {
     /// Optional arguments forwarded to the plugin process.
     #[serde(default)]
     pub args: Vec<String>,
+}
+
+/// `[capabilities]` section of a plugin manifest (master-plan §14.1).
+///
+/// Declares what the plugin contributes to UCIL and when the daemon
+/// should activate it. All fields are `#[serde(default)]` so a manifest
+/// that omits the entire `[capabilities]` table parses to an empty
+/// section that activates for nothing — the conservative default.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq, Default)]
+pub struct CapabilitiesSection {
+    /// MCP tool names the plugin provides (e.g. `["search_code"]`).
+    #[serde(default)]
+    pub provides: Vec<String>,
+    /// Languages the plugin understands (e.g. `["rust", "typescript"]`).
+    /// Empty means language-agnostic.
+    #[serde(default)]
+    pub languages: Vec<String>,
+    /// Activation rules — when UCIL should load and route to this
+    /// plugin. See [`ActivationSection`].
+    #[serde(default)]
+    pub activation: ActivationSection,
+}
+
+/// `[capabilities.activation]` subsection.
+///
+/// Each list applies as an OR: a non-empty `on_language` filter means
+/// "activate when the active session targets one of these languages";
+/// an empty list means "no language filter — activate for any". Same
+/// rule for `on_tool`. `eager` skips lazy activation and pre-warms the
+/// plugin at daemon startup.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq, Default)]
+pub struct ActivationSection {
+    /// Languages whose presence in a session activates this plugin.
+    #[serde(default)]
+    pub on_language: Vec<String>,
+    /// MCP tool calls whose name activates this plugin.
+    #[serde(default)]
+    pub on_tool: Vec<String>,
+    /// When `true`, load the plugin at daemon startup instead of
+    /// lazily on first activation match.
+    #[serde(default)]
+    pub eager: bool,
+}
+
+/// `[resources]` section of a plugin manifest (master-plan §14.1).
+///
+/// Soft hints the daemon uses to size sandbox + scheduling. All fields
+/// are `Option` so a manifest may omit any of them; the absent fields
+/// fall back to crate-wide defaults at the point of use (not modelled
+/// here).
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq, Default)]
+pub struct ResourcesSection {
+    /// Expected resident memory ceiling, in mebibytes.
+    pub memory_mb: Option<u64>,
+    /// Wall-clock time the plugin needs from `spawn` to first
+    /// `tools/list` reply, in milliseconds.
+    pub startup_time_ms: Option<u64>,
+    /// Typical wall-clock time for a single tool call, in milliseconds.
+    pub typical_query_ms: Option<u64>,
 }
 
 /// `[lifecycle]` section of a plugin manifest (master-plan §14.1).
@@ -834,11 +904,13 @@ async fn test_hot_cold_lifecycle() {
             version: "0.1.0".into(),
             description: Some("HOT/COLD acceptance test manifest".into()),
         },
+        capabilities: CapabilitiesSection::default(),
         transport: TransportSection {
             kind: "stdio".into(),
             command: mock.to_string_lossy().into_owned(),
             args: vec![],
         },
+        resources: None,
         lifecycle: Some(LifecycleSection {
             hot_cold: true,
             idle_timeout_minutes: Some(1),
@@ -1022,11 +1094,13 @@ args = ["--hello"]
                 version: "0.0.0".into(),
                 description: None,
             },
+            capabilities: CapabilitiesSection::default(),
             transport: TransportSection {
                 kind: "sse".into(),
                 command: "unused".into(),
                 args: vec![],
             },
+            resources: None,
             lifecycle: None,
         };
         let err = PluginManager::spawn(&manifest).expect_err("non-stdio must be rejected");
@@ -1077,6 +1151,7 @@ args = ["--hello"]
                 version: "0.0.0".into(),
                 description: None,
             },
+            capabilities: CapabilitiesSection::default(),
             transport: TransportSection {
                 kind: "stdio".into(),
                 // `cat` echoes back whatever we send it — but since it
@@ -1086,6 +1161,7 @@ args = ["--hello"]
                 command: "sleep".into(),
                 args: vec!["30".into()],
             },
+            resources: None,
             lifecycle: None,
         };
 
