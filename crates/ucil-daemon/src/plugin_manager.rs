@@ -75,18 +75,29 @@ pub const DEFAULT_IDLE_TIMEOUT_MINUTES: u64 = 10;
 
 // ── Manifest types ───────────────────────────────────────────────────────────
 
-/// Parsed `plugin.toml` manifest — subset required by this WO.
+/// Parsed `plugin.toml` manifest.
 ///
-/// Three of the master-plan §14.1 top-level tables are modelled here:
-/// `[plugin]`, `[transport]`, and the optional `[lifecycle]`.  The
-/// remaining tables (resources, prompts, capabilities …) will be layered
-/// on in Phase 2 once real plugins ship.
+/// Models the master-plan §14.1 top-level tables: `[plugin]`,
+/// `[capabilities]` (with nested `[capabilities.activation]`),
+/// `[transport]`, the optional `[resources]`, and the optional
+/// `[lifecycle]`. `[capabilities]` and `[resources]` were added in
+/// Phase 2 Week 6 (P2-W6-F01); `#[serde(default)]` on both keeps
+/// minimal Phase-1 manifests parsing without edits.
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq, Default)]
 pub struct PluginManifest {
     /// Identity table.
     pub plugin: PluginSection,
+    /// `[capabilities]` table — provides / languages / activation
+    /// rules. Defaults to an empty section so older minimal manifests
+    /// still parse.
+    #[serde(default)]
+    pub capabilities: CapabilitiesSection,
     /// How to launch the plugin and what wire protocol to use.
     pub transport: TransportSection,
+    /// Optional `[resources]` table — soft hints used by the daemon's
+    /// scheduler to size sandbox + memory caps.
+    #[serde(default)]
+    pub resources: Option<ResourcesSection>,
     /// Optional `[lifecycle]` table: HOT/COLD mode + idle-timeout knobs.
     #[serde(default)]
     pub lifecycle: Option<LifecycleSection>,
@@ -126,6 +137,65 @@ pub struct TransportSection {
     pub args: Vec<String>,
 }
 
+/// `[capabilities]` section of a plugin manifest (master-plan §14.1).
+///
+/// Declares what the plugin contributes to UCIL and when the daemon
+/// should activate it. All fields are `#[serde(default)]` so a manifest
+/// that omits the entire `[capabilities]` table parses to an empty
+/// section that activates for nothing — the conservative default.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq, Default)]
+pub struct CapabilitiesSection {
+    /// MCP tool names the plugin provides (e.g. `["search_code"]`).
+    #[serde(default)]
+    pub provides: Vec<String>,
+    /// Languages the plugin understands (e.g. `["rust", "typescript"]`).
+    /// Empty means language-agnostic.
+    #[serde(default)]
+    pub languages: Vec<String>,
+    /// Activation rules — when UCIL should load and route to this
+    /// plugin. See [`ActivationSection`].
+    #[serde(default)]
+    pub activation: ActivationSection,
+}
+
+/// `[capabilities.activation]` subsection.
+///
+/// Each list applies as an OR: a non-empty `on_language` filter means
+/// "activate when the active session targets one of these languages";
+/// an empty list means "no language filter — activate for any". Same
+/// rule for `on_tool`. `eager` skips lazy activation and pre-warms the
+/// plugin at daemon startup.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq, Default)]
+pub struct ActivationSection {
+    /// Languages whose presence in a session activates this plugin.
+    #[serde(default)]
+    pub on_language: Vec<String>,
+    /// MCP tool calls whose name activates this plugin.
+    #[serde(default)]
+    pub on_tool: Vec<String>,
+    /// When `true`, load the plugin at daemon startup instead of
+    /// lazily on first activation match.
+    #[serde(default)]
+    pub eager: bool,
+}
+
+/// `[resources]` section of a plugin manifest (master-plan §14.1).
+///
+/// Soft hints the daemon uses to size sandbox + scheduling. All fields
+/// are `Option` so a manifest may omit any of them; the absent fields
+/// fall back to crate-wide defaults at the point of use (not modelled
+/// here).
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq, Default)]
+pub struct ResourcesSection {
+    /// Expected resident memory ceiling, in mebibytes.
+    pub memory_mb: Option<u64>,
+    /// Wall-clock time the plugin needs from `spawn` to first
+    /// `tools/list` reply, in milliseconds.
+    pub startup_time_ms: Option<u64>,
+    /// Typical wall-clock time for a single tool call, in milliseconds.
+    pub typical_query_ms: Option<u64>,
+}
+
 /// `[lifecycle]` section of a plugin manifest (master-plan §14.1).
 ///
 /// Controls whether the plugin participates in the HOT/COLD lifecycle
@@ -162,11 +232,17 @@ impl LifecycleSection {
 impl PluginManifest {
     /// Read and parse a `plugin.toml` manifest from disk.
     ///
+    /// Calls [`Self::validate`] before returning so callers always
+    /// receive a well-formed manifest.
+    ///
     /// # Errors
     ///
     /// * [`PluginError::Io`] — the file could not be opened.
     /// * [`PluginError::ManifestParse`] — the file is not valid TOML or
     ///   omits required fields.
+    /// * [`PluginError::InvalidManifest`] — the manifest parses but
+    ///   fails a semantic check (empty required field, activation
+    ///   on a language not declared in `capabilities.languages`).
     pub fn from_path<P: AsRef<Path>>(path: P) -> Result<Self, PluginError> {
         let path = path.as_ref();
         let raw = std::fs::read_to_string(path).map_err(PluginError::Io)?;
@@ -174,7 +250,105 @@ impl PluginManifest {
             path: path.to_path_buf(),
             source: e,
         })?;
+        manifest.validate()?;
         Ok(manifest)
+    }
+
+    /// Validate semantic invariants on top of the TOML schema check.
+    ///
+    /// Master-plan §14.1 requires every manifest to carry a non-empty
+    /// `plugin.name` (no whitespace), `plugin.version`, `transport.kind`,
+    /// and `transport.command`. When `capabilities.languages` is
+    /// non-empty every entry in `capabilities.activation.on_language`
+    /// MUST also appear in `capabilities.languages` — otherwise the
+    /// activation rule is unreachable.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError::InvalidManifest`] with the offending
+    /// `field` and a human-readable `reason`.
+    pub fn validate(&self) -> Result<(), PluginError> {
+        if self.plugin.name.is_empty() {
+            return Err(PluginError::InvalidManifest {
+                field: "plugin.name",
+                reason: "plugin.name must not be empty".to_owned(),
+            });
+        }
+        if self.plugin.name.chars().any(char::is_whitespace) {
+            return Err(PluginError::InvalidManifest {
+                field: "plugin.name",
+                reason: format!(
+                    "plugin.name `{}` must not contain whitespace",
+                    self.plugin.name
+                ),
+            });
+        }
+        if self.plugin.version.is_empty() {
+            return Err(PluginError::InvalidManifest {
+                field: "plugin.version",
+                reason: "plugin.version must not be empty".to_owned(),
+            });
+        }
+        if self.transport.kind.is_empty() {
+            return Err(PluginError::InvalidManifest {
+                field: "transport.type",
+                reason: "transport.type must not be empty".to_owned(),
+            });
+        }
+        if self.transport.command.is_empty() {
+            return Err(PluginError::InvalidManifest {
+                field: "transport.command",
+                reason: "transport.command must not be empty".to_owned(),
+            });
+        }
+        if !self.capabilities.languages.is_empty() {
+            for lang in &self.capabilities.activation.on_language {
+                if !self.capabilities.languages.iter().any(|l| l == lang) {
+                    return Err(PluginError::InvalidManifest {
+                        field: "capabilities.activation.on_language",
+                        reason: format!(
+                            "activation language `{lang}` is not declared in capabilities.languages"
+                        ),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// True when the activation rules say this plugin should fire for
+    /// the given language.
+    ///
+    /// An empty `capabilities.activation.on_language` means the plugin
+    /// is language-agnostic and activates for any language; otherwise
+    /// the rule is a simple membership test.
+    #[must_use]
+    pub fn activates_for_language(&self, language: &str) -> bool {
+        if self.capabilities.activation.on_language.is_empty() {
+            return true;
+        }
+        self.capabilities
+            .activation
+            .on_language
+            .iter()
+            .any(|s| s == language)
+    }
+
+    /// True when the activation rules say this plugin should fire for
+    /// the given MCP tool name.
+    ///
+    /// Same semantics as [`Self::activates_for_language`]: empty
+    /// `on_tool` means activate for every tool; otherwise membership.
+    #[must_use]
+    pub fn activates_for_tool(&self, tool: &str) -> bool {
+        if self.capabilities.activation.on_tool.is_empty() {
+            return true;
+        }
+        self.capabilities
+            .activation
+            .on_tool
+            .iter()
+            .any(|s| s == tool)
     }
 }
 
@@ -239,6 +413,20 @@ impl std::fmt::Display for PluginState {
 /// `Arc<RwLock<_>>` so the background idle-monitor task (see
 /// [`PluginManager::run_idle_monitor`]) can drive state transitions
 /// without the caller needing to hand it out a mutable reference.
+///
+/// State machine (master-plan §14.2):
+///
+/// ```text
+/// DISCOVERED → REGISTERED → LOADING → ACTIVE → IDLE → STOPPED
+///                                      ↑       ↓
+///                                      └───────┘  (HOT/COLD via tick + mark_call)
+/// any → ERROR
+/// ```
+///
+/// Transitions are driven by the `register` / `mark_loading` /
+/// `mark_active` / `stop` / `mark_error` methods.  Each successful
+/// transition is logged at `tracing::info!` (or `warn!` for ERROR)
+/// with target `ucil.plugin.lifecycle` per master-plan §15.2.
 #[derive(Debug, Clone)]
 pub struct PluginRuntime {
     /// The manifest that produced this runtime.  Kept by value so the
@@ -255,6 +443,11 @@ pub struct PluginRuntime {
     /// the crate default.  A tick whose `now - last_call` exceeds this
     /// duration demotes the runtime to [`PluginState::Idle`].
     pub idle_timeout: Duration,
+    /// Captured failure message when the runtime is in
+    /// [`PluginState::Error`].  `None` whenever the state has never
+    /// been promoted to ERROR (or has been reset by a successful
+    /// `register()`).
+    pub error_message: Option<String>,
 }
 
 impl PluginRuntime {
@@ -274,7 +467,20 @@ impl PluginRuntime {
             state: PluginState::Registered,
             last_call: Instant::now(),
             idle_timeout,
+            error_message: None,
         }
+    }
+
+    /// Build a runtime that starts in [`PluginState::Discovered`].
+    ///
+    /// Used when the manifest has been found on disk but not yet
+    /// promoted to the registry — call [`Self::register`] to drive
+    /// `Discovered → Registered`.
+    #[must_use]
+    pub fn discovered(manifest: PluginManifest) -> Self {
+        let mut rt = Self::new(manifest);
+        rt.state = PluginState::Discovered;
+        rt
     }
 
     /// Builder helper to override the idle timeout (tests use this for
@@ -313,6 +519,134 @@ impl PluginRuntime {
         }
         None
     }
+
+    // ── Lifecycle state-machine transitions ──────────────────────────────
+
+    /// `Discovered → Registered`.
+    ///
+    /// Resets `error_message` to `None` so a manifest that previously
+    /// failed health checks can be re-registered cleanly.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError::IllegalTransition`] when invoked from a
+    /// state other than [`PluginState::Discovered`].
+    pub fn register(&mut self) -> Result<(), PluginError> {
+        let old = self.state;
+        if !matches!(old, PluginState::Discovered) {
+            return Err(PluginError::IllegalTransition {
+                from: old,
+                to: PluginState::Registered,
+            });
+        }
+        self.state = PluginState::Registered;
+        self.error_message = None;
+        log_transition(&self.manifest.plugin.name, old, self.state);
+        Ok(())
+    }
+
+    /// `Registered | Idle → Loading`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError::IllegalTransition`] when invoked from any
+    /// other state.
+    pub fn mark_loading(&mut self) -> Result<(), PluginError> {
+        let old = self.state;
+        if !matches!(old, PluginState::Registered | PluginState::Idle) {
+            return Err(PluginError::IllegalTransition {
+                from: old,
+                to: PluginState::Loading,
+            });
+        }
+        self.state = PluginState::Loading;
+        log_transition(&self.manifest.plugin.name, old, self.state);
+        Ok(())
+    }
+
+    /// `Loading → Active`. Advances `last_call` so the idle countdown
+    /// restarts from the moment the plugin became available.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError::IllegalTransition`] when invoked from a
+    /// state other than [`PluginState::Loading`].
+    pub fn mark_active(&mut self) -> Result<(), PluginError> {
+        let old = self.state;
+        if !matches!(old, PluginState::Loading) {
+            return Err(PluginError::IllegalTransition {
+                from: old,
+                to: PluginState::Active,
+            });
+        }
+        self.state = PluginState::Active;
+        self.last_call = Instant::now();
+        log_transition(&self.manifest.plugin.name, old, self.state);
+        Ok(())
+    }
+
+    /// Any non-[`PluginState::Error`], non-[`PluginState::Stopped`] →
+    /// [`PluginState::Stopped`].
+    ///
+    /// Stopping an already-Stopped runtime is a no-op (returns `Ok`)
+    /// because manager bookkeeping may attempt redundant stops.
+    /// Stopping a runtime that is in [`PluginState::Error`] is
+    /// rejected — the caller must `register()` (which clears the
+    /// error) first if they want a clean shutdown path.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError::IllegalTransition`] when invoked from
+    /// [`PluginState::Error`].
+    pub fn stop(&mut self) -> Result<(), PluginError> {
+        let old = self.state;
+        if matches!(old, PluginState::Stopped) {
+            return Ok(());
+        }
+        if matches!(old, PluginState::Error) {
+            return Err(PluginError::IllegalTransition {
+                from: old,
+                to: PluginState::Stopped,
+            });
+        }
+        self.state = PluginState::Stopped;
+        log_transition(&self.manifest.plugin.name, old, self.state);
+        Ok(())
+    }
+
+    /// Any → [`PluginState::Error`]. Captures the supplied message in
+    /// [`Self::error_message`] and emits a `tracing::warn!` event.
+    ///
+    /// Never returns an error — the ERROR state is reachable from any
+    /// other state by design (it is the catch-all failure capture).
+    pub fn mark_error(&mut self, msg: impl Into<String>) {
+        let old = self.state;
+        let msg = msg.into();
+        self.state = PluginState::Error;
+        self.error_message = Some(msg.clone());
+        tracing::warn!(
+            target: "ucil.plugin.lifecycle",
+            plugin = %self.manifest.plugin.name,
+            from = %old,
+            to = %PluginState::Error,
+            error = %msg,
+            "plugin entered ERROR state",
+        );
+    }
+}
+
+/// Emit a single `tracing::info!` event for a successful state
+/// transition.  Centralised so every transition method records the
+/// same fields under the same target (`ucil.plugin.lifecycle`,
+/// master-plan §15.2).
+fn log_transition(plugin: &str, from: PluginState, to: PluginState) {
+    tracing::info!(
+        target: "ucil.plugin.lifecycle",
+        plugin = %plugin,
+        from = %from,
+        to = %to,
+        "plugin lifecycle transition",
+    );
 }
 
 // ── Health-check output types ────────────────────────────────────────────────
@@ -357,6 +691,18 @@ pub enum PluginError {
         #[source]
         source: toml::de::Error,
     },
+    /// The manifest parsed but failed a semantic check enforced by
+    /// [`PluginManifest::validate`] — e.g. empty `plugin.name` or an
+    /// activation entry that targets an undeclared language.
+    #[error("invalid manifest: {field}: {reason}")]
+    InvalidManifest {
+        /// Dotted name of the offending field (`"plugin.name"`,
+        /// `"capabilities.activation.on_language"`, …).
+        field: &'static str,
+        /// Human-readable explanation suitable for logs / error
+        /// messages.
+        reason: String,
+    },
     /// The manifest transport kind is not supported by the skeleton.
     #[error("unsupported transport `{0}` (only `stdio` is implemented)")]
     UnsupportedTransport(String),
@@ -385,6 +731,17 @@ pub enum PluginError {
     /// The plugin returned malformed JSON or a JSON-RPC error frame.
     #[error("plugin returned an invalid tools/list response: {0}")]
     ProtocolError(String),
+    /// A lifecycle-state transition was rejected because the source
+    /// state does not permit moving to the target state.  Emitted by
+    /// the [`PluginRuntime`] transition methods (`register`,
+    /// `mark_loading`, `mark_active`, `stop`).
+    #[error("illegal lifecycle transition: {from} → {to}")]
+    IllegalTransition {
+        /// State the runtime was in when the transition was attempted.
+        from: PluginState,
+        /// State the caller asked the runtime to enter.
+        to: PluginState,
+    },
 }
 
 // ── Plugin manager ───────────────────────────────────────────────────────────
@@ -834,11 +1191,13 @@ async fn test_hot_cold_lifecycle() {
             version: "0.1.0".into(),
             description: Some("HOT/COLD acceptance test manifest".into()),
         },
+        capabilities: CapabilitiesSection::default(),
         transport: TransportSection {
             kind: "stdio".into(),
             command: mock.to_string_lossy().into_owned(),
             args: vec![],
         },
+        resources: None,
         lifecycle: Some(LifecycleSection {
             hot_cold: true,
             idle_timeout_minutes: Some(1),
@@ -912,6 +1271,319 @@ async fn test_hot_cold_lifecycle() {
         runtime.state,
         PluginState::Active,
         "wake must drive Loading → Active via a real health check",
+    );
+}
+
+/// Master-plan §14.1-complete fixture body for `test_manifest_parser`.
+#[cfg(test)]
+const FIXTURE_14_1_BODY: &str = r#"[plugin]
+name = "semgrep-fixture"
+version = "1.2.3"
+description = "Test fixture covering every §14.1 section."
+
+[capabilities]
+provides = ["search_code", "scan_security"]
+languages = ["rust", "typescript", "python"]
+
+[capabilities.activation]
+on_language = ["rust", "typescript"]
+on_tool = ["search_code"]
+eager = false
+
+[transport]
+type = "stdio"
+command = "/usr/local/bin/semgrep"
+args = ["--mcp"]
+
+[resources]
+memory_mb = 200
+startup_time_ms = 300
+typical_query_ms = 50
+
+[lifecycle]
+hot_cold = true
+idle_timeout_minutes = 5
+"#;
+
+/// Assert every field of the §14.1-complete fixture manifest.
+#[cfg(test)]
+fn assert_fixture_fields(manifest: &PluginManifest) {
+    // [plugin]
+    assert_eq!(manifest.plugin.name, "semgrep-fixture");
+    assert_eq!(manifest.plugin.version, "1.2.3");
+    assert_eq!(
+        manifest.plugin.description.as_deref(),
+        Some("Test fixture covering every §14.1 section.")
+    );
+
+    // [capabilities] + [capabilities.activation]
+    assert_eq!(
+        manifest.capabilities.provides,
+        vec!["search_code".to_owned(), "scan_security".to_owned()],
+    );
+    assert_eq!(
+        manifest.capabilities.languages,
+        vec![
+            "rust".to_owned(),
+            "typescript".to_owned(),
+            "python".to_owned(),
+        ],
+    );
+    assert_eq!(
+        manifest.capabilities.activation.on_language,
+        vec!["rust".to_owned(), "typescript".to_owned()],
+    );
+    assert_eq!(
+        manifest.capabilities.activation.on_tool,
+        vec!["search_code".to_owned()],
+    );
+    assert!(!manifest.capabilities.activation.eager);
+
+    // [transport]
+    assert_eq!(manifest.transport.kind, "stdio");
+    assert_eq!(manifest.transport.command, "/usr/local/bin/semgrep");
+    assert_eq!(manifest.transport.args, vec!["--mcp".to_owned()]);
+
+    // [resources]
+    let resources = manifest
+        .resources
+        .as_ref()
+        .expect("[resources] table must parse");
+    assert_eq!(resources.memory_mb, Some(200));
+    assert_eq!(resources.startup_time_ms, Some(300));
+    assert_eq!(resources.typical_query_ms, Some(50));
+
+    // [lifecycle]
+    let lifecycle = manifest
+        .lifecycle
+        .as_ref()
+        .expect("[lifecycle] table must parse");
+    assert!(lifecycle.hot_cold);
+    assert_eq!(lifecycle.idle_timeout_minutes, Some(5));
+}
+
+/// Assert that an empty `plugin.name` is rejected by
+/// [`PluginManifest::from_path`] with the right field.
+#[cfg(test)]
+fn assert_empty_plugin_name_rejected(dir: &std::path::Path) {
+    let bad_path = dir.join("bad.toml");
+    std::fs::write(
+        &bad_path,
+        r#"[plugin]
+name = ""
+version = "0.0.0"
+
+[transport]
+type = "stdio"
+command = "/usr/bin/true"
+"#,
+    )
+    .expect("write bad manifest");
+
+    let err = PluginManifest::from_path(&bad_path).expect_err("empty plugin.name must be rejected");
+    match err {
+        PluginError::InvalidManifest { field, .. } => {
+            assert_eq!(
+                field, "plugin.name",
+                "expected plugin.name field, got {field}"
+            );
+        }
+        other => panic!("expected InvalidManifest {{ field: \"plugin.name\", .. }}, got {other:?}"),
+    }
+}
+
+/// Build the struct-literal manifest used by the activation-helper
+/// assertions in `test_manifest_parser`.
+#[cfg(test)]
+fn helper_manifest() -> PluginManifest {
+    PluginManifest {
+        plugin: PluginSection {
+            name: "helper-only".into(),
+            version: "0.1.0".into(),
+            description: None,
+        },
+        capabilities: CapabilitiesSection {
+            provides: vec![],
+            languages: vec!["rust".into(), "typescript".into()],
+            activation: ActivationSection {
+                on_language: vec!["rust".into()],
+                on_tool: vec![],
+                eager: false,
+            },
+        },
+        transport: TransportSection {
+            kind: "stdio".into(),
+            command: "/usr/bin/true".into(),
+            args: vec![],
+        },
+        resources: None,
+        lifecycle: None,
+    }
+}
+
+/// Acceptance test for `P2-W6-F01` — `[capabilities]` + `[resources]`
+/// manifest parsing.
+///
+/// Frozen selector: `plugin_manager::test_manifest_parser`.
+///
+/// Walks `PluginManifest::from_path` against a fixture covering every
+/// master-plan §14.1 section (`[plugin]`, `[capabilities]` with nested
+/// `[capabilities.activation]`, `[transport]`, `[resources]`,
+/// `[lifecycle]`).  Then exercises the sad path
+/// (`PluginError::InvalidManifest`) and the activation helpers.
+#[cfg(test)]
+#[test]
+fn test_manifest_parser() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("semgrep.toml");
+    std::fs::write(&path, FIXTURE_14_1_BODY).expect("write fixture manifest");
+
+    let manifest = PluginManifest::from_path(&path).expect("parse §14.1 fixture");
+    assert_fixture_fields(&manifest);
+    manifest
+        .validate()
+        .expect("§14.1-complete manifest must validate");
+
+    assert_empty_plugin_name_rejected(dir.path());
+
+    let m = helper_manifest();
+    assert!(
+        m.activates_for_language("rust"),
+        "rust is in on_language → activates",
+    );
+    assert!(
+        !m.activates_for_language("go"),
+        "go is not in on_language → does NOT activate",
+    );
+    // Empty `on_tool` ⇒ activates for every tool (master-plan default
+    // for plugins that don't filter).
+    assert!(
+        m.activates_for_tool("anything"),
+        "empty on_tool ⇒ activates for any tool",
+    );
+}
+
+/// Acceptance test for `P2-W6-F02` — full plugin lifecycle state
+/// machine (DISCOVERED → REGISTERED → LOADING → ACTIVE → IDLE →
+/// LOADING → ACTIVE → STOPPED), plus illegal-transition rejection
+/// and the ERROR-capture path.
+///
+/// Frozen selector: `plugin_manager::test_lifecycle_state_machine`.
+///
+/// Drives the in-memory state machine only — no subprocess spawned,
+/// no `tracing` subscriber installed (avoids cross-test
+/// contamination).  Subscriber-based assertion is left for the
+/// later integration test (P2-W6-F08) per the WO scope.
+#[cfg(test)]
+#[tokio::test]
+async fn test_lifecycle_state_machine() {
+    use std::time::Duration as Dur;
+
+    let manifest = PluginManifest {
+        plugin: PluginSection {
+            name: "lifecycle-fixture".into(),
+            version: "0.1.0".into(),
+            description: None,
+        },
+        capabilities: CapabilitiesSection::default(),
+        transport: TransportSection {
+            kind: "stdio".into(),
+            command: "/usr/bin/true".into(),
+            args: vec![],
+        },
+        resources: None,
+        lifecycle: None,
+    };
+
+    // ── Phase 1: Discovered → Registered ─────────────────────────────
+    let mut runtime = PluginRuntime::discovered(manifest.clone());
+    assert_eq!(runtime.state, PluginState::Discovered);
+    runtime
+        .register()
+        .expect("Discovered → Registered must succeed");
+    assert_eq!(runtime.state, PluginState::Registered);
+    assert!(
+        runtime.error_message.is_none(),
+        "register() must clear any prior error_message",
+    );
+
+    // ── Phase 2: Registered → Loading → Active ───────────────────────
+    runtime
+        .mark_loading()
+        .expect("Registered → Loading must succeed");
+    assert_eq!(runtime.state, PluginState::Loading);
+    runtime
+        .mark_active()
+        .expect("Loading → Active must succeed");
+    assert_eq!(runtime.state, PluginState::Active);
+
+    // ── Phase 3: Active → Idle (via tick + back-dated last_call) ─────
+    runtime.idle_timeout = Dur::from_millis(50);
+    runtime.last_call = Instant::now()
+        .checked_sub(Dur::from_millis(250))
+        .expect("clock supports a 250 ms rewind");
+    let transition = runtime.tick(Instant::now());
+    assert_eq!(transition, Some(PluginState::Idle));
+    assert_eq!(runtime.state, PluginState::Idle);
+
+    // ── Phase 4: Idle → Loading → Active (re-entry) ──────────────────
+    runtime.mark_loading().expect("Idle → Loading must succeed");
+    assert_eq!(runtime.state, PluginState::Loading);
+    runtime
+        .mark_active()
+        .expect("Loading → Active must succeed (re-entry)");
+    assert_eq!(runtime.state, PluginState::Active);
+
+    // ── Phase 5: illegal Active → Registered must error, not panic ──
+    let illegal = runtime.register();
+    match illegal {
+        Err(PluginError::IllegalTransition { from, to }) => {
+            assert_eq!(from, PluginState::Active);
+            assert_eq!(to, PluginState::Registered);
+        }
+        other => panic!("expected IllegalTransition, got {other:?}"),
+    }
+    assert_eq!(
+        runtime.state,
+        PluginState::Active,
+        "illegal transition must NOT mutate state",
+    );
+
+    // ── Phase 6: Active → Stopped ────────────────────────────────────
+    runtime.stop().expect("Active → Stopped must succeed");
+    assert_eq!(runtime.state, PluginState::Stopped);
+    // Stopping an already-Stopped runtime is a no-op (Ok).
+    runtime.stop().expect("Stopped → Stopped is a no-op");
+    assert_eq!(runtime.state, PluginState::Stopped);
+
+    // ── Phase 7: separate runtime exercises the ERROR capture path ──
+    let mut second = PluginRuntime::new(manifest);
+    assert_eq!(
+        second.state,
+        PluginState::Registered,
+        "PluginRuntime::new starts in Registered",
+    );
+    second.mark_error("boom");
+    assert_eq!(second.state, PluginState::Error);
+    assert_eq!(second.error_message.as_deref(), Some("boom"));
+
+    // mark_error from Error itself is also legal (catch-all).
+    second.mark_error("still broken");
+    assert_eq!(second.state, PluginState::Error);
+    assert_eq!(second.error_message.as_deref(), Some("still broken"));
+
+    // stop() from Error must be rejected — ERROR is a terminal state
+    // until a fresh register() resets the error_message.
+    let stop_from_error = second.stop();
+    assert!(
+        matches!(
+            stop_from_error,
+            Err(PluginError::IllegalTransition {
+                from: PluginState::Error,
+                to: PluginState::Stopped,
+            }),
+        ),
+        "stop() from Error must return IllegalTransition, got {stop_from_error:?}",
     );
 }
 
@@ -1022,11 +1694,13 @@ args = ["--hello"]
                 version: "0.0.0".into(),
                 description: None,
             },
+            capabilities: CapabilitiesSection::default(),
             transport: TransportSection {
                 kind: "sse".into(),
                 command: "unused".into(),
                 args: vec![],
             },
+            resources: None,
             lifecycle: None,
         };
         let err = PluginManager::spawn(&manifest).expect_err("non-stdio must be rejected");
@@ -1077,6 +1751,7 @@ args = ["--hello"]
                 version: "0.0.0".into(),
                 description: None,
             },
+            capabilities: CapabilitiesSection::default(),
             transport: TransportSection {
                 kind: "stdio".into(),
                 // `cat` echoes back whatever we send it — but since it
@@ -1086,6 +1761,7 @@ args = ["--hello"]
                 command: "sleep".into(),
                 args: vec!["30".into()],
             },
+            resources: None,
             lifecycle: None,
         };
 
