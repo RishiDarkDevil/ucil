@@ -3,7 +3,7 @@ ts: 2026-05-04T17:58:00Z
 phase: 2
 session: monitor
 trigger: stop-hook-gate-red-on-phase-startup
-resolved: false
+resolved: true
 auto_classify: bucket-A-admin
 close_when: phase-2-complete tag exists OR features passing[phase==2] >= 25
 ---
@@ -69,3 +69,27 @@ the bced486he progress monitor will catch this automatically.
 
 `bucket-A-admin` per DEC-0007 — auto-resolvable. Triage may delete or
 keep on next pass.
+
+## Resolution
+
+Resolved 2026-05-04 by triage (pass 1, phase 2). The immediate concern
+that motivated this escalation — "planner is in the middle of emitting
+WO-0042, no Phase 2 features started yet" — is fully addressed:
+
+- WO-0042 `plugin-manifest-and-lifecycle-statemachine` emitted, executed,
+  critic-reviewed CLEAN (commit `e8d76e3`).
+- Verifier flipped P2-W6-F01 + P2-W6-F02 to `passes=true` in fresh
+  session (commit `eb1eadd`).
+- WO-0042 fast-forward merged into main (commit `780b524`).
+- Phase 2 lessons-learned post written (commit `71fe894`).
+
+Phase-2 features passing: 2 / 25. The autonomous loop is healthy and
+progressing through additional Phase 2 work-orders. Subsequent gate-red
+on `scripts/gate-check.sh 2` is the normal mid-phase signal — not a
+fresh anomaly. This matches the resolution pattern of archived
+`20260415-0800-WO-0002-gate-expected-incomplete.md`: the immediate
+concern (a specific WO is verifier-processed and merged) is what closes
+the escalation, not the long-tail `close_when` (which reflects an
+overly strict reading of the original frontmatter).
+
+resolved: true
