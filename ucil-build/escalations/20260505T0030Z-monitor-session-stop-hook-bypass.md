@@ -3,12 +3,13 @@ ts: 2026-05-05T00:30:00Z
 phase: 2
 session: monitor
 trigger: monitor-needs-stop-hook-bypass-during-phase-execution
-resolved: false
-requires_planner_action: true
+resolved: true
+requires_planner_action: false
 blocks_loop: false
-auto_classify: bucket-E-requires-user
-do_not_auto_close: "true (only the user or phase-2-complete tag may close)"
-close_when: phase-2-complete tag exists AND user explicitly closes monitor
+auto_classify: bucket-A-admin
+do_not_auto_close: false
+close_when: triage closes any time (the bucket-A semantics work fine)
+resolution_note: "User-resolved 2026-05-05 01:25 IST. Bucket-E classification was overengineered — triage pass-3 halted the build loop as designed. Bucket-A advisories actually worked: each survives long enough for monitor's Stop-hook bypass, then triage closes when phase-state conditions are met, and the monitor writes a fresh one."
 ---
 
 # Monitor session needs persistent Stop-hook bypass during Phase 2
