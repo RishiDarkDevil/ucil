@@ -2,7 +2,8 @@
 
 **Feature**: P2-W7-F01 — G1 parallel-execution orchestrator
 **Branch**: `feat/WO-0047-g1-parallel-execution-orchestrator`
-**Final commit**: `5c7dfd1d9c7a5c86b8fd1ca5564188c116a63a34`
+**Final source commit (last code change)**: `5c7dfd1d9c7a5c86b8fd1ca5564188c116a63a34`
+**Tip commit (this marker)**: `aeea43751556615e930743f3b2bd406fda6f8c1d`
 **Status**: ready for critic + verifier
 
 ## What I verified locally
