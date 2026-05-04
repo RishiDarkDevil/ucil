@@ -1274,6 +1274,177 @@ async fn test_hot_cold_lifecycle() {
     );
 }
 
+/// Acceptance test for `P2-W6-F01` — `[capabilities]` + `[resources]`
+/// manifest parsing.
+///
+/// Frozen selector: `plugin_manager::test_manifest_parser`.
+///
+/// Walks `PluginManifest::from_path` against a fixture covering every
+/// master-plan §14.1 section (`[plugin]`, `[capabilities]` with nested
+/// `[capabilities.activation]`, `[transport]`, `[resources]`,
+/// `[lifecycle]`).  Then exercises the sad path
+/// (`PluginError::InvalidManifest`) and the activation helpers.
+#[cfg(test)]
+#[test]
+fn test_manifest_parser() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("semgrep.toml");
+    let body = r#"[plugin]
+name = "semgrep-fixture"
+version = "1.2.3"
+description = "Test fixture covering every §14.1 section."
+
+[capabilities]
+provides = ["search_code", "scan_security"]
+languages = ["rust", "typescript", "python"]
+
+[capabilities.activation]
+on_language = ["rust", "typescript"]
+on_tool = ["search_code"]
+eager = false
+
+[transport]
+type = "stdio"
+command = "/usr/local/bin/semgrep"
+args = ["--mcp"]
+
+[resources]
+memory_mb = 200
+startup_time_ms = 300
+typical_query_ms = 50
+
+[lifecycle]
+hot_cold = true
+idle_timeout_minutes = 5
+"#;
+    std::fs::write(&path, body).expect("write fixture manifest");
+
+    let manifest = PluginManifest::from_path(&path).expect("parse §14.1 fixture");
+
+    // ── [plugin] ────────────────────────────────────────────────────
+    assert_eq!(manifest.plugin.name, "semgrep-fixture");
+    assert_eq!(manifest.plugin.version, "1.2.3");
+    assert_eq!(
+        manifest.plugin.description.as_deref(),
+        Some("Test fixture covering every §14.1 section.")
+    );
+
+    // ── [capabilities] ──────────────────────────────────────────────
+    assert_eq!(
+        manifest.capabilities.provides,
+        vec!["search_code".to_owned(), "scan_security".to_owned()],
+    );
+    assert_eq!(
+        manifest.capabilities.languages,
+        vec![
+            "rust".to_owned(),
+            "typescript".to_owned(),
+            "python".to_owned(),
+        ],
+    );
+    assert_eq!(
+        manifest.capabilities.activation.on_language,
+        vec!["rust".to_owned(), "typescript".to_owned()],
+    );
+    assert_eq!(
+        manifest.capabilities.activation.on_tool,
+        vec!["search_code".to_owned()],
+    );
+    assert!(!manifest.capabilities.activation.eager);
+
+    // ── [transport] ─────────────────────────────────────────────────
+    assert_eq!(manifest.transport.kind, "stdio");
+    assert_eq!(manifest.transport.command, "/usr/local/bin/semgrep");
+    assert_eq!(manifest.transport.args, vec!["--mcp".to_owned()]);
+
+    // ── [resources] ─────────────────────────────────────────────────
+    let resources = manifest
+        .resources
+        .as_ref()
+        .expect("[resources] table must parse");
+    assert_eq!(resources.memory_mb, Some(200));
+    assert_eq!(resources.startup_time_ms, Some(300));
+    assert_eq!(resources.typical_query_ms, Some(50));
+
+    // ── [lifecycle] ─────────────────────────────────────────────────
+    let lifecycle = manifest
+        .lifecycle
+        .as_ref()
+        .expect("[lifecycle] table must parse");
+    assert!(lifecycle.hot_cold);
+    assert_eq!(lifecycle.idle_timeout_minutes, Some(5));
+
+    // ── happy validate() ────────────────────────────────────────────
+    manifest
+        .validate()
+        .expect("§14.1-complete manifest must validate");
+
+    // ── sad path: empty plugin.name ─────────────────────────────────
+    let bad_path = dir.path().join("bad.toml");
+    std::fs::write(
+        &bad_path,
+        r#"[plugin]
+name = ""
+version = "0.0.0"
+
+[transport]
+type = "stdio"
+command = "/usr/bin/true"
+"#,
+    )
+    .expect("write bad manifest");
+
+    let err = PluginManifest::from_path(&bad_path).expect_err("empty plugin.name must be rejected");
+    match err {
+        PluginError::InvalidManifest { field, .. } => {
+            assert_eq!(
+                field, "plugin.name",
+                "expected plugin.name field, got {field}"
+            );
+        }
+        other => panic!("expected InvalidManifest {{ field: \"plugin.name\", .. }}, got {other:?}"),
+    }
+
+    // ── activation helpers via struct-literal manifest ──────────────
+    let m = PluginManifest {
+        plugin: PluginSection {
+            name: "helper-only".into(),
+            version: "0.1.0".into(),
+            description: None,
+        },
+        capabilities: CapabilitiesSection {
+            provides: vec![],
+            languages: vec!["rust".into(), "typescript".into()],
+            activation: ActivationSection {
+                on_language: vec!["rust".into()],
+                on_tool: vec![],
+                eager: false,
+            },
+        },
+        transport: TransportSection {
+            kind: "stdio".into(),
+            command: "/usr/bin/true".into(),
+            args: vec![],
+        },
+        resources: None,
+        lifecycle: None,
+    };
+    assert!(
+        m.activates_for_language("rust"),
+        "rust is in on_language → activates",
+    );
+    assert!(
+        !m.activates_for_language("go"),
+        "go is not in on_language → does NOT activate",
+    );
+    // Empty `on_tool` ⇒ activates for every tool (master-plan default
+    // for plugins that don't filter).
+    assert!(
+        m.activates_for_tool("anything"),
+        "empty on_tool ⇒ activates for any tool",
+    );
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
