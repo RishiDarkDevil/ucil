@@ -1062,6 +1062,318 @@ args = []
     assert_eq!(tools.len(), 2, "tools array length must match tool_count");
 }
 
+// ── Module-root acceptance tests for `list|uninstall|enable|disable|reload` ──
+//
+// All five live at module root so the F07 frozen selector
+// `cargo test -p ucil-cli commands::plugin::` matches each
+// `test_plugin_<subcommand>_*` test directly. See DEC-0007 +
+// WO-0042/0043/0044 lessons-learned for the rationale.
+
+#[cfg(test)]
+fn write_minimal_manifest(plugin_dir: &Path, name: &str) {
+    let body = format!(
+        r#"[plugin]
+name = "{name}"
+version = "0.1.0"
+description = "module-root acceptance fixture"
+
+[transport]
+type = "stdio"
+command = "/usr/bin/true"
+args = []
+"#
+    );
+    std::fs::write(plugin_dir.join("plugin.toml"), body).expect("write minimal manifest");
+}
+
+#[cfg(test)]
+fn read_state_entry_blocking(plugins_dir: &Path, name: &str) -> Option<PluginStateEntry> {
+    let path = plugins_dir.join(".ucil-plugin-state.toml");
+    let text = std::fs::read_to_string(path).ok()?;
+    let parsed: PluginStateFile = toml::from_str(&text).ok()?;
+    parsed.plugins.into_iter().find(|e| e.name == name)
+}
+
+/// `commands::plugin::test_plugin_list_returns_all_discovered_manifests`
+///
+/// Stands up two manifests (`alpha`, `beta`) in a `TempDir`, runs
+/// `plugin list --format json`, and asserts the JSON array contains
+/// both names with their resolved `enabled`/`installed` defaults.
+#[cfg(test)]
+#[tokio::test]
+async fn test_plugin_list_returns_all_discovered_manifests() {
+    use tempfile::TempDir;
+
+    let tmp = TempDir::new().expect("tempdir");
+    let plugins_fixture = tmp.path().join("plugins_fixture");
+    let alpha_dir = plugins_fixture.join("category_a").join("alpha");
+    let beta_dir = plugins_fixture.join("category_b").join("beta");
+    std::fs::create_dir_all(&alpha_dir).expect("create alpha dir");
+    std::fs::create_dir_all(&beta_dir).expect("create beta dir");
+    write_minimal_manifest(&alpha_dir, "alpha");
+    write_minimal_manifest(&beta_dir, "beta");
+
+    let args = PluginArgs {
+        command: PluginSubcommand::List(ListArgs {
+            plugins_dir: plugins_fixture.clone(),
+            format: OutputFormat::Json,
+        }),
+    };
+
+    let mut buf: Vec<u8> = Vec::new();
+    run_with_writer(args, &mut buf)
+        .await
+        .expect("plugin list must succeed");
+
+    let printed = std::str::from_utf8(&buf).expect("utf-8 stdout");
+    let parsed: serde_json::Value = serde_json::from_str(printed).expect("report is valid JSON");
+    let plugins = parsed
+        .get("plugins")
+        .and_then(serde_json::Value::as_array)
+        .expect("plugins array present");
+    assert_eq!(plugins.len(), 2, "list must enumerate both manifests");
+
+    let names: Vec<&str> = plugins
+        .iter()
+        .filter_map(|p| p.get("name").and_then(serde_json::Value::as_str))
+        .collect();
+    assert!(names.contains(&"alpha"), "list must include alpha");
+    assert!(names.contains(&"beta"), "list must include beta");
+
+    for entry in plugins {
+        assert_eq!(
+            entry.get("installed").and_then(serde_json::Value::as_bool),
+            Some(false),
+            "default installed=false for never-mutated plugin"
+        );
+        assert_eq!(
+            entry.get("enabled").and_then(serde_json::Value::as_bool),
+            Some(false),
+            "default enabled=false for never-mutated plugin"
+        );
+    }
+}
+
+/// `commands::plugin::test_plugin_uninstall_marks_state_file`
+///
+/// Pre-creates a state file with `installed=true`, runs
+/// `uninstall alpha`, re-reads the state and asserts
+/// `installed=false`.
+#[cfg(test)]
+#[tokio::test]
+async fn test_plugin_uninstall_marks_state_file() {
+    use tempfile::TempDir;
+
+    let tmp = TempDir::new().expect("tempdir");
+    let plugins_fixture = tmp.path().join("plugins_fixture");
+    std::fs::create_dir_all(&plugins_fixture).expect("create plugins dir");
+
+    // Pre-populate state file with installed=true so we can detect the
+    // mutation flipping it to false.
+    let initial = PluginStateFile {
+        plugins: vec![PluginStateEntry {
+            name: "alpha".to_owned(),
+            installed: true,
+            enabled: true,
+        }],
+    };
+    std::fs::write(
+        plugins_fixture.join(".ucil-plugin-state.toml"),
+        toml::to_string_pretty(&initial).expect("seed state"),
+    )
+    .expect("write seed state");
+
+    let args = PluginArgs {
+        command: PluginSubcommand::Uninstall(UninstallArgs {
+            name: "alpha".to_owned(),
+            plugins_dir: plugins_fixture.clone(),
+            format: OutputFormat::Json,
+        }),
+    };
+
+    let mut buf: Vec<u8> = Vec::new();
+    run_with_writer(args, &mut buf)
+        .await
+        .expect("plugin uninstall must succeed");
+
+    let state = read_state_entry_blocking(&plugins_fixture, "alpha")
+        .expect("state row present after mutation");
+    assert!(
+        !state.installed,
+        "uninstall must set installed=false (got {state:?})"
+    );
+    assert!(
+        state.enabled,
+        "uninstall must NOT touch enabled — left as seeded true"
+    );
+}
+
+/// `commands::plugin::test_plugin_enable_marks_state_file`
+///
+/// Runs `enable alpha` against an empty state file and asserts the new
+/// row has `enabled=true`.
+#[cfg(test)]
+#[tokio::test]
+async fn test_plugin_enable_marks_state_file() {
+    use tempfile::TempDir;
+
+    let tmp = TempDir::new().expect("tempdir");
+    let plugins_fixture = tmp.path().join("plugins_fixture");
+    std::fs::create_dir_all(&plugins_fixture).expect("create plugins dir");
+
+    let args = PluginArgs {
+        command: PluginSubcommand::Enable(EnableArgs {
+            name: "alpha".to_owned(),
+            plugins_dir: plugins_fixture.clone(),
+            format: OutputFormat::Json,
+        }),
+    };
+
+    let mut buf: Vec<u8> = Vec::new();
+    run_with_writer(args, &mut buf)
+        .await
+        .expect("plugin enable must succeed");
+
+    let state =
+        read_state_entry_blocking(&plugins_fixture, "alpha").expect("state row created on enable");
+    assert!(
+        state.enabled,
+        "enable must set enabled=true (got {state:?})"
+    );
+    assert!(
+        !state.installed,
+        "enable must NOT touch installed — left as default false"
+    );
+}
+
+/// `commands::plugin::test_plugin_disable_marks_state_file`
+///
+/// Pre-creates a state file with `enabled=true`, runs `disable alpha`,
+/// re-reads the state and asserts `enabled=false`.
+#[cfg(test)]
+#[tokio::test]
+async fn test_plugin_disable_marks_state_file() {
+    use tempfile::TempDir;
+
+    let tmp = TempDir::new().expect("tempdir");
+    let plugins_fixture = tmp.path().join("plugins_fixture");
+    std::fs::create_dir_all(&plugins_fixture).expect("create plugins dir");
+
+    let initial = PluginStateFile {
+        plugins: vec![PluginStateEntry {
+            name: "alpha".to_owned(),
+            installed: true,
+            enabled: true,
+        }],
+    };
+    std::fs::write(
+        plugins_fixture.join(".ucil-plugin-state.toml"),
+        toml::to_string_pretty(&initial).expect("seed state"),
+    )
+    .expect("write seed state");
+
+    let args = PluginArgs {
+        command: PluginSubcommand::Disable(DisableArgs {
+            name: "alpha".to_owned(),
+            plugins_dir: plugins_fixture.clone(),
+            format: OutputFormat::Json,
+        }),
+    };
+
+    let mut buf: Vec<u8> = Vec::new();
+    run_with_writer(args, &mut buf)
+        .await
+        .expect("plugin disable must succeed");
+
+    let state = read_state_entry_blocking(&plugins_fixture, "alpha")
+        .expect("state row present after mutation");
+    assert!(
+        !state.enabled,
+        "disable must set enabled=false (got {state:?})"
+    );
+    assert!(
+        state.installed,
+        "disable must NOT touch installed — left as seeded true"
+    );
+}
+
+/// `commands::plugin::test_plugin_reload_runs_health_check`
+///
+/// Stands up a manifest pointing at the real `mock-mcp-plugin` binary
+/// (same setup as `test_plugin_install_resolves_manifest_by_name`),
+/// runs `reload alpha --format json`, and asserts the JSON carries
+/// `tool_count >= 1` AND the state file shows `installed=true`.
+#[cfg(test)]
+#[tokio::test]
+async fn test_plugin_reload_runs_health_check() {
+    use tempfile::TempDir;
+
+    let mock = mock_mcp_plugin_path();
+    assert!(
+        mock.exists(),
+        "expected mock-mcp-plugin binary at {} — run `cargo build -p ucil-daemon --bin mock-mcp-plugin` first",
+        mock.display()
+    );
+
+    let tmp = TempDir::new().expect("tempdir");
+    let plugins_fixture = tmp.path().join("plugins_fixture");
+    let plugin_dir = plugins_fixture.join("search").join("alpha");
+    std::fs::create_dir_all(&plugin_dir).expect("create plugin dir");
+
+    let manifest_body = format!(
+        r#"[plugin]
+name = "alpha"
+version = "0.1.0"
+description = "module-root reload subject-under-test"
+
+[transport]
+type = "stdio"
+command = "{cmd}"
+args = []
+"#,
+        cmd = mock.to_string_lossy().replace('\\', "\\\\"),
+    );
+    std::fs::write(plugin_dir.join("plugin.toml"), manifest_body).expect("write manifest");
+
+    let args = PluginArgs {
+        command: PluginSubcommand::Reload(ReloadArgs {
+            name: "alpha".to_owned(),
+            plugins_dir: plugins_fixture.clone(),
+            timeout_ms: 5_000,
+            format: OutputFormat::Json,
+        }),
+    };
+
+    let mut buf: Vec<u8> = Vec::new();
+    run_with_writer(args, &mut buf)
+        .await
+        .expect("plugin reload against mock must succeed");
+
+    let printed = std::str::from_utf8(&buf).expect("utf-8 stdout");
+    let parsed: serde_json::Value = serde_json::from_str(printed).expect("report is valid JSON");
+
+    let tool_count = parsed
+        .get("tool_count")
+        .and_then(serde_json::Value::as_u64)
+        .expect("tool_count present");
+    assert!(
+        tool_count >= 1,
+        "reload must report tool_count >= 1 (got {tool_count})"
+    );
+    assert_eq!(
+        parsed.get("status").and_then(|v| v.as_str()),
+        Some("reloaded"),
+        "status must be 'reloaded' (got {parsed})"
+    );
+
+    let state =
+        read_state_entry_blocking(&plugins_fixture, "alpha").expect("state row created on reload");
+    assert!(
+        state.installed,
+        "reload must persist installed=true (got {state:?})"
+    );
+}
+
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1158,6 +1470,103 @@ args = []
         assert_eq!(parsed["name"], "demo");
         assert_eq!(parsed["status"], "ok");
         assert_eq!(parsed["tool_count"], 1);
+        assert_eq!(parsed["tools"][0], "echo");
+    }
+
+    #[test]
+    fn list_emits_json_array() {
+        let outcome = ListOutcome {
+            rows: vec![
+                PluginStateEntry {
+                    name: "alpha".to_owned(),
+                    installed: true,
+                    enabled: false,
+                },
+                PluginStateEntry {
+                    name: "beta".to_owned(),
+                    installed: false,
+                    enabled: true,
+                },
+            ],
+        };
+        let mut buf: Vec<u8> = Vec::new();
+        emit_list_json(&outcome, &mut buf).expect("emit_list_json");
+        let parsed: serde_json::Value = serde_json::from_slice(&buf).expect("json");
+        let plugins = parsed["plugins"].as_array().expect("plugins is array");
+        assert_eq!(plugins.len(), 2);
+        assert_eq!(plugins[0]["name"], "alpha");
+        assert_eq!(plugins[0]["installed"], true);
+        assert_eq!(plugins[1]["name"], "beta");
+        assert_eq!(plugins[1]["enabled"], true);
+    }
+
+    #[test]
+    fn uninstall_emits_status_field() {
+        let outcome = StateChangeOutcome {
+            entry: PluginStateEntry {
+                name: "alpha".to_owned(),
+                installed: false,
+                enabled: true,
+            },
+            status_label: "uninstalled",
+        };
+        let mut buf: Vec<u8> = Vec::new();
+        emit_state_change_json(&outcome, &mut buf).expect("emit_state_change_json");
+        let parsed: serde_json::Value = serde_json::from_slice(&buf).expect("json");
+        assert_eq!(parsed["name"], "alpha");
+        assert_eq!(parsed["status"], "uninstalled");
+        assert_eq!(parsed["installed"], false);
+    }
+
+    #[test]
+    fn enable_emits_status_field() {
+        let outcome = StateChangeOutcome {
+            entry: PluginStateEntry {
+                name: "alpha".to_owned(),
+                installed: false,
+                enabled: true,
+            },
+            status_label: "enabled",
+        };
+        let mut buf: Vec<u8> = Vec::new();
+        emit_state_change_json(&outcome, &mut buf).expect("emit_state_change_json");
+        let parsed: serde_json::Value = serde_json::from_slice(&buf).expect("json");
+        assert_eq!(parsed["status"], "enabled");
+        assert_eq!(parsed["enabled"], true);
+    }
+
+    #[test]
+    fn disable_emits_status_field() {
+        let outcome = StateChangeOutcome {
+            entry: PluginStateEntry {
+                name: "alpha".to_owned(),
+                installed: true,
+                enabled: false,
+            },
+            status_label: "disabled",
+        };
+        let mut buf: Vec<u8> = Vec::new();
+        emit_state_change_json(&outcome, &mut buf).expect("emit_state_change_json");
+        let parsed: serde_json::Value = serde_json::from_slice(&buf).expect("json");
+        assert_eq!(parsed["status"], "disabled");
+        assert_eq!(parsed["enabled"], false);
+    }
+
+    #[test]
+    fn reload_emits_tool_count_field() {
+        let outcome = ReloadOutcome {
+            name: "alpha".to_owned(),
+            tools: vec!["echo".to_owned(), "reverse".to_owned()],
+            tool_count: 2,
+            installed: true,
+            enabled: false,
+        };
+        let mut buf: Vec<u8> = Vec::new();
+        emit_reload_json(&outcome, &mut buf).expect("emit_reload_json");
+        let parsed: serde_json::Value = serde_json::from_slice(&buf).expect("json");
+        assert_eq!(parsed["status"], "reloaded");
+        assert_eq!(parsed["tool_count"], 2);
+        assert_eq!(parsed["installed"], true);
         assert_eq!(parsed["tools"][0], "echo");
     }
 }
