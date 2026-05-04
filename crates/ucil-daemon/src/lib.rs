@@ -103,8 +103,9 @@ pub use executor::{enrich_find_definition, Caller, EnrichedFindDefinition, Execu
 #[rustfmt::skip]
 pub use lifecycle::{Checkpoint, CheckpointError, Lifecycle, PidFile, PidFileError, ShutdownReason};
 pub use plugin_manager::{
-    HealthStatus, LifecycleSection, PluginError, PluginHealth, PluginManager, PluginManifest,
-    PluginRuntime, PluginSection, PluginState, TransportSection, CIRCUIT_BREAKER_BASE_BACKOFF_MS,
+    ActivationSection, CapabilitiesSection, HealthStatus, LifecycleSection, PluginError,
+    PluginHealth, PluginManager, PluginManifest, PluginRuntime, PluginSection, PluginState,
+    ResourcesSection, TransportSection, CIRCUIT_BREAKER_BASE_BACKOFF_MS,
     DEFAULT_IDLE_TIMEOUT_MINUTES, HEALTH_CHECK_TIMEOUT_MS, MAX_RESTARTS,
 };
 // `health_check_with_timeout` is a method on `PluginManager`; it is reached via the
