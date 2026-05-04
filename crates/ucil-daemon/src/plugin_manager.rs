@@ -1716,6 +1716,97 @@ async fn test_hot_reload() {
         .expect("post-reload in_flight.read() must not block on a leaked writer guard");
 }
 
+/// Acceptance test for `P2-W6-F04` — circuit-breaker trip after
+/// MAX_RESTARTS consecutive failed restart attempts with exponential
+/// backoff between attempts.
+///
+/// Frozen selector: `plugin_manager::test_circuit_breaker`.
+///
+/// Builds a manifest pointing at a non-existent binary so every
+/// `health_check` call inside `restart_with_backoff` fails with
+/// `PluginError::Spawn { source: ENOENT }`.  Configures the manager
+/// with `with_circuit_breaker_base(Duration::from_millis(5))` so the
+/// {1, 2, 4} second production backoffs become {5, 10, 20} ms inside
+/// the test — total wall-time ≤ 50 ms.
+///
+/// Asserts:
+/// - the call returns `Err(PluginError::CircuitBreakerOpen { .. })`,
+/// - the runtime is now in `PluginState::Error`,
+/// - `restart_attempts == MAX_RESTARTS`,
+/// - `error_message` contains the phrase "circuit breaker",
+/// - elapsed ≥ 35 ms (5 + 10 + 20) — proves backoff occurred,
+/// - elapsed < 2 s — fast-test invariant.
+#[cfg(test)]
+#[tokio::test]
+async fn test_circuit_breaker() {
+    use std::time::Duration as Dur;
+
+    let manifest = PluginManifest {
+        plugin: PluginSection {
+            name: "breaker-fixture".into(),
+            version: "0.1.0".into(),
+            description: Some("circuit-breaker acceptance test manifest".into()),
+        },
+        capabilities: CapabilitiesSection::default(),
+        transport: TransportSection {
+            kind: "stdio".into(),
+            // Deliberately unreachable path so every spawn ENOENTs.
+            command: "/__ucil_test_nonexistent_breaker_binary__".into(),
+            args: vec![],
+        },
+        resources: None,
+        lifecycle: None,
+    };
+
+    let runtime = PluginRuntime::new(manifest);
+    let mut mgr = PluginManager::new().with_circuit_breaker_base(Dur::from_millis(5));
+    mgr.add(runtime);
+
+    let start = Instant::now();
+    let result = mgr.restart_with_backoff("breaker-fixture").await;
+    let elapsed = start.elapsed();
+
+    match result {
+        Err(PluginError::CircuitBreakerOpen { ref name, attempts }) => {
+            assert_eq!(name, "breaker-fixture");
+            assert_eq!(attempts, MAX_RESTARTS);
+        }
+        other => panic!("expected CircuitBreakerOpen, got {other:?}"),
+    }
+
+    let snapshot = mgr.registered_runtimes().await;
+    assert_eq!(snapshot.len(), 1, "manager retains the registered runtime");
+    assert_eq!(
+        snapshot[0].state,
+        PluginState::Error,
+        "circuit-breaker trip must transition the runtime to Error",
+    );
+    assert_eq!(
+        snapshot[0].restart_attempts, MAX_RESTARTS,
+        "every failed attempt must increment restart_attempts",
+    );
+    assert!(
+        snapshot[0]
+            .error_message
+            .as_deref()
+            .is_some_and(|m| m.contains("circuit breaker")),
+        "error_message must mention the breaker trip; got {:?}",
+        snapshot[0].error_message,
+    );
+
+    // Backoff floor: base × (1 + 2 + 4) = 5 × 7 = 35 ms minimum
+    // sleeping inside the loop. The actual wall-time is slightly
+    // higher because each spawn-ENOENT also takes a few ms.
+    assert!(
+        elapsed >= Dur::from_millis(35),
+        "exponential backoff must accumulate at least 35 ms (got {elapsed:?})",
+    );
+    assert!(
+        elapsed < Dur::from_secs(2),
+        "circuit-breaker test must complete inside the fast-test budget (got {elapsed:?})",
+    );
+}
+
 /// Master-plan §14.1-complete fixture body for `test_manifest_parser`.
 #[cfg(test)]
 const FIXTURE_14_1_BODY: &str = r#"[plugin]
