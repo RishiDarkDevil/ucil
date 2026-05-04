@@ -1599,6 +1599,123 @@ async fn test_hot_cold_lifecycle() {
     );
 }
 
+/// Acceptance test for `P2-W6-F03` — hot-reload of a live plugin
+/// without restarting the daemon, with proper draining of in-flight
+/// tool calls before the swap.
+///
+/// Frozen selector: `plugin_manager::test_hot_reload`.
+///
+/// Walks a real runtime through:
+///
+/// 1. `PluginManager::activate` registers a runtime in `Active` against
+///    the real `mock-mcp-plugin` binary (no mocks).
+/// 2. A background task acquires the runtime's `in_flight.read()`
+///    guard and holds it for ~100 ms — simulating an in-flight tool
+///    call.
+/// 3. The main task calls `mgr.reload(...)`. The writer-side gate must
+///    BLOCK until the background reader drops its guard, then run a
+///    real `health_check`, then flip the runtime back to `Active`.
+/// 4. After the reload returns, `in_flight.read()` must succeed
+///    immediately (proves the writer guard was released).
+#[cfg(test)]
+#[tokio::test]
+async fn test_hot_reload() {
+    use std::time::Duration as Dur;
+
+    let mock = mock_mcp_plugin_path();
+    assert!(
+        mock.exists(),
+        "expected mock-mcp-plugin binary at {} — run `cargo build -p ucil-daemon --bin mock-mcp-plugin` first",
+        mock.display()
+    );
+
+    let manifest = PluginManifest {
+        plugin: PluginSection {
+            name: "hot-reload-fixture".into(),
+            version: "0.1.0".into(),
+            description: Some("hot-reload acceptance test manifest".into()),
+        },
+        capabilities: CapabilitiesSection::default(),
+        transport: TransportSection {
+            kind: "stdio".into(),
+            command: mock.to_string_lossy().into_owned(),
+            args: vec![],
+        },
+        resources: None,
+        lifecycle: None,
+    };
+
+    let mut mgr = PluginManager::new();
+    let runtime = mgr
+        .activate(&manifest)
+        .await
+        .expect("activate must succeed against the real mock plugin");
+    assert_eq!(runtime.state, PluginState::Active);
+
+    // Capture the in_flight gate from the registered runtime so the
+    // background task and the post-reload re-acquisition both share
+    // the SAME Arc<RwLock<()>> the manager will drain.
+    let in_flight = mgr.registered_runtimes().await[0].in_flight.clone();
+
+    // Background reader holds the read half for ~100 ms. The reload
+    // call from the main task must wait at least that long before it
+    // can proceed.
+    let reader_handle = {
+        let in_flight = in_flight.clone();
+        tokio::spawn(async move {
+            let _read_guard = in_flight.read().await;
+            tokio::time::sleep(Dur::from_millis(100)).await;
+            // Read guard drops here.
+        })
+    };
+
+    // Yield once so the spawned reader has a chance to acquire its
+    // guard before the writer below queues up.
+    tokio::task::yield_now().await;
+
+    let start = Instant::now();
+    mgr.reload("hot-reload-fixture")
+        .await
+        .expect("reload must succeed");
+    let elapsed = start.elapsed();
+
+    // The reader is done by the time the writer succeeds, but join
+    // explicitly so any panic surfaces.
+    reader_handle.await.expect("reader task did not panic");
+
+    assert!(
+        elapsed >= Dur::from_millis(100),
+        "reload must wait for the in-flight reader to drop its guard (elapsed {elapsed:?})",
+    );
+    assert!(
+        elapsed < Dur::from_secs(2),
+        "reload must complete inside the test wall-time budget (elapsed {elapsed:?})",
+    );
+
+    let snapshot = mgr.registered_runtimes().await;
+    assert_eq!(snapshot.len(), 1, "manager retains exactly one runtime");
+    assert_eq!(
+        snapshot[0].state,
+        PluginState::Active,
+        "after a successful reload the runtime must be Active",
+    );
+    assert_eq!(
+        snapshot[0].restart_attempts, 0,
+        "successful reload must reset restart_attempts to zero",
+    );
+    assert!(
+        snapshot[0].last_call > start,
+        "reload must advance last_call past the start of the reload window",
+    );
+
+    // Post-reload: the writer guard was dropped before reload returned,
+    // so a fresh read must succeed immediately. tokio::time::timeout
+    // bounds the wait so a regression here doesn't hang the suite.
+    let _post_read = tokio::time::timeout(Dur::from_secs(1), in_flight.read())
+        .await
+        .expect("post-reload in_flight.read() must not block on a leaked writer guard");
+}
+
 /// Master-plan §14.1-complete fixture body for `test_manifest_parser`.
 #[cfg(test)]
 const FIXTURE_14_1_BODY: &str = r#"[plugin]
