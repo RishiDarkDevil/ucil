@@ -3,8 +3,9 @@ ts: 2026-05-04T17:58:00Z
 phase: 2
 session: monitor
 trigger: stop-hook-gate-red-on-phase-startup
-resolved: true
+resolved: false
 auto_classify: bucket-A-admin
+close_when: phase-2-complete tag exists OR features passing[phase==2] >= 25
 ---
 
 # Phase 2 startup — gate-red expected, not a blocker
