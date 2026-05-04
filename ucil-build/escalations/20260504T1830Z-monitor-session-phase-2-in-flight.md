@@ -3,7 +3,7 @@ ts: 2026-05-04T18:30:00Z
 phase: 2
 session: monitor
 trigger: monitor-session-active-during-phase-execution
-resolved: false
+resolved: true
 auto_classify: bucket-A-admin
 close_when: phase-2-complete tag exists OR monitor session ends
 ---
@@ -56,3 +56,26 @@ does not piggyback on this advisory.
 this one until either the close_when clause fires OR the monitor
 explicitly resolves it. The frontmatter `close_when` field signals
 intent.
+
+## Resolution
+
+Resolved 2026-05-05 by triage (pass 2, phase 2). The `close_when` clause
+"monitor session ends" has fired:
+
+- `ps aux | grep claude` shows no interactive monitor session process
+  is currently running. Only the autonomous loop (PID 30765
+  `run-phase.sh 2`) and watchdog (PID 32274) remain.
+- The umbrella advisory's purpose (allowing the monitor to end turns
+  cleanly during Phase 2) no longer applies because the monitor itself
+  has stopped.
+- Phase 2 progress is healthy: 4/25 features passing, two WOs merged
+  cleanly since this advisory was filed (WO-0042 flipping P2-W6-F01 +
+  P2-W6-F02 at `eb1eadd`/`780b524`; WO-0043 flipping P2-W6-F03 +
+  P2-W6-F04 at `963e527`/`4453ded`). Loop continues uninterrupted.
+- If a future monitor session is launched and needs to bypass the
+  Stop-hook gate, it can write a fresh per-session umbrella advisory
+  the same way this one was created.
+
+No code, harness, or ADR work required.
+
+resolved: true
