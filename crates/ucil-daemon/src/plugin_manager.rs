@@ -1154,6 +1154,38 @@ impl PluginManager {
     pub async fn registered_runtimes(&self) -> Vec<PluginRuntime> {
         self.runtimes.read().await.clone()
     }
+
+    /// Register a pre-built [`PluginRuntime`] with the manager without
+    /// going through [`Self::activate`].
+    ///
+    /// Complements `activate`: `activate` requires a successful
+    /// `health_check` against a real MCP child, which is too heavy for
+    /// callers (and tests) that already have a runtime in hand and
+    /// want to exercise [`Self::restart_with_backoff`] or
+    /// [`Self::reload`] against it directly.  This is also the natural
+    /// hook for the future `ucil plugin install <name>` flow which
+    /// will register a runtime declaratively before running the first
+    /// health check.
+    ///
+    /// Synchronous by design: `add` is called during manager setup,
+    /// before any task is reading the runtimes list, so the underlying
+    /// `try_write` cannot contend in normal use.  If the lock IS
+    /// contended (unexpected — programmer error) the runtime is NOT
+    /// registered and a `tracing::warn!` event is emitted rather than
+    /// panicking; the caller can detect the omission via
+    /// [`Self::registered_runtimes`].
+    pub fn add(&mut self, runtime: PluginRuntime) {
+        match self.runtimes.try_write() {
+            Ok(mut guard) => guard.push(runtime),
+            Err(_) => {
+                tracing::warn!(
+                    target: "ucil.plugin.lifecycle",
+                    plugin = %runtime.manifest.plugin.name,
+                    "PluginManager::add: runtimes lock contended; runtime not registered",
+                );
+            }
+        }
+    }
 }
 
 /// Parse a single JSON-RPC 2.0 `tools/list` response frame and return
