@@ -46,8 +46,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use ucil_daemon::{
-    CapabilitiesSection, PluginManager, PluginManifest, PluginSection, PluginState,
-    TransportSection,
+    CapabilitiesSection, PluginError, PluginManager, PluginManifest, PluginRuntime, PluginSection,
+    PluginState, TransportSection, MAX_RESTARTS,
 };
 
 // ── Path resolution helper ──────────────────────────────────────────────────
@@ -118,6 +118,32 @@ fn healthy_manifest(name: &str, mock_path: &Path) -> PluginManifest {
         transport: TransportSection {
             kind: "stdio".into(),
             command: mock_path.to_string_lossy().into_owned(),
+            args: vec![],
+        },
+        resources: None,
+        lifecycle: None,
+    }
+}
+
+/// Build a failing [`PluginManifest`] whose `[transport].command` is
+/// the real-ENOENT placeholder `/__ucil_test_nonexistent_breaker_binary__`.
+///
+/// No second mock binary is introduced (per the WO-0043 lessons real-
+/// ENOENT pattern carried forward into this WO): every spawn against
+/// this manifest fails with [`PluginError::Spawn`] whose source carries
+/// `ENOENT`, exercising the same dispatcher branch a real failing
+/// plugin would.
+fn failing_manifest(name: &str) -> PluginManifest {
+    PluginManifest {
+        plugin: PluginSection {
+            name: name.to_owned(),
+            version: "0.1.0".into(),
+            description: Some("WO-0046 ENOENT fixture".into()),
+        },
+        capabilities: CapabilitiesSection::default(),
+        transport: TransportSection {
+            kind: "stdio".into(),
+            command: "/__ucil_test_nonexistent_breaker_binary__".into(),
             args: vec![],
         },
         resources: None,
@@ -248,5 +274,95 @@ async fn test_plugin_hot_cold_round_trip() {
     assert!(
         total_elapsed < Duration::from_secs(2),
         "round-trip total elapsed must be < 2s (got {total_elapsed:?}; restart took {restart_elapsed:?})"
+    );
+}
+
+// ── Test 2: crash recovery via circuit breaker ─────────────────────────────
+
+/// Trip the circuit breaker on a real-ENOENT spawn path.
+///
+/// Phases:
+///
+/// 1. Build a manifest whose `[transport].command` is the real-ENOENT
+///    placeholder so every health check inside `restart_with_backoff`
+///    fails with [`PluginError::Spawn`] (`ENOENT`).
+/// 2. Construct `PluginManager::new().with_circuit_breaker_base(5ms)`
+///    so the production {1, 2, 4} × 1 s production backoffs become
+///    {5, 10, 20} ms inside the fast-test budget.
+/// 3. Call `restart_with_backoff` — it must return
+///    [`PluginError::CircuitBreakerOpen`] with `attempts == MAX_RESTARTS`,
+///    transition the runtime to `PluginState::Error`, and produce an
+///    `error_message` that mentions the breaker trip.
+/// 4. Dual-bound elapsed: `>= 35 ms` (5 + 10 + 20) proves backoff
+///    actually slept; `< 2 s` proves the production base did not leak
+///    (mutation B drops the assignment in `with_circuit_breaker_base`,
+///    which keeps the 1 s base and pushes total elapsed past 2 s).
+#[tokio::test]
+async fn test_plugin_crash_recovery_via_circuit_breaker() {
+    let manifest = failing_manifest("crash-recovery-fixture");
+
+    let mut mgr = PluginManager::new().with_circuit_breaker_base(Duration::from_millis(5));
+    mgr.add(PluginRuntime::new(manifest));
+
+    let start = Instant::now();
+    let result = mgr.restart_with_backoff("crash-recovery-fixture").await;
+    let elapsed = start.elapsed();
+
+    let err =
+        result.expect_err("restart_with_backoff against ENOENT command must trip the breaker");
+    match err {
+        PluginError::CircuitBreakerOpen { ref name, attempts } => {
+            assert_eq!(
+                name, "crash-recovery-fixture",
+                "CircuitBreakerOpen.name mismatch (got {name:?})"
+            );
+            assert_eq!(
+                attempts, MAX_RESTARTS,
+                "CircuitBreakerOpen.attempts must equal MAX_RESTARTS (got {attempts})"
+            );
+        }
+        other => panic!("expected PluginError::CircuitBreakerOpen, got {other:?}"),
+    }
+
+    let snapshot = mgr.registered_runtimes().await;
+    assert_eq!(
+        snapshot.len(),
+        1,
+        "manager must retain exactly one runtime (got {}); snapshot={:?}",
+        snapshot.len(),
+        snapshot
+    );
+    assert_eq!(
+        snapshot[0].state,
+        PluginState::Error,
+        "circuit-breaker trip must transition runtime to Error (got {:?}); runtime={:?}",
+        snapshot[0].state,
+        snapshot[0]
+    );
+    assert_eq!(
+        snapshot[0].restart_attempts, MAX_RESTARTS,
+        "every failed attempt must increment restart_attempts (got {}); runtime={:?}",
+        snapshot[0].restart_attempts, snapshot[0]
+    );
+    assert!(
+        snapshot[0]
+            .error_message
+            .as_deref()
+            .is_some_and(|m| m.contains("circuit breaker")),
+        "error_message must mention the breaker trip (got {:?}); runtime={:?}",
+        snapshot[0].error_message,
+        snapshot[0]
+    );
+
+    // Lower bound: base × {1, 2, 4} = 35 ms minimum sleeping in the loop.
+    assert!(
+        elapsed >= Duration::from_millis(35),
+        "exponential backoff must accumulate >= 35ms (got {elapsed:?})"
+    );
+    // Upper bound: a leak of CIRCUIT_BREAKER_BASE_BACKOFF_MS (1 s) into
+    // `circuit_breaker_base` would push elapsed past 7 s, far above 2 s.
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "fast-test budget must hold (got {elapsed:?})"
     );
 }
