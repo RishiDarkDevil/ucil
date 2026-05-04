@@ -60,6 +60,16 @@
 //! `server::McpServer::handle_find_definition` is deferred to a
 //! follow-up WO + ADR because the frozen `P1-W4-F05` acceptance
 //! selector asserts on the current `_meta` JSON shape.
+//! WO-0047 for `P2-W7-F01` extends [`executor`] with the
+//! [`executor::G1Source`] dependency-inversion seam (per `DEC-0008`)
+//! and [`executor::execute_g1`], the parallel orchestrator that fans
+//! out a structural query to tree-sitter / Serena / ast-grep /
+//! diagnostics-bridge per master-plan §5.1 and returns a
+//! [`executor::G1Outcome`] with per-source [`executor::G1ToolStatus`]
+//! (`Available` / `Unavailable` / `TimedOut` / `Errored`).  Production
+//! wiring of real subprocess clients lands in P2-W7-F02 (fusion) and
+//! P2-W7-F05 (`find_references`); F01 ships the orchestrator + the
+//! trait only.
 //!
 //! The `server` module (introduced in WO-0010 for `P1-W3-F07`) owns
 //! the MCP JSON-RPC 2.0 skeleton.  WO-0033 for `P1-W4-F05` (master-plan
@@ -99,7 +109,7 @@ pub mod watcher;
 #[cfg(test)] mod test_support;
 
 #[rustfmt::skip]
-pub use executor::{enrich_find_definition, Caller, EnrichedFindDefinition, ExecutorError, HoverDoc, HoverFetchError, HoverSource, IngestPipeline, SerenaHoverClient, SOURCE_TOOL, TREE_SITTER_VALID_FROM};
+pub use executor::{enrich_find_definition, execute_g1, Caller, EnrichedFindDefinition, ExecutorError, G1Outcome, G1Query, G1Source, G1ToolKind, G1ToolOutput, G1ToolStatus, HoverDoc, HoverFetchError, HoverSource, IngestPipeline, SerenaHoverClient, G1_MASTER_DEADLINE, G1_PER_SOURCE_DEADLINE, SOURCE_TOOL, TREE_SITTER_VALID_FROM};
 #[rustfmt::skip]
 pub use lifecycle::{Checkpoint, CheckpointError, Lifecycle, PidFile, PidFileError, ShutdownReason};
 pub use plugin_manager::{

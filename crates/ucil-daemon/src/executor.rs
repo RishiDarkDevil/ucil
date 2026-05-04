@@ -67,9 +67,13 @@
 #![allow(clippy::module_name_repetitions)]
 
 use std::collections::hash_map::DefaultHasher;
+use std::future::Future;
 use std::hash::{Hash as _, Hasher as _};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
+use std::task::Poll;
+use std::time::Duration;
 
 use thiserror::Error;
 use ucil_core::knowledge_graph::{KnowledgeGraph, KnowledgeGraphError};
@@ -771,6 +775,388 @@ pub async fn enrich_find_definition<C: SerenaHoverClient + ?Sized>(
     }
 }
 
+// ── G1 parallel-execution orchestrator (P2-W7-F01, WO-0047) ──────────────
+//
+// WO-0047 for `P2-W7-F01` (master-plan §5.1 lines 420-446 + §18 Phase 2
+// Week 7 line 1780, "G1 (Structural) — All tools parallel, fuse
+// everything") adds the parallel fan-out orchestrator that runs
+// tree-sitter, Serena, ast-grep, and the LSP diagnostics bridge
+// concurrently with a 5 s overall deadline, returning per-source
+// results so partial outcomes remain usable when one tool is
+// unavailable.
+//
+// Production wiring of real subprocess clients (Serena MCP plugin,
+// ast-grep MCP plugin, real `ucil_treesitter::parser::Parser`, real
+// `crates/ucil-lsp-diagnostics::bridge`) is deferred to P2-W7-F02
+// (G1 fusion) and P2-W7-F05 (find_references).  F01 ships only the
+// orchestrator + the [`G1Source`] dependency-inversion seam (per
+// `DEC-0008`) plus its unit acceptance test that injects local trait
+// impls of [`G1Source`] — UCIL's own abstraction boundary.
+//
+// The existing [`enrich_find_definition`] (WO-0037, see executor.rs
+// above) stays unmodified — F02 will compose this orchestrator's
+// outputs into a richer fused payload via [`execute_g1`]; F01 adds
+// capability without removing the G1-fusion-lite hover-only helper
+// or its `find_definition` call site.
+
+/// Master timeout for the G1 parallel-execution orchestrator.
+///
+/// Master-plan §5.1 line 444 specifies a 5 s overall deadline for the
+/// G1 fan-out so the daemon can return partial results to the host
+/// adapter even when one of the four sources hangs.  When this
+/// deadline elapses, [`execute_g1`] returns a [`G1Outcome`] with
+/// `master_timed_out = true` and per-source [`G1ToolStatus::TimedOut`]
+/// placeholders for any source that had not yet completed.
+pub const G1_MASTER_DEADLINE: Duration = Duration::from_millis(5_000);
+
+/// Per-source timeout applied to each [`G1Source::execute`] call.
+///
+/// 4.5 s leaves a 0.5 s margin under [`G1_MASTER_DEADLINE`] so the
+/// per-source timeout always wins on a true global stall — the master
+/// deadline is a safety net, not the primary timing path.  Avoids the
+/// per-source-timeout fast-path racing the master deadline (master-plan
+/// §5.1 line 444 single-tool-stall handling).
+pub const G1_PER_SOURCE_DEADLINE: Duration = Duration::from_millis(4_500);
+
+/// Structural-query input shape for the G1 fan-out.
+///
+/// Mirrors the master-plan §5.1 fan-out target ("Query → ALL of the
+/// following run in parallel"): a symbol name plus its on-disk
+/// location.  Live wiring will derive these from the host adapter's
+/// `find_definition` / `find_references` request; the unit test
+/// constructs them directly.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct G1Query {
+    /// Symbol name to look up (e.g. `"TaskManager"`).
+    pub symbol: String,
+    /// File path containing the symbol's primary occurrence.
+    pub file_path: PathBuf,
+    /// 1-based line number of the symbol's primary occurrence.
+    pub line: u32,
+    /// 1-based column number of the symbol's primary occurrence.
+    pub column: u32,
+}
+
+/// Identifier for one of the four G1 (structural) sources the
+/// orchestrator fans out to.
+///
+/// Variants name each source's expected production wiring:
+///
+/// * [`G1ToolKind::TreeSitter`] — `ucil_treesitter::parser::Parser`,
+///   wired through the existing [`IngestPipeline`] entry point in
+///   F02 / F05.
+/// * [`G1ToolKind::Serena`] — Serena MCP plugin reached via
+///   `executor::SerenaHoverClient` (WO-0037, see executor.rs above).
+/// * [`G1ToolKind::AstGrep`] — ast-grep MCP plugin landed by WO-0044
+///   (see `plugins/structural/ast-grep/plugin.toml`).
+/// * [`G1ToolKind::Diagnostics`] — `crates/ucil-lsp-diagnostics::bridge`
+///   reached through the LSP diagnostics fan-in.
+///
+/// SCIP and Joern are explicitly out of scope here (P2-W7-F08 lands
+/// SCIP P1; Joern is post-Phase-2).  The enum is *not*
+/// `#[non_exhaustive]` because each variant maps to a fixed master-plan
+/// §5.1 source — extending it later is a deliberate additive
+/// non-breaking change a future WO can make with an ADR.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum G1ToolKind {
+    /// Tree-sitter structural parse (production wiring: `ucil_treesitter`).
+    TreeSitter,
+    /// Serena MCP `textDocument/hover` channel (production wiring:
+    /// `executor::SerenaHoverClient` from WO-0037).
+    Serena,
+    /// `ast-grep` MCP plugin (production wiring: WO-0044 manifest at
+    /// `plugins/structural/ast-grep/plugin.toml`).
+    AstGrep,
+    /// LSP diagnostics bridge (production wiring:
+    /// `crates/ucil-lsp-diagnostics::bridge`).
+    Diagnostics,
+}
+
+/// Disposition of one G1 source on a given fan-out call.
+///
+/// Each variant is a discriminant with no inner data — the data lives
+/// on [`G1ToolOutput`] via `payload` / `error` / `elapsed_ms`.  Master-
+/// plan §5.1 prescribes per-source dispositions so partial outcomes
+/// remain usable: a single [`G1ToolStatus::Errored`] does not turn the
+/// entire fan-out into a failure.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum G1ToolStatus {
+    /// The source returned a payload within its per-source deadline.
+    Available,
+    /// The source is degraded or not installed in this deployment
+    /// (e.g. `ast-grep` binary absent, Serena plugin disabled).
+    Unavailable,
+    /// The source's per-source `tokio::time::timeout` elapsed before
+    /// it returned a response.
+    TimedOut,
+    /// The source returned an error (transport / decode / internal).
+    Errored,
+}
+
+/// One source's contribution to a G1 fan-out outcome.
+///
+/// `payload` carries the source's emitted JSON (e.g. tree-sitter AST
+/// snippet, Serena hover markdown, ast-grep matches, diagnostics
+/// bundle) when [`Self::status`] is [`G1ToolStatus::Available`];
+/// otherwise it is `serde_json::Value::Null` and `error` carries an
+/// operator-readable description of the degraded path.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct G1ToolOutput {
+    /// Which source produced this output.
+    pub kind: G1ToolKind,
+    /// Disposition of the source on this fan-out call.
+    pub status: G1ToolStatus,
+    /// Wall-clock time the source spent before returning, in
+    /// milliseconds.
+    pub elapsed_ms: u64,
+    /// Source-emitted JSON payload, or `Value::Null` on a degraded
+    /// path.  The shape is source-specific and intentionally untyped
+    /// here so F02 (G1 fusion) can layer a typed projection without
+    /// further changes to this struct.
+    pub payload: serde_json::Value,
+    /// Operator-readable error description for any non-`Available`
+    /// status.  `None` for [`G1ToolStatus::Available`].
+    pub error: Option<String>,
+}
+
+/// Aggregate outcome of one [`execute_g1`] fan-out call.
+///
+/// `results` is a `Vec` (rather than a fixed-size array) so the same
+/// orchestrator can be reused unchanged when SCIP/Joern land in
+/// P2-W7-F08 and Phase-3.  Order matches the order of the input
+/// `sources` argument.
+///
+/// `master_timed_out` is `true` when the outer
+/// [`G1_MASTER_DEADLINE`] elapsed before all per-source futures
+/// completed; in that case `results` carries
+/// [`G1ToolStatus::TimedOut`] placeholders for every source so
+/// downstream code never sees an empty-but-non-`master_timed_out`
+/// outcome.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct G1Outcome {
+    /// Per-source outputs, in the same order as the input `sources`.
+    pub results: Vec<G1ToolOutput>,
+    /// Wall-clock time the orchestrator spent in milliseconds.
+    pub wall_elapsed_ms: u64,
+    /// `true` iff the outer master deadline elapsed before all
+    /// per-source futures completed.
+    pub master_timed_out: bool,
+}
+
+/// Dependency-inversion seam for one of the four G1 (structural)
+/// sources.
+///
+/// Per `DEC-0008` §4 this trait is UCIL-owned — it is **not** a
+/// re-export or adapter of any external wire format.  The unit
+/// acceptance test [`test_g1_parallel_execution`] supplies four local
+/// trait impls of [`G1Source`] (UCIL's own abstraction boundary);
+/// production wiring of real subprocess clients lands in P2-W7-F02
+/// (fusion) and P2-W7-F05 (`find_references`).
+///
+/// The same dependency-inversion seam pattern as
+/// [`SerenaHoverClient`] above (executor.rs:640) — a UCIL-owned
+/// trait that a live implementation converts to whatever wire shape
+/// its upstream speaks.
+///
+/// `Send + Sync` bounds are required so trait objects can live in
+/// `Vec<Box<dyn G1Source + Send + Sync + 'static>>` inside the
+/// daemon's long-lived server state once F02 / F05 land.
+#[async_trait::async_trait]
+pub trait G1Source: Send + Sync {
+    /// Identifies this source's [`G1ToolKind`] without runtime
+    /// introspection so [`execute_g1`] can label results by source.
+    fn kind(&self) -> G1ToolKind;
+
+    /// Run this source's structural query.
+    ///
+    /// Implementations are responsible for emitting their own
+    /// [`G1ToolOutput`] with the appropriate [`G1ToolStatus`] —
+    /// the orchestrator only overrides the status to
+    /// [`G1ToolStatus::TimedOut`] when its per-source
+    /// `tokio::time::timeout` elapses.
+    async fn execute(&self, query: &G1Query) -> G1ToolOutput;
+}
+
+/// Run one source under [`G1_PER_SOURCE_DEADLINE`] (or `deadline`,
+/// whichever is smaller), converting a per-source timeout into a
+/// [`G1ToolStatus::TimedOut`] [`G1ToolOutput`] without ever panicking.
+///
+/// The helper keeps [`execute_g1`] focused on the fan-out shape —
+/// per-source timeout handling lives here so the orchestrator does
+/// not need a `match` arm per disposition.
+async fn run_g1_source<S>(
+    source: &S,
+    query: &G1Query,
+    per_source_deadline: Duration,
+) -> G1ToolOutput
+where
+    S: G1Source + ?Sized,
+{
+    let kind = source.kind();
+    let start = std::time::Instant::now();
+    tokio::time::timeout(per_source_deadline, source.execute(query))
+        .await
+        .unwrap_or_else(|_| {
+            let elapsed_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+            G1ToolOutput {
+                kind,
+                status: G1ToolStatus::TimedOut,
+                elapsed_ms,
+                payload: serde_json::Value::Null,
+                error: Some(format!(
+                    "per-source deadline {} ms exceeded",
+                    per_source_deadline.as_millis()
+                )),
+            }
+        })
+}
+
+/// Poll a `Vec` of pinned-boxed futures concurrently and collect every
+/// output once all are ready.
+///
+/// Behaviourally equivalent to `futures::future::join_all` but avoids
+/// pulling the `futures` crate as a workspace dependency (per WO-0047
+/// `acceptance` AC18 — `tokio` ships everything we need for a 4-way
+/// fan-out).  Each `poll_fn` cycle iterates every still-pending
+/// future and re-registers their wakers, so the moment any inner
+/// `tokio::time::sleep` fires the outer future is re-polled and the
+/// newly-ready slots are drained.
+async fn join_all_g1<'a, T>(
+    mut futures: Vec<Pin<Box<dyn Future<Output = T> + Send + 'a>>>,
+) -> Vec<T>
+where
+    T: 'a,
+{
+    let len = futures.len();
+    let mut slots: Vec<Option<T>> = (0..len).map(|_| None).collect();
+    std::future::poll_fn(|cx| {
+        let mut any_pending = false;
+        for (i, fut) in futures.iter_mut().enumerate() {
+            if slots[i].is_some() {
+                continue;
+            }
+            match fut.as_mut().poll(cx) {
+                Poll::Ready(out) => {
+                    slots[i] = Some(out);
+                }
+                Poll::Pending => {
+                    any_pending = true;
+                }
+            }
+        }
+        if any_pending {
+            Poll::Pending
+        } else {
+            Poll::Ready(())
+        }
+    })
+    .await;
+    slots
+        .into_iter()
+        .map(|r| r.expect("join_all_g1: every slot must be filled before returning"))
+        .collect()
+}
+
+/// G1 (Structural) parallel-execution orchestrator.
+///
+/// Master-plan §5.1 lines 420-446 prescribes the fan-out shape:
+/// `Query → ALL of {tree-sitter, Serena, ast-grep, diagnostics-bridge}
+/// run in parallel`, with a 5 s overall deadline so partial outcomes
+/// stay usable when one source stalls.
+///
+/// Implementation:
+///
+/// 1. Cap each source's per-call timeout at `min(deadline,
+///    G1_PER_SOURCE_DEADLINE)` so the master deadline always wins
+///    on a true global stall.
+/// 2. Build one boxed future per source via [`run_g1_source`] and
+///    poll them concurrently through `join_all_g1` (single-task
+///    poll-fn fan-out — equivalent to `futures::join_all` but
+///    pulls in zero new dependencies, per WO-0047 AC18).
+/// 3. Wrap the whole join in an outer `tokio::time::timeout(deadline,
+///    ...)`.  On `Err(Elapsed)`, return a [`G1Outcome`] with
+///    [`G1ToolStatus::TimedOut`] placeholders for every source and
+///    `master_timed_out = true` so downstream code never sees an
+///    empty result vector when the master deadline fires.
+///
+/// The orchestrator never `panic!`s and never `?` propagates an error
+/// out — partial results are valid output per master-plan §5.1.
+///
+/// # Examples
+///
+/// ```no_run
+/// use std::time::Duration;
+/// use ucil_daemon::executor::{
+///     execute_g1, G1Query, G1Source, G1_MASTER_DEADLINE,
+/// };
+///
+/// # async fn demo(sources: Vec<Box<dyn G1Source>>) {
+/// let q = G1Query {
+///     symbol: "foo".to_owned(),
+///     file_path: std::path::PathBuf::from("src/lib.rs"),
+///     line: 1,
+///     column: 1,
+/// };
+/// let outcome = execute_g1(q, sources, G1_MASTER_DEADLINE).await;
+/// assert!(!outcome.master_timed_out || !outcome.results.is_empty());
+/// # }
+/// ```
+#[tracing::instrument(
+    name = "ucil.group.structural",
+    level = "debug",
+    skip(sources),
+    fields(symbol = %query.symbol, source_count = sources.len()),
+)]
+pub async fn execute_g1<S>(query: G1Query, sources: Vec<Box<S>>, deadline: Duration) -> G1Outcome
+where
+    S: G1Source + ?Sized,
+{
+    let per_source_deadline = std::cmp::min(deadline, G1_PER_SOURCE_DEADLINE);
+    let start = std::time::Instant::now();
+
+    let mut futures: Vec<Pin<Box<dyn Future<Output = G1ToolOutput> + Send + '_>>> =
+        Vec::with_capacity(sources.len());
+    let q_ref = &query;
+    for s in &sources {
+        futures.push(Box::pin(run_g1_source(
+            s.as_ref(),
+            q_ref,
+            per_source_deadline,
+        )));
+    }
+
+    let outer = tokio::time::timeout(deadline, join_all_g1(futures)).await;
+    let wall_elapsed_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+
+    outer.map_or_else(
+        |_| {
+            let results = sources
+                .iter()
+                .map(|s| G1ToolOutput {
+                    kind: s.kind(),
+                    status: G1ToolStatus::TimedOut,
+                    elapsed_ms: wall_elapsed_ms,
+                    payload: serde_json::Value::Null,
+                    error: Some(format!(
+                        "G1 master deadline {} ms elapsed",
+                        deadline.as_millis()
+                    )),
+                })
+                .collect();
+            G1Outcome {
+                results,
+                wall_elapsed_ms,
+                master_timed_out: true,
+            }
+        },
+        |results| G1Outcome {
+            results,
+            wall_elapsed_ms,
+            master_timed_out: false,
+        },
+    )
+}
+
 // ── Unit tests ────────────────────────────────────────────────────────────
 //
 // Per DEC-0005 (WO-0006 module-coherence commits), tests live at module
@@ -1360,5 +1746,279 @@ async fn test_serena_g1_fusion() {
     assert_eq!(
         result_c.resolution, resolution,
         "Scenario C: resolution must thread through unchanged even on Serena error",
+    );
+}
+
+// ── G1 parallel-execution acceptance test (P2-W7-F01) ────────────────────
+//
+// Per `DEC-0007` (frozen-selector module-root placement), the
+// acceptance test `test_g1_parallel_execution` lives at the module
+// root of `executor.rs` — NOT inside `mod tests {}` — so the
+// `feature-list.json` selector
+// `-p ucil-daemon executor::test_g1_parallel_execution`
+// resolves cleanly without a `tests::` intermediate.
+//
+// Per `DEC-0008` §4 the four trait impls below (`TestG1Source` driven
+// by `TestBehaviour`) are local to the test — UCIL's own abstraction
+// boundary, not a mock of any external wire format.  Production
+// wiring of real subprocess clients (Serena MCP plugin, ast-grep MCP
+// plugin, real `ucil_treesitter::parser::Parser`, real
+// `crates/ucil-lsp-diagnostics::bridge`) is deferred to P2-W7-F02
+// (G1 fusion) and P2-W7-F05 (`find_references`).
+
+/// Frozen acceptance selector for feature `P2-W7-F01` — see
+/// `ucil-build/feature-list.json` entry for
+/// `-p ucil-daemon executor::test_g1_parallel_execution`.
+///
+/// Asserts three properties of [`execute_g1`] in one function (single
+/// frozen selector — no separate tests, per `DEC-0007`):
+///
+/// 1. **Parallel timing** — 4 sources each sleeping 200 ms must
+///    return with `wall_elapsed_ms` in `[180, 600)` (lower bound
+///    proves at least one source's sleep elapsed; upper bound proves
+///    serial 4×200 ms = 800 ms did not happen → parallelism
+///    confirmed).  Dual-bound discipline per WO-0043 lessons.
+/// 2. **Partial-Errored** — 1 of 4 sources returns
+///    [`G1ToolStatus::Errored`]; outcome carries exactly 1 Errored +
+///    3 [`G1ToolStatus::Available`] entries.
+/// 3. **Partial-TimedOut** — 1 of 4 sources sleeps 6 s
+///    (> [`G1_PER_SOURCE_DEADLINE`]); outcome carries exactly 1
+///    [`G1ToolStatus::TimedOut`] + 3 [`G1ToolStatus::Available`]
+///    entries; whole test wall-time stays under 5500 ms (the
+///    per-source 4.5 s ceiling fires before the master 5 s
+///    deadline).
+#[cfg(test)]
+#[allow(clippy::too_many_lines, clippy::missing_panics_doc)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+pub async fn test_g1_parallel_execution() {
+    use std::time::Instant;
+
+    /// Behaviour switches for the per-test [`G1Source`] impl below.
+    #[derive(Clone)]
+    enum TestBehaviour {
+        /// Sleep then return [`G1ToolStatus::Available`].
+        Sleep(Duration),
+        /// Return [`G1ToolStatus::Errored`] without any sleep.
+        Error(String),
+        /// Sleep longer than [`G1_PER_SOURCE_DEADLINE`] —
+        /// [`run_g1_source`]'s `tokio::time::timeout` wrapper must
+        /// fire and return [`G1ToolStatus::TimedOut`] before this
+        /// branch returns.
+        LongSleep(Duration),
+    }
+
+    /// Local [`G1Source`] impl driving the three sub-scenarios.
+    /// Per `DEC-0008` §4 this is a UCIL-internal trait (the
+    /// dependency-inversion seam), so a local impl in a test is
+    /// not a mock of any external wire format — the same shape as
+    /// `fake_serena_hover_client::ScriptedFakeSerenaHoverClient`
+    /// above.
+    struct TestG1Source {
+        kind: G1ToolKind,
+        behaviour: TestBehaviour,
+    }
+
+    #[async_trait::async_trait]
+    impl G1Source for TestG1Source {
+        fn kind(&self) -> G1ToolKind {
+            self.kind
+        }
+
+        async fn execute(&self, _query: &G1Query) -> G1ToolOutput {
+            match &self.behaviour {
+                TestBehaviour::Sleep(d) => {
+                    let start = Instant::now();
+                    tokio::time::sleep(*d).await;
+                    let elapsed_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+                    G1ToolOutput {
+                        kind: self.kind,
+                        status: G1ToolStatus::Available,
+                        elapsed_ms,
+                        payload: serde_json::json!({
+                            "slept_ms": u64::try_from(d.as_millis())
+                                .unwrap_or(u64::MAX),
+                        }),
+                        error: None,
+                    }
+                }
+                TestBehaviour::Error(msg) => G1ToolOutput {
+                    kind: self.kind,
+                    status: G1ToolStatus::Errored,
+                    elapsed_ms: 0,
+                    payload: serde_json::Value::Null,
+                    error: Some(msg.clone()),
+                },
+                TestBehaviour::LongSleep(d) => {
+                    tokio::time::sleep(*d).await;
+                    // The orchestrator's per-source timeout must
+                    // fire before this branch returns; if the test
+                    // ever sees `Available` here, the timeout
+                    // wrapper has regressed (AC21 mutation #2
+                    // would land us here).
+                    G1ToolOutput {
+                        kind: self.kind,
+                        status: G1ToolStatus::Available,
+                        elapsed_ms: u64::try_from(d.as_millis()).unwrap_or(u64::MAX),
+                        payload: serde_json::Value::Null,
+                        error: None,
+                    }
+                }
+            }
+        }
+    }
+
+    // The four kinds, in master-plan §5.1 order.
+    let all_kinds: [G1ToolKind; 4] = [
+        G1ToolKind::TreeSitter,
+        G1ToolKind::Serena,
+        G1ToolKind::AstGrep,
+        G1ToolKind::Diagnostics,
+    ];
+
+    let q = G1Query {
+        symbol: "foo".to_owned(),
+        file_path: PathBuf::from("src/lib.rs"),
+        line: 1,
+        column: 1,
+    };
+
+    // ── (a) Parallel timing: 4×200 ms sources, wall in [180, 600) ────
+    let sources_a: Vec<Box<dyn G1Source + Send + Sync>> = all_kinds
+        .iter()
+        .map(|k| {
+            Box::new(TestG1Source {
+                kind: *k,
+                behaviour: TestBehaviour::Sleep(Duration::from_millis(200)),
+            }) as Box<dyn G1Source + Send + Sync>
+        })
+        .collect();
+    let outcome_a = execute_g1(q.clone(), sources_a, G1_MASTER_DEADLINE).await;
+    assert!(
+        outcome_a.wall_elapsed_ms >= 180,
+        "(a) parallel timing lower bound: wall_elapsed_ms must be >= 180 \
+         (proves at least one 200 ms sleep elapsed); got {} ms",
+        outcome_a.wall_elapsed_ms
+    );
+    assert!(
+        outcome_a.wall_elapsed_ms < 600,
+        "(a) parallel timing upper bound: wall_elapsed_ms must be < 600 \
+         (proves serial 4x200=800 ms did not happen → parallelism confirmed); \
+         got {} ms",
+        outcome_a.wall_elapsed_ms
+    );
+    assert!(
+        !outcome_a.master_timed_out,
+        "(a) master_timed_out must be false on a 200 ms-per-source happy path"
+    );
+    assert_eq!(
+        outcome_a.results.len(),
+        4,
+        "(a) outcome.results must contain exactly 4 entries (one per source)"
+    );
+    for r in &outcome_a.results {
+        assert_eq!(
+            r.status,
+            G1ToolStatus::Available,
+            "(a) every source must report Available; got {:?} for kind {:?}",
+            r.status,
+            r.kind
+        );
+    }
+
+    // ── (b) Partial-Errored: 1 Errored + 3 Available ─────────────────
+    let sources_b: Vec<Box<dyn G1Source + Send + Sync>> = vec![
+        Box::new(TestG1Source {
+            kind: G1ToolKind::TreeSitter,
+            behaviour: TestBehaviour::Sleep(Duration::from_millis(50)),
+        }),
+        Box::new(TestG1Source {
+            kind: G1ToolKind::Serena,
+            behaviour: TestBehaviour::Error("injected".to_owned()),
+        }),
+        Box::new(TestG1Source {
+            kind: G1ToolKind::AstGrep,
+            behaviour: TestBehaviour::Sleep(Duration::from_millis(50)),
+        }),
+        Box::new(TestG1Source {
+            kind: G1ToolKind::Diagnostics,
+            behaviour: TestBehaviour::Sleep(Duration::from_millis(50)),
+        }),
+    ];
+    let outcome_b = execute_g1(q.clone(), sources_b, G1_MASTER_DEADLINE).await;
+    let errored_b = outcome_b
+        .results
+        .iter()
+        .filter(|r| r.status == G1ToolStatus::Errored)
+        .count();
+    let available_b = outcome_b
+        .results
+        .iter()
+        .filter(|r| r.status == G1ToolStatus::Available)
+        .count();
+    assert_eq!(
+        errored_b, 1,
+        "(b) outcome must contain exactly 1 Errored entry, got {errored_b} \
+         (results = {:?})",
+        outcome_b.results
+    );
+    assert_eq!(
+        available_b, 3,
+        "(b) outcome must contain exactly 3 Available entries, got {available_b} \
+         (results = {:?})",
+        outcome_b.results
+    );
+
+    // ── (c) Partial-TimedOut: 1 TimedOut + 3 Available, wall < 5500 ms ──
+    let sources_c: Vec<Box<dyn G1Source + Send + Sync>> = vec![
+        Box::new(TestG1Source {
+            kind: G1ToolKind::TreeSitter,
+            behaviour: TestBehaviour::Sleep(Duration::from_millis(50)),
+        }),
+        Box::new(TestG1Source {
+            kind: G1ToolKind::Serena,
+            behaviour: TestBehaviour::Sleep(Duration::from_millis(50)),
+        }),
+        Box::new(TestG1Source {
+            kind: G1ToolKind::AstGrep,
+            behaviour: TestBehaviour::LongSleep(Duration::from_secs(6)),
+        }),
+        Box::new(TestG1Source {
+            kind: G1ToolKind::Diagnostics,
+            behaviour: TestBehaviour::Sleep(Duration::from_millis(50)),
+        }),
+    ];
+    let outcome_c = execute_g1(q.clone(), sources_c, G1_MASTER_DEADLINE).await;
+    let timed_out_c = outcome_c
+        .results
+        .iter()
+        .filter(|r| r.status == G1ToolStatus::TimedOut)
+        .count();
+    let available_c = outcome_c
+        .results
+        .iter()
+        .filter(|r| r.status == G1ToolStatus::Available)
+        .count();
+    assert_eq!(
+        timed_out_c, 1,
+        "(c) outcome must contain exactly 1 TimedOut entry, got {timed_out_c} \
+         (results = {:?})",
+        outcome_c.results
+    );
+    assert_eq!(
+        available_c, 3,
+        "(c) outcome must contain exactly 3 Available entries, got {available_c} \
+         (results = {:?})",
+        outcome_c.results
+    );
+    assert!(
+        outcome_c.wall_elapsed_ms < 5_500,
+        "(c) test wall-time must be < 5500 ms \
+         (per-source 4.5 s ceiling, master 5 s); got {} ms",
+        outcome_c.wall_elapsed_ms
+    );
+    assert!(
+        !outcome_c.master_timed_out,
+        "(c) master_timed_out must be false — per-source 4.5 s ceiling \
+         fires before master 5 s; got master_timed_out=true"
     );
 }
