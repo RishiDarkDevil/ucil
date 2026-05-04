@@ -1717,7 +1717,7 @@ async fn test_hot_reload() {
 }
 
 /// Acceptance test for `P2-W6-F04` — circuit-breaker trip after
-/// MAX_RESTARTS consecutive failed restart attempts with exponential
+/// [`MAX_RESTARTS`] consecutive failed restart attempts with exponential
 /// backoff between attempts.
 ///
 /// Frozen selector: `plugin_manager::test_circuit_breaker`.
