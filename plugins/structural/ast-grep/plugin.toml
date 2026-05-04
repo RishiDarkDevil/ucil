@@ -1,0 +1,62 @@
+# ast-grep MCP plugin manifest (master-plan §14.1 category = "structural").
+#
+# pinned 2026-05-04: ast-grep CLI 0.42.1 + @notprolands/ast-grep-mcp v1.1.1
+#   ast-grep CLI    : https://github.com/ast-grep/ast-grep/releases/tag/0.42.1
+#   MCP server      : https://www.npmjs.com/package/@notprolands/ast-grep-mcp
+#                     (community canonical stdio MCP wrapper around ast-grep,
+#                      built on @modelcontextprotocol/sdk@^1.16.0; pinned tag
+#                      v1.1.1 published 2025-07-26)
+#   binary launch   : `npx -y @notprolands/ast-grep-mcp@1.1.1`
+#   advertised tools: dump_syntax_tree, test_match_code_rule, find_code,
+#                     find_code_by_rule, rewrite_code, analyze-imports,
+#                     scan-code (7 total — verified end-to-end via
+#                     PluginManager::health_check; see
+#                     crates/ucil-daemon/tests/plugin_manifests.rs).
+#   transport       : stdio (master-plan §13; no HTTP in Phase 2).
+#
+# Reproducibility: a moving `latest` or branch ref is deliberately avoided
+# per .claude/rules/commit-style.md. Both the @notprolands package version
+# and the upstream ast-grep CLI version are pinned to immutable npm/GitHub
+# release tags so the manifest produces byte-identical health checks across
+# CI machines and operator workstations.
+#
+# Why @notprolands/ast-grep-mcp and not a first-party `ast-grep mcp`:
+# ast-grep 0.42.1 ships subcommands `run | scan | test | new | lsp |
+# completions` only. There is no `mcp` subcommand on the upstream CLI as
+# of this pin, and `ast-grep lsp` speaks LSP, not MCP. The @notprolands
+# package is the canonical npm-published stdio MCP wrapper around the
+# ast-grep core library and is what UCIL invokes through this manifest
+# until upstream ships first-party MCP support. When that happens, supersede
+# this manifest in a new ADR and bump the pinned version.
+
+[plugin]
+name = "ast-grep"
+version = "0.42.1"
+description = "Structural code search and rewrite via tree-sitter AST patterns (ast-grep CLI 0.42.1 wrapped by @notprolands/ast-grep-mcp 1.1.1)."
+
+[capabilities]
+provides = ["search.structural", "rewrite.structural"]
+languages = [
+    "rust",
+    "typescript",
+    "javascript",
+    "tsx",
+    "python",
+    "go",
+    "java",
+    "c",
+    "cpp",
+    "ruby",
+]
+
+[transport]
+type = "stdio"
+command = "npx"
+args = [
+    "-y",
+    "@notprolands/ast-grep-mcp@1.1.1",
+]
+
+[lifecycle]
+hot_cold = true
+idle_timeout_minutes = 10
