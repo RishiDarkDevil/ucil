@@ -1445,6 +1445,130 @@ command = "/usr/bin/true"
     );
 }
 
+/// Acceptance test for `P2-W6-F02` — full plugin lifecycle state
+/// machine (DISCOVERED → REGISTERED → LOADING → ACTIVE → IDLE →
+/// LOADING → ACTIVE → STOPPED), plus illegal-transition rejection
+/// and the ERROR-capture path.
+///
+/// Frozen selector: `plugin_manager::test_lifecycle_state_machine`.
+///
+/// Drives the in-memory state machine only — no subprocess spawned,
+/// no `tracing` subscriber installed (avoids cross-test
+/// contamination).  Subscriber-based assertion is left for the
+/// later integration test (P2-W6-F08) per the WO scope.
+#[cfg(test)]
+#[tokio::test]
+async fn test_lifecycle_state_machine() {
+    use std::time::Duration as Dur;
+
+    let manifest = PluginManifest {
+        plugin: PluginSection {
+            name: "lifecycle-fixture".into(),
+            version: "0.1.0".into(),
+            description: None,
+        },
+        capabilities: CapabilitiesSection::default(),
+        transport: TransportSection {
+            kind: "stdio".into(),
+            command: "/usr/bin/true".into(),
+            args: vec![],
+        },
+        resources: None,
+        lifecycle: None,
+    };
+
+    // ── Phase 1: Discovered → Registered ─────────────────────────────
+    let mut runtime = PluginRuntime::discovered(manifest.clone());
+    assert_eq!(runtime.state, PluginState::Discovered);
+    runtime
+        .register()
+        .expect("Discovered → Registered must succeed");
+    assert_eq!(runtime.state, PluginState::Registered);
+    assert!(
+        runtime.error_message.is_none(),
+        "register() must clear any prior error_message",
+    );
+
+    // ── Phase 2: Registered → Loading → Active ───────────────────────
+    runtime
+        .mark_loading()
+        .expect("Registered → Loading must succeed");
+    assert_eq!(runtime.state, PluginState::Loading);
+    runtime
+        .mark_active()
+        .expect("Loading → Active must succeed");
+    assert_eq!(runtime.state, PluginState::Active);
+
+    // ── Phase 3: Active → Idle (via tick + back-dated last_call) ─────
+    runtime.idle_timeout = Dur::from_millis(50);
+    runtime.last_call = Instant::now()
+        .checked_sub(Dur::from_millis(250))
+        .expect("clock supports a 250 ms rewind");
+    let transition = runtime.tick(Instant::now());
+    assert_eq!(transition, Some(PluginState::Idle));
+    assert_eq!(runtime.state, PluginState::Idle);
+
+    // ── Phase 4: Idle → Loading → Active (re-entry) ──────────────────
+    runtime.mark_loading().expect("Idle → Loading must succeed");
+    assert_eq!(runtime.state, PluginState::Loading);
+    runtime
+        .mark_active()
+        .expect("Loading → Active must succeed (re-entry)");
+    assert_eq!(runtime.state, PluginState::Active);
+
+    // ── Phase 5: illegal Active → Registered must error, not panic ──
+    let illegal = runtime.register();
+    match illegal {
+        Err(PluginError::IllegalTransition { from, to }) => {
+            assert_eq!(from, PluginState::Active);
+            assert_eq!(to, PluginState::Registered);
+        }
+        other => panic!("expected IllegalTransition, got {other:?}"),
+    }
+    assert_eq!(
+        runtime.state,
+        PluginState::Active,
+        "illegal transition must NOT mutate state",
+    );
+
+    // ── Phase 6: Active → Stopped ────────────────────────────────────
+    runtime.stop().expect("Active → Stopped must succeed");
+    assert_eq!(runtime.state, PluginState::Stopped);
+    // Stopping an already-Stopped runtime is a no-op (Ok).
+    runtime.stop().expect("Stopped → Stopped is a no-op");
+    assert_eq!(runtime.state, PluginState::Stopped);
+
+    // ── Phase 7: separate runtime exercises the ERROR capture path ──
+    let mut second = PluginRuntime::new(manifest);
+    assert_eq!(
+        second.state,
+        PluginState::Registered,
+        "PluginRuntime::new starts in Registered",
+    );
+    second.mark_error("boom");
+    assert_eq!(second.state, PluginState::Error);
+    assert_eq!(second.error_message.as_deref(), Some("boom"));
+
+    // mark_error from Error itself is also legal (catch-all).
+    second.mark_error("still broken");
+    assert_eq!(second.state, PluginState::Error);
+    assert_eq!(second.error_message.as_deref(), Some("still broken"));
+
+    // stop() from Error must be rejected — ERROR is a terminal state
+    // until a fresh register() resets the error_message.
+    let stop_from_error = second.stop();
+    assert!(
+        matches!(
+            stop_from_error,
+            Err(PluginError::IllegalTransition {
+                from: PluginState::Error,
+                to: PluginState::Stopped,
+            }),
+        ),
+        "stop() from Error must return IllegalTransition, got {stop_from_error:?}",
+    );
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
