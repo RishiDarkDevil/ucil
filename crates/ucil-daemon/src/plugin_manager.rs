@@ -1232,6 +1232,108 @@ impl PluginManager {
         }
     }
 
+    /// Restart a registered plugin up to [`MAX_RESTARTS`] times with
+    /// exponential backoff; trip the circuit breaker on exhaustion.
+    ///
+    /// Behaviour (master-plan §14.2):
+    ///
+    /// 1. Look up the manifest by name; release the read lock before
+    ///    starting the loop.  Returns [`PluginError::NotFound`] when
+    ///    no runtime matches.
+    /// 2. Iterate `attempt in 0..MAX_RESTARTS`.  Each iteration runs a
+    ///    real [`Self::health_check`].  On `Ok` the runtime flips to
+    ///    [`PluginState::Active`], `last_call` advances,
+    ///    `restart_attempts` resets to zero, and an info-level tracing
+    ///    event records the success.  On `Err` `restart_attempts`
+    ///    increments, then the task sleeps for
+    ///    `circuit_breaker_base × 2^attempt` (i.e. base × {1, 2, 4} at
+    ///    the default base) before the next attempt.
+    /// 3. After [`MAX_RESTARTS`] consecutive failures the breaker
+    ///    trips: the runtime is marked
+    ///    [`PluginState::Error`] via [`PluginRuntime::mark_error`]
+    ///    with a circuit-breaker message, and the function returns
+    ///    [`PluginError::CircuitBreakerOpen`].  A warn-level tracing
+    ///    event records the trip.
+    ///
+    /// # Errors
+    ///
+    /// * [`PluginError::NotFound`] — no runtime registered under
+    ///   `name`.
+    /// * [`PluginError::CircuitBreakerOpen`] — every attempt failed.
+    pub async fn restart_with_backoff(&mut self, name: &str) -> Result<(), PluginError> {
+        // Step 1: snapshot the manifest. The read guard drops at the
+        // end of the expression — the lock is held only for lookup.
+        let manifest = self
+            .runtimes
+            .read()
+            .await
+            .iter()
+            .find(|rt| rt.manifest.plugin.name == name)
+            .map(|rt| rt.manifest.clone())
+            .ok_or_else(|| PluginError::NotFound { name: name.into() })?;
+
+        let base = self.circuit_breaker_base;
+
+        // Step 2: bounded restart loop with exponential backoff.
+        for attempt in 0..MAX_RESTARTS {
+            if Self::health_check(&manifest).await.is_ok() {
+                if let Some(runtime) = self
+                    .runtimes
+                    .write()
+                    .await
+                    .iter_mut()
+                    .find(|rt| rt.manifest.plugin.name == name)
+                {
+                    runtime.state = PluginState::Active;
+                    runtime.last_call = Instant::now();
+                    runtime.restart_attempts = 0;
+                }
+                tracing::info!(
+                    target: "ucil.plugin.lifecycle",
+                    op = "restart_with_backoff",
+                    plugin = %name,
+                    attempts = attempt + 1,
+                    "plugin restart succeeded",
+                );
+                return Ok(());
+            }
+            if let Some(runtime) = self
+                .runtimes
+                .write()
+                .await
+                .iter_mut()
+                .find(|rt| rt.manifest.plugin.name == name)
+            {
+                runtime.restart_attempts = runtime.restart_attempts.saturating_add(1);
+            }
+            tokio::time::sleep(base * 2u32.pow(attempt)).await;
+        }
+
+        // Step 3: breaker trip — mark the runtime ERROR and surface it.
+        if let Some(runtime) = self
+            .runtimes
+            .write()
+            .await
+            .iter_mut()
+            .find(|rt| rt.manifest.plugin.name == name)
+        {
+            runtime.mark_error(format!(
+                "circuit breaker tripped after {MAX_RESTARTS} restart attempts"
+            ));
+        }
+        tracing::warn!(
+            target: "ucil.plugin.lifecycle",
+            op = "restart_with_backoff",
+            plugin = %name,
+            attempts = MAX_RESTARTS,
+            "plugin circuit breaker tripped",
+        );
+        Err(PluginError::CircuitBreakerOpen {
+            name: name.into(),
+            attempts: MAX_RESTARTS,
+        })
+    }
+
     /// Spawn a background task that periodically calls
     /// [`PluginRuntime::tick`] on every registered runtime.
     ///
