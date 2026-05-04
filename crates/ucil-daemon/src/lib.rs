@@ -71,6 +71,15 @@
 //! P2-W7-F05 (`find_references`); F01 ships the orchestrator + the
 //! trait only.
 //!
+//! WO-0048 for `P2-W7-F02` extends [`executor`] with
+//! [`executor::fuse_g1`], the G1 fusion layer per master-plan §5.1
+//! lines 430-442: it groups [`executor::G1Outcome`] per-source results
+//! by source location, unions unique fields, and resolves conflicting
+//! field values by source authority Serena > tree-sitter > ast-grep >
+//! diagnostics.  Production wiring of real subprocess clients into the
+//! fusion path is deferred to P2-W7-F05 (`find_references`); F02 ships
+//! the fusion algorithm only.
+//!
 //! The `server` module (introduced in WO-0010 for `P1-W3-F07`) owns
 //! the MCP JSON-RPC 2.0 skeleton.  WO-0033 for `P1-W4-F05` (master-plan
 //! §3.2 row 2 + §18 Phase 1 Week 4 line 1751) promoted the
@@ -109,7 +118,7 @@ pub mod watcher;
 #[cfg(test)] mod test_support;
 
 #[rustfmt::skip]
-pub use executor::{enrich_find_definition, execute_g1, Caller, EnrichedFindDefinition, ExecutorError, G1Outcome, G1Query, G1Source, G1ToolKind, G1ToolOutput, G1ToolStatus, HoverDoc, HoverFetchError, HoverSource, IngestPipeline, SerenaHoverClient, G1_MASTER_DEADLINE, G1_PER_SOURCE_DEADLINE, SOURCE_TOOL, TREE_SITTER_VALID_FROM};
+pub use executor::{enrich_find_definition, execute_g1, fuse_g1, Caller, EnrichedFindDefinition, ExecutorError, G1Conflict, G1FusedEntry, G1FusedLocation, G1FusedOutcome, G1FusionEntry, G1Outcome, G1Query, G1Source, G1ToolKind, G1ToolOutput, G1ToolStatus, HoverDoc, HoverFetchError, HoverSource, IngestPipeline, SerenaHoverClient, G1_MASTER_DEADLINE, G1_PER_SOURCE_DEADLINE, SOURCE_TOOL, TREE_SITTER_VALID_FROM};
 #[rustfmt::skip]
 pub use lifecycle::{Checkpoint, CheckpointError, Lifecycle, PidFile, PidFileError, ShutdownReason};
 pub use plugin_manager::{

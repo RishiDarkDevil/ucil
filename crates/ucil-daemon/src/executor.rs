@@ -2346,3 +2346,290 @@ pub async fn test_g1_parallel_execution() {
          fires before master 5 s; got master_timed_out=true"
     );
 }
+
+// ── G1 result-fusion acceptance test (P2-W7-F02) ──────────────────────────
+//
+// Per `DEC-0007` (frozen-selector module-root placement), the
+// acceptance test `test_g1_result_fusion` lives at the module root of
+// `executor.rs` — NOT inside `mod tests {}` — so the
+// `feature-list.json` selector
+// `-p ucil-daemon executor::test_g1_result_fusion`
+// resolves cleanly without a `tests::` intermediate.
+//
+// Per `DEC-0008` §4 the four `TestG1Source` impls below are local to
+// the test — UCIL's own abstraction boundary, not a mock of any
+// external wire format.  Production wiring of real subprocess clients
+// (Serena MCP plugin, ast-grep MCP plugin, real
+// `ucil_treesitter::parser::Parser`, real
+// `crates/ucil-lsp-diagnostics::bridge`) into the fusion path is
+// deferred to P2-W7-F05 (`find_references`).
+
+/// Frozen acceptance selector for feature `P2-W7-F02` — see
+/// `ucil-build/feature-list.json` entry for
+/// `-p ucil-daemon executor::test_g1_result_fusion`.
+///
+/// Drives [`fuse_g1`] over a real [`execute_g1`] outcome built from
+/// four local [`G1Source`] impls and asserts four properties:
+///
+/// 1. **Location merge** — 4 source entries (3 at `(util.rs, 10, 20)`,
+///    1 at `(util.rs, 30, 35)`) collapse into 2 fused entries.
+/// 2. **Field union** — disjoint fields from `TreeSitter`, `Serena`,
+///    and `AstGrep` at the same location are unioned into one map;
+///    the `contributing_sources` list is authority-ordered
+///    `[Serena, TreeSitter, AstGrep]`.
+/// 3. **Authority resolution** — `Serena` and `AstGrep` both contribute
+///    a `signature` field with non-equal values; `Serena` (rank 0)
+///    wins and a [`G1Conflict`] row is recorded for `AstGrep` (rank
+///    2).  The `ast_kind` field has only `TreeSitter` as a contributor
+///    so NO conflict is recorded for it.
+/// 4. **Disposition pass-through** — every source's status is
+///    forwarded on `source_dispositions`; `master_timed_out` is
+///    forwarded too.
+#[cfg(test)]
+#[allow(clippy::too_many_lines, clippy::missing_panics_doc)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+pub async fn test_g1_result_fusion() {
+    /// Local [`G1Source`] impl that returns a pre-baked
+    /// `Vec<G1FusionEntry>` JSON-encoded as `payload`.  Per
+    /// `DEC-0008` §4 this is a UCIL-internal trait (the
+    /// dependency-inversion seam), so a local impl in a test is not a
+    /// mock of any external wire format.
+    struct TestG1Source {
+        kind: G1ToolKind,
+        entries: Vec<G1FusionEntry>,
+    }
+
+    #[async_trait::async_trait]
+    impl G1Source for TestG1Source {
+        fn kind(&self) -> G1ToolKind {
+            self.kind
+        }
+
+        async fn execute(&self, _query: &G1Query) -> G1ToolOutput {
+            let payload = serde_json::to_value(&self.entries)
+                .expect("test entries must serialize to a JSON value");
+            G1ToolOutput {
+                kind: self.kind,
+                status: G1ToolStatus::Available,
+                elapsed_ms: 0,
+                payload,
+                error: None,
+            }
+        }
+    }
+
+    fn make_entry(file: &str, start: u32, end: u32, fields: serde_json::Value) -> G1FusionEntry {
+        let map = match fields {
+            serde_json::Value::Object(m) => m,
+            other => panic!("make_entry: fields argument must be a JSON object, got {other:?}"),
+        };
+        G1FusionEntry {
+            location: G1FusedLocation {
+                file_path: PathBuf::from(file),
+                start_line: start,
+                end_line: end,
+            },
+            fields: map,
+        }
+    }
+
+    let q = G1Query {
+        symbol: "foo".to_owned(),
+        file_path: PathBuf::from("util.rs"),
+        line: 10,
+        column: 1,
+    };
+
+    // Sources in input order: TreeSitter, Serena, AstGrep, Diagnostics.
+    let sources: Vec<Box<dyn G1Source + Send + Sync>> = vec![
+        Box::new(TestG1Source {
+            kind: G1ToolKind::TreeSitter,
+            entries: vec![make_entry(
+                "util.rs",
+                10,
+                20,
+                serde_json::json!({ "ast_kind": "function" }),
+            )],
+        }),
+        Box::new(TestG1Source {
+            kind: G1ToolKind::Serena,
+            entries: vec![make_entry(
+                "util.rs",
+                10,
+                20,
+                serde_json::json!({
+                    "signature": "fn foo() -> i32",
+                    "hover_doc": "Computes foo",
+                }),
+            )],
+        }),
+        Box::new(TestG1Source {
+            kind: G1ToolKind::AstGrep,
+            entries: vec![make_entry(
+                "util.rs",
+                10,
+                20,
+                serde_json::json!({
+                    "signature": "fn foo()",
+                    "pattern": "fn foo($_)",
+                }),
+            )],
+        }),
+        Box::new(TestG1Source {
+            kind: G1ToolKind::Diagnostics,
+            entries: vec![make_entry(
+                "util.rs",
+                30,
+                35,
+                serde_json::json!({ "diagnostic": "unused variable" }),
+            )],
+        }),
+    ];
+
+    let raw = execute_g1(q, sources, G1_MASTER_DEADLINE).await;
+    let fused = fuse_g1(&raw);
+
+    // ── Sub-assertion 1: location merge (4 sources at 2 locations → 2 entries) ──
+    assert_eq!(
+        fused.entries.len(),
+        2,
+        "(1) location merge: expected 2 fused entries (3 contributors at \
+         (util.rs, 10, 20) + 1 at (util.rs, 30, 35)); got {}: entries={:?}",
+        fused.entries.len(),
+        fused.entries
+    );
+
+    // ── Sub-assertion 2: field union ──
+    let entry_at_10_20 = fused
+        .entries
+        .iter()
+        .find(|e| e.location.start_line == 10 && e.location.end_line == 20)
+        .expect("must contain a fused entry at (util.rs, 10, 20)");
+    assert_eq!(
+        entry_at_10_20.location.file_path,
+        PathBuf::from("util.rs"),
+        "(2) location.file_path must be \"util.rs\"; got {:?}",
+        entry_at_10_20.location.file_path
+    );
+    let mut keys: Vec<&str> = entry_at_10_20.fields.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        vec!["ast_kind", "hover_doc", "pattern", "signature"],
+        "(2) field union: expected 4 keys [ast_kind, hover_doc, pattern, signature] \
+         at (util.rs, 10, 20); got fields={:?}",
+        entry_at_10_20.fields
+    );
+    assert_eq!(
+        entry_at_10_20.contributing_sources,
+        vec![
+            G1ToolKind::Serena,
+            G1ToolKind::TreeSitter,
+            G1ToolKind::AstGrep,
+        ],
+        "(2) contributing_sources must be authority-ordered \
+         [Serena, TreeSitter, AstGrep]; got {:?}",
+        entry_at_10_20.contributing_sources
+    );
+
+    // ── Sub-assertion 3: authority resolution ──
+    assert_eq!(
+        entry_at_10_20.fields.get("signature"),
+        Some(&serde_json::json!("fn foo() -> i32")),
+        "(3) authority resolution: signature must be Serena's value \
+         \"fn foo() -> i32\"; got {:?}",
+        entry_at_10_20.fields.get("signature")
+    );
+    assert_eq!(
+        entry_at_10_20.conflicts.len(),
+        1,
+        "(3) exactly one G1Conflict expected (only `signature` has \
+         multi-source contributors with non-equal values); got {}: {:?}",
+        entry_at_10_20.conflicts.len(),
+        entry_at_10_20.conflicts
+    );
+    let conflict = &entry_at_10_20.conflicts[0];
+    assert_eq!(
+        conflict.field, "signature",
+        "(3) conflict.field must be \"signature\"; got {:?}",
+        conflict.field
+    );
+    assert_eq!(
+        conflict.winner,
+        G1ToolKind::Serena,
+        "(3) conflict.winner must be G1ToolKind::Serena; got {:?}",
+        conflict.winner
+    );
+    assert_eq!(
+        conflict.winner_value,
+        serde_json::json!("fn foo() -> i32"),
+        "(3) conflict.winner_value must be \"fn foo() -> i32\"; got {:?}",
+        conflict.winner_value
+    );
+    assert_eq!(
+        conflict.losers,
+        vec![(G1ToolKind::AstGrep, serde_json::json!("fn foo()"))],
+        "(3) conflict.losers must be [(AstGrep, \"fn foo()\")]; got {:?}",
+        conflict.losers
+    );
+
+    // ── Sub-assertion 4: disposition pass-through ──
+    assert_eq!(
+        fused.source_dispositions.len(),
+        4,
+        "(4) source_dispositions must carry all 4 sources; got {}: {:?}",
+        fused.source_dispositions.len(),
+        fused.source_dispositions
+    );
+    for (kind, status) in &fused.source_dispositions {
+        assert_eq!(
+            *status,
+            G1ToolStatus::Available,
+            "(4) every source must be Available in this happy-path \
+             scenario; got status={status:?} for kind={kind:?}",
+        );
+    }
+    let kinds_in_order: Vec<G1ToolKind> =
+        fused.source_dispositions.iter().map(|(k, _)| *k).collect();
+    assert_eq!(
+        kinds_in_order,
+        vec![
+            G1ToolKind::TreeSitter,
+            G1ToolKind::Serena,
+            G1ToolKind::AstGrep,
+            G1ToolKind::Diagnostics,
+        ],
+        "(4) source_dispositions order must match the input source vec \
+         order [TreeSitter, Serena, AstGrep, Diagnostics]; got {kinds_in_order:?}",
+    );
+    assert!(
+        !fused.master_timed_out,
+        "(4) master_timed_out must be false on the happy path"
+    );
+
+    // ── Sub-assertion 5: the (util.rs, 30, 35) Diagnostics-only entry ──
+    let entry_at_30_35 = fused
+        .entries
+        .iter()
+        .find(|e| e.location.start_line == 30 && e.location.end_line == 35)
+        .expect("must contain a fused entry at (util.rs, 30, 35)");
+    assert_eq!(
+        entry_at_30_35.contributing_sources,
+        vec![G1ToolKind::Diagnostics],
+        "(5) (util.rs, 30, 35) is Diagnostics-only; got {:?}",
+        entry_at_30_35.contributing_sources
+    );
+    assert_eq!(
+        entry_at_30_35.fields.get("diagnostic"),
+        Some(&serde_json::json!("unused variable")),
+        "(5) Diagnostics-only entry must carry the `diagnostic` field \
+         verbatim; got {:?}",
+        entry_at_30_35.fields.get("diagnostic")
+    );
+    assert!(
+        entry_at_30_35.conflicts.is_empty(),
+        "(5) Diagnostics-only entry has no multi-source field, so \
+         conflicts must be empty; got {:?}",
+        entry_at_30_35.conflicts
+    );
+}
