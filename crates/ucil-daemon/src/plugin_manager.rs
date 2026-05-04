@@ -427,6 +427,23 @@ impl std::fmt::Display for PluginState {
 /// `mark_active` / `stop` / `mark_error` methods.  Each successful
 /// transition is logged at `tracing::info!` (or `warn!` for ERROR)
 /// with target `ucil.plugin.lifecycle` per master-plan §15.2.
+///
+/// # Hot-reload coordination
+///
+/// `in_flight` is a per-runtime [`tokio::sync::RwLock`] gate: every
+/// caller that issues a tool call against the plugin acquires the read
+/// half for the duration of the call.  [`PluginManager::reload`]
+/// acquires the write half before swapping the child process, which
+/// blocks until every outstanding read-guard has been dropped — i.e.
+/// every in-flight tool call has returned.  This is the master-plan
+/// §14.2 "drain in-flight before swap" semantics.
+///
+/// # Circuit-breaker counter
+///
+/// `restart_attempts` accumulates consecutive failed restart attempts
+/// observed by [`PluginManager::restart_with_backoff`].  It resets to
+/// zero on any successful health check (via `restart_with_backoff` or
+/// [`PluginManager::reload`]).
 #[derive(Debug, Clone)]
 pub struct PluginRuntime {
     /// The manifest that produced this runtime.  Kept by value so the
@@ -448,6 +465,14 @@ pub struct PluginRuntime {
     /// been promoted to ERROR (or has been reset by a successful
     /// `register()`).
     pub error_message: Option<String>,
+    /// Per-runtime in-flight gate. Tool-call dispatch acquires the
+    /// read half; [`PluginManager::reload`] acquires the write half
+    /// to drain readers before swapping the child process.
+    pub in_flight: Arc<RwLock<()>>,
+    /// Consecutive failed restart attempts observed by
+    /// [`PluginManager::restart_with_backoff`].  Resets to zero on a
+    /// successful health check.
+    pub restart_attempts: u32,
 }
 
 impl PluginRuntime {
@@ -468,6 +493,8 @@ impl PluginRuntime {
             last_call: Instant::now(),
             idle_timeout,
             error_message: None,
+            in_flight: Arc::new(RwLock::new(())),
+            restart_attempts: 0,
         }
     }
 
