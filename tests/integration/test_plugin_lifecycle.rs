@@ -366,3 +366,126 @@ async fn test_plugin_crash_recovery_via_circuit_breaker() {
         "fast-test budget must hold (got {elapsed:?})"
     );
 }
+
+// ── Test 3: independent lifecycle for two runtimes ─────────────────────────
+
+/// Prove cross-plugin lifecycle isolation: one failing plugin's breaker
+/// trip must not poison the manager's view of healthy peers.
+///
+/// Phases:
+///
+/// 1. Register a healthy plugin via `PluginManager::activate` — it
+///    spawns the real `mock-mcp-plugin`, passes a real `tools/list`
+///    health check, and lands in `PluginState::Active`.
+/// 2. Register a failing plugin via `PluginManager::add` (the
+///    declarative-registration path, no implicit health check) so
+///    `restart_with_backoff` has a target whose every spawn ENOENTs.
+/// 3. Trip the breaker on the failing plugin only via
+///    `restart_with_backoff` with a 5 ms base.
+/// 4. Read both runtimes back from `registered_runtimes()` and assert
+///    independent post-conditions: healthy → `Active`,
+///    `restart_attempts == 0`, `error_message.is_none()`; failing →
+///    `Error`, `restart_attempts == MAX_RESTARTS`, `error_message`
+///    mentions the breaker trip.
+#[tokio::test]
+async fn test_plugin_independent_lifecycle_two_runtimes() {
+    let mock = mock_mcp_plugin_path();
+    let healthy = healthy_manifest("independent-healthy", &mock);
+    let failing = failing_manifest("independent-failing");
+
+    let mut mgr = PluginManager::new().with_circuit_breaker_base(Duration::from_millis(5));
+
+    // ── Healthy plugin: real activate against the real mock binary.
+    let healthy_runtime = mgr
+        .activate(&healthy)
+        .await
+        .expect("activate must succeed against the real mock-mcp-plugin");
+    assert_eq!(
+        healthy_runtime.state,
+        PluginState::Active,
+        "expected Active after activate of healthy plugin (got {:?}); runtime={:?}",
+        healthy_runtime.state,
+        healthy_runtime
+    );
+
+    // ── Failing plugin: declarative registration (no health check).
+    mgr.add(PluginRuntime::new(failing));
+
+    // Trip the breaker on the failing plugin only.
+    let result = mgr.restart_with_backoff("independent-failing").await;
+    let err = result.expect_err("restart_with_backoff against ENOENT must trip the breaker");
+    match err {
+        PluginError::CircuitBreakerOpen { ref name, attempts } => {
+            assert_eq!(
+                name, "independent-failing",
+                "CircuitBreakerOpen.name must match the failing fixture (got {name:?})"
+            );
+            assert_eq!(
+                attempts, MAX_RESTARTS,
+                "attempts must equal MAX_RESTARTS (got {attempts})"
+            );
+        }
+        other => panic!("expected PluginError::CircuitBreakerOpen, got {other:?}"),
+    }
+
+    let snapshot = mgr.registered_runtimes().await;
+    assert_eq!(
+        snapshot.len(),
+        2,
+        "manager must retain both runtimes (got {}); snapshot={:?}",
+        snapshot.len(),
+        snapshot
+    );
+
+    let healthy_view = snapshot
+        .iter()
+        .find(|rt| rt.manifest.plugin.name == "independent-healthy")
+        .expect("healthy runtime must remain registered after the failing breaker trip");
+    let failing_view = snapshot
+        .iter()
+        .find(|rt| rt.manifest.plugin.name == "independent-failing")
+        .expect("failing runtime must remain registered with breaker-tripped state");
+
+    // ── Healthy plugin: untouched by the failing plugin's breaker.
+    assert_eq!(
+        healthy_view.state,
+        PluginState::Active,
+        "healthy plugin state must remain Active (got {:?}); runtime={:?}",
+        healthy_view.state,
+        healthy_view
+    );
+    assert_eq!(
+        healthy_view.restart_attempts, 0,
+        "healthy plugin restart_attempts must remain 0 (got {}); runtime={:?}",
+        healthy_view.restart_attempts, healthy_view
+    );
+    assert!(
+        healthy_view.error_message.is_none(),
+        "healthy plugin error_message must be None (got {:?}); runtime={:?}",
+        healthy_view.error_message,
+        healthy_view
+    );
+
+    // ── Failing plugin: terminal Error state, breaker tripped.
+    assert_eq!(
+        failing_view.state,
+        PluginState::Error,
+        "failing plugin must end in Error state (got {:?}); runtime={:?}",
+        failing_view.state,
+        failing_view
+    );
+    assert_eq!(
+        failing_view.restart_attempts, MAX_RESTARTS,
+        "failing plugin restart_attempts must equal MAX_RESTARTS (got {}); runtime={:?}",
+        failing_view.restart_attempts, failing_view
+    );
+    assert!(
+        failing_view
+            .error_message
+            .as_deref()
+            .is_some_and(|m| m.contains("circuit breaker")),
+        "failing plugin error_message must mention the breaker trip (got {:?}); runtime={:?}",
+        failing_view.error_message,
+        failing_view
+    );
+}
