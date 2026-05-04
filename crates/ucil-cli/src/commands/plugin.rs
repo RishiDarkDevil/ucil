@@ -57,13 +57,19 @@ pub struct PluginArgs {
     pub command: PluginSubcommand,
 }
 
-/// `ucil plugin <subcommand>` — subcommand dispatcher.
+/// `ucil plugin <subcommand>` — subcommand dispatcher (master-plan §16
+/// line 1580: `plugin list | install <n> | uninstall <n> | enable <n> |
+/// disable <n> | reload`).
 #[derive(Subcommand, Debug)]
 pub enum PluginSubcommand {
     /// Spawn the named plugin's MCP server, probe `tools/list`, and
-    /// report back.  Does NOT register the plugin into the running
-    /// daemon — that happens via `ucil plugin enable` in a later WO.
+    /// report back. Persists `installed=true` to the state file on
+    /// success so subsequent `list` reflects the install.
     Install(InstallArgs),
+    /// Enumerate every `plugin.toml` under `plugins_dir` and join with
+    /// the per-plugin state file. Manifests with no state row default
+    /// to `installed=false, enabled=false`.
+    List(ListArgs),
 }
 
 /// Arguments for `ucil plugin install <name>`.
@@ -89,6 +95,24 @@ pub struct InstallArgs {
     #[arg(long, default_value_t = 180_000)]
     pub timeout_ms: u64,
 
+    /// How to format the CLI's stdout report.
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    pub format: OutputFormat,
+}
+
+/// Arguments for `ucil plugin list`.
+///
+/// # JSON output
+///
+/// `{ "plugins": [{ "name": "...", "installed": bool, "enabled":
+/// bool }, ...] }` — one element per discovered manifest, joined with
+/// the persisted state file.
+#[derive(Args, Debug)]
+pub struct ListArgs {
+    /// Directory to search for `plugin.toml` manifests (max-depth 3,
+    /// matching `install`).
+    #[arg(long, default_value = "./plugins")]
+    pub plugins_dir: PathBuf,
     /// How to format the CLI's stdout report.
     #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
     pub format: OutputFormat,
@@ -250,6 +274,14 @@ pub async fn run_with_writer<W: Write>(args: PluginArgs, mut writer: W) -> Resul
                 .context("failed to write plugin install report")?;
             Ok(())
         }
+        PluginSubcommand::List(list) => {
+            let outcome = list_plugins(&list).await.with_context(|| {
+                format!("plugin list (plugins_dir={})", list.plugins_dir.display())
+            })?;
+            emit_list(list.format, &outcome, &mut writer)
+                .context("failed to write plugin list report")?;
+            Ok(())
+        }
     }
 }
 
@@ -303,24 +335,7 @@ async fn install_plugin(args: &InstallArgs) -> Result<InstallOutcome, PluginCmdE
 /// files and return the one whose `[plugin] name` equals `name`.
 fn resolve_manifest(name: &str, plugins_dir: &Path) -> Result<PluginManifest, PluginCmdError> {
     let mut matches: Vec<(PathBuf, PluginManifest)> = Vec::new();
-    for entry in WalkDir::new(plugins_dir)
-        .max_depth(3)
-        .follow_links(false)
-        .into_iter()
-        .filter_map(std::result::Result::ok)
-    {
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        if entry.file_name() != "plugin.toml" {
-            continue;
-        }
-        let path = entry.path().to_path_buf();
-        let manifest =
-            PluginManifest::from_path(&path).map_err(|source| PluginCmdError::ManifestRead {
-                path: path.clone(),
-                source: Box::new(source),
-            })?;
+    for (path, manifest) in walk_manifests(plugins_dir)? {
         if manifest.plugin.name == name {
             matches.push((path, manifest));
         }
@@ -341,6 +356,64 @@ fn resolve_manifest(name: &str, plugins_dir: &Path) -> Result<PluginManifest, Pl
             paths: matches.into_iter().map(|(p, _)| p).collect(),
         }),
     }
+}
+
+/// Walk `plugins_dir` (max depth 3) and yield every `plugin.toml`
+/// found, parsed into a `PluginManifest`. Shared by `resolve_manifest`
+/// (`install` / `reload`) and `list_plugins`.
+fn walk_manifests(plugins_dir: &Path) -> Result<Vec<(PathBuf, PluginManifest)>, PluginCmdError> {
+    let mut out: Vec<(PathBuf, PluginManifest)> = Vec::new();
+    for entry in WalkDir::new(plugins_dir)
+        .max_depth(3)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(std::result::Result::ok)
+    {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        if entry.file_name() != "plugin.toml" {
+            continue;
+        }
+        let path = entry.path().to_path_buf();
+        let manifest =
+            PluginManifest::from_path(&path).map_err(|source| PluginCmdError::ManifestRead {
+                path: path.clone(),
+                source: Box::new(source),
+            })?;
+        out.push((path, manifest));
+    }
+    Ok(out)
+}
+
+// ── `list` core ─────────────────────────────────────────────────────────────
+
+/// Runtime result of a successful `list` — one row per discovered
+/// manifest joined with the persisted state.
+struct ListOutcome {
+    rows: Vec<PluginStateEntry>,
+}
+
+async fn list_plugins(args: &ListArgs) -> Result<ListOutcome, PluginCmdError> {
+    let manifests = walk_manifests(&args.plugins_dir)?;
+    let state = read_state(&args.plugins_dir).await?;
+
+    let mut rows: Vec<PluginStateEntry> = Vec::with_capacity(manifests.len());
+    for (_, manifest) in manifests {
+        let name = manifest.plugin.name;
+        let row = state
+            .iter()
+            .find(|e| e.name == name)
+            .cloned()
+            .unwrap_or_else(|| PluginStateEntry {
+                name: name.clone(),
+                installed: false,
+                enabled: false,
+            });
+        rows.push(row);
+    }
+    rows.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(ListOutcome { rows })
 }
 
 // ── Emission ────────────────────────────────────────────────────────────────
@@ -375,6 +448,45 @@ fn emit_json<W: Write>(outcome: &InstallOutcome, writer: &mut W) -> std::io::Res
         status: outcome.status_label,
         tools: &outcome.tools,
         tool_count: outcome.tools.len(),
+    };
+    serde_json::to_writer_pretty(&mut *writer, &report).map_err(std::io::Error::other)?;
+    writeln!(writer)?;
+    Ok(())
+}
+
+// ── List emission ───────────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize)]
+struct ListReport<'a> {
+    plugins: &'a [PluginStateEntry],
+}
+
+fn emit_list<W: Write>(
+    format: OutputFormat,
+    outcome: &ListOutcome,
+    writer: &mut W,
+) -> std::io::Result<()> {
+    match format {
+        OutputFormat::Text => emit_list_text(outcome, writer),
+        OutputFormat::Json => emit_list_json(outcome, writer),
+    }
+}
+
+fn emit_list_text<W: Write>(outcome: &ListOutcome, writer: &mut W) -> std::io::Result<()> {
+    writeln!(writer, "plugins ({} discovered):", outcome.rows.len())?;
+    for row in &outcome.rows {
+        writeln!(
+            writer,
+            "  - {} (installed={}, enabled={})",
+            row.name, row.installed, row.enabled
+        )?;
+    }
+    Ok(())
+}
+
+fn emit_list_json<W: Write>(outcome: &ListOutcome, writer: &mut W) -> std::io::Result<()> {
+    let report = ListReport {
+        plugins: &outcome.rows,
     };
     serde_json::to_writer_pretty(&mut *writer, &report).map_err(std::io::Error::other)?;
     writeln!(writer)?;
