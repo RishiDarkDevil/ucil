@@ -15,6 +15,10 @@ path = "src/lib.rs"
 name = "test_lsp_bridge"
 path = "test_lsp_bridge.rs"
 
+[[test]]
+name = "test_plugin_lifecycle"
+path = "test_plugin_lifecycle.rs"
+
 [dev-dependencies]
 tokio       = { workspace = true }
 async-trait = { workspace = true }
@@ -22,4 +26,5 @@ lsp-types   = { workspace = true }
 serde_json  = { workspace = true }
 tempfile    = { workspace = true }
 ucil-core            = { path = "../../crates/ucil-core" }
+ucil-daemon          = { path = "../../crates/ucil-daemon" }
 ucil-lsp-diagnostics = { path = "../../crates/ucil-lsp-diagnostics" }
