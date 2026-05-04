@@ -3,7 +3,7 @@ ts: 2026-05-05T01:25:00Z
 phase: 2
 session: monitor
 trigger: stop-hook-blocks-on-mid-phase-gate-red
-resolved: false
+resolved: true
 blocks_loop: false
 severity: low
 auto_classify: bucket-A-admin
@@ -38,3 +38,33 @@ applies bucket-A and closes when convenient.
 ## Bucket
 
 `bucket-A-admin` — auto-resolvable.
+
+## Resolution
+
+Resolved 2026-05-05 by triage (pass 1, phase 2). Standard bucket-A close
+per the file's own self-classification ("Triage applies bucket-A and
+closes when convenient.").
+
+Evidence the underlying need has been satisfied:
+
+- The advisory's purpose was to keep the Stop-hook bypass armed for a
+  single monitor turn-end. That turn-end has long since happened; the
+  bypass served its purpose.
+- Phase 2 progress has advanced from 6/25 to 7/25 features (now 55/234
+  total) since this advisory was filed. The autonomous loop is healthy
+  and progressing — WO-0045 (`ucil-plugin-cli-subcommands`) merged at
+  `0f5993a` flipping P2-W6-F07, and the lessons-learned post is in at
+  `6af9498`.
+- The autonomous loop (PID 365546 `run-phase.sh 2`) and watchdog (PID
+  32274) continue running detached without issue.
+- This matches the design pattern documented in the prior escalation
+  `20260505T0030Z-monitor-session-stop-hook-bypass.md` per its
+  user-supplied resolution_note: "Bucket-A advisories actually worked:
+  each survives long enough for monitor's Stop-hook bypass, then triage
+  closes when phase-state conditions are met, and the monitor writes a
+  fresh one."
+
+If the monitor needs another bypass window, a fresh advisory will be
+written by the monitor session as designed.
+
+resolved: true
