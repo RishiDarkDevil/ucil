@@ -73,6 +73,25 @@ pub const HEALTH_CHECK_TIMEOUT_MS: u64 = 5_000;
 /// §14.1 shipped example default).
 pub const DEFAULT_IDLE_TIMEOUT_MINUTES: u64 = 10;
 
+/// Maximum consecutive restart attempts before
+/// [`PluginManager::restart_with_backoff`] trips the circuit breaker
+/// and transitions the runtime to [`PluginState::Error`].
+///
+/// Tracks master-plan §14.2 default `max_restarts = 3`.
+pub const MAX_RESTARTS: u32 = 3;
+
+/// Base backoff, in milliseconds, between restart attempts inside
+/// [`PluginManager::restart_with_backoff`].  The actual delay between
+/// attempt `n` and attempt `n + 1` is `base × 2^n` (exponential
+/// backoff), so attempts complete at base × {1, 2, 4} for the default
+/// `MAX_RESTARTS = 3`.
+///
+/// Tests can override the base via
+/// [`PluginManager::with_circuit_breaker_base`] to keep wall-time
+/// inside the fast-test budget.  The production default follows
+/// master-plan §14.2 (1 s base).
+pub const CIRCUIT_BREAKER_BASE_BACKOFF_MS: u64 = 1_000;
+
 // ── Manifest types ───────────────────────────────────────────────────────────
 
 /// Parsed `plugin.toml` manifest.
@@ -782,9 +801,26 @@ pub enum PluginError {
 /// original skeleton operations ([`Self::discover`], [`Self::spawn`],
 /// [`Self::health_check`]) remain associated functions — none of them
 /// depend on manager state.
-#[derive(Debug, Clone, Default)]
+///
+/// `circuit_breaker_base` configures the starting delay used by
+/// [`Self::restart_with_backoff`] for exponential backoff between
+/// failed attempts.  The production default follows
+/// [`CIRCUIT_BREAKER_BASE_BACKOFF_MS`]; tests shrink it via
+/// [`Self::with_circuit_breaker_base`] to keep wall-time inside the
+/// fast-test budget.
+#[derive(Debug, Clone)]
 pub struct PluginManager {
     runtimes: Arc<RwLock<Vec<PluginRuntime>>>,
+    circuit_breaker_base: Duration,
+}
+
+impl Default for PluginManager {
+    fn default() -> Self {
+        Self {
+            runtimes: Arc::new(RwLock::new(Vec::new())),
+            circuit_breaker_base: Duration::from_millis(CIRCUIT_BREAKER_BASE_BACKOFF_MS),
+        }
+    }
 }
 
 impl PluginManager {
@@ -792,6 +828,21 @@ impl PluginManager {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Override the base delay used for exponential backoff between
+    /// failed restart attempts inside [`Self::restart_with_backoff`].
+    ///
+    /// Production code keeps the default 1 s base; the
+    /// `test_circuit_breaker` acceptance test shrinks the base to a
+    /// few milliseconds so the breaker-trip exercise completes inside
+    /// the fast-test wall-time budget.  The default constructor
+    /// [`Self::new`] continues to use [`CIRCUIT_BREAKER_BASE_BACKOFF_MS`]
+    /// — call this builder explicitly to opt in to a different base.
+    #[must_use]
+    pub const fn with_circuit_breaker_base(mut self, base: Duration) -> Self {
+        self.circuit_breaker_base = base;
+        self
     }
 
     /// Walk `plugins_dir` (non-recursively) for `*.toml` files and parse
