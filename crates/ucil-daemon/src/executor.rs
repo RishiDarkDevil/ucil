@@ -70,6 +70,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash as _, Hasher as _};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use thiserror::Error;
 use ucil_core::knowledge_graph::{KnowledgeGraph, KnowledgeGraphError};
@@ -769,6 +770,208 @@ pub async fn enrich_find_definition<C: SerenaHoverClient + ?Sized>(
         callers,
         hover,
     }
+}
+
+// ── G1 parallel-execution orchestrator (P2-W7-F01, WO-0047) ──────────────
+//
+// WO-0047 for `P2-W7-F01` (master-plan §5.1 lines 420-446 + §18 Phase 2
+// Week 7 line 1780, "G1 (Structural) — All tools parallel, fuse
+// everything") adds the parallel fan-out orchestrator that runs
+// tree-sitter, Serena, ast-grep, and the LSP diagnostics bridge
+// concurrently with a 5 s overall deadline, returning per-source
+// results so partial outcomes remain usable when one tool is
+// unavailable.
+//
+// Production wiring of real subprocess clients (Serena MCP plugin,
+// ast-grep MCP plugin, real `ucil_treesitter::parser::Parser`, real
+// `crates/ucil-lsp-diagnostics::bridge`) is deferred to P2-W7-F02
+// (G1 fusion) and P2-W7-F05 (find_references).  F01 ships only the
+// orchestrator + the [`G1Source`] dependency-inversion seam (per
+// `DEC-0008`) plus its unit acceptance test that injects local trait
+// impls of [`G1Source`] — UCIL's own abstraction boundary.
+//
+// The existing [`enrich_find_definition`] (WO-0037, see executor.rs
+// above) stays unmodified — F02 will compose this orchestrator's
+// outputs into a richer fused payload via [`execute_g1`]; F01 adds
+// capability without removing the G1-fusion-lite hover-only helper
+// or its `find_definition` call site.
+
+/// Master timeout for the G1 parallel-execution orchestrator.
+///
+/// Master-plan §5.1 line 444 specifies a 5 s overall deadline for the
+/// G1 fan-out so the daemon can return partial results to the host
+/// adapter even when one of the four sources hangs.  When this
+/// deadline elapses, [`execute_g1`] returns a [`G1Outcome`] with
+/// `master_timed_out = true` and per-source [`G1ToolStatus::TimedOut`]
+/// placeholders for any source that had not yet completed.
+pub const G1_MASTER_DEADLINE: Duration = Duration::from_millis(5_000);
+
+/// Per-source timeout applied to each [`G1Source::execute`] call.
+///
+/// 4.5 s leaves a 0.5 s margin under [`G1_MASTER_DEADLINE`] so the
+/// per-source timeout always wins on a true global stall — the master
+/// deadline is a safety net, not the primary timing path.  Avoids the
+/// per-source-timeout fast-path racing the master deadline (master-plan
+/// §5.1 line 444 single-tool-stall handling).
+pub const G1_PER_SOURCE_DEADLINE: Duration = Duration::from_millis(4_500);
+
+/// Structural-query input shape for the G1 fan-out.
+///
+/// Mirrors the master-plan §5.1 fan-out target ("Query → ALL of the
+/// following run in parallel"): a symbol name plus its on-disk
+/// location.  Live wiring will derive these from the host adapter's
+/// `find_definition` / `find_references` request; the unit test
+/// constructs them directly.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct G1Query {
+    /// Symbol name to look up (e.g. `"TaskManager"`).
+    pub symbol: String,
+    /// File path containing the symbol's primary occurrence.
+    pub file_path: PathBuf,
+    /// 1-based line number of the symbol's primary occurrence.
+    pub line: u32,
+    /// 1-based column number of the symbol's primary occurrence.
+    pub column: u32,
+}
+
+/// Identifier for one of the four G1 (structural) sources the
+/// orchestrator fans out to.
+///
+/// Variants name each source's expected production wiring:
+///
+/// * [`G1ToolKind::TreeSitter`] — `ucil_treesitter::parser::Parser`,
+///   wired through the existing [`IngestPipeline`] entry point in
+///   F02 / F05.
+/// * [`G1ToolKind::Serena`] — Serena MCP plugin reached via
+///   `executor::SerenaHoverClient` (WO-0037, see executor.rs above).
+/// * [`G1ToolKind::AstGrep`] — ast-grep MCP plugin landed by WO-0044
+///   (see `plugins/structural/ast-grep/plugin.toml`).
+/// * [`G1ToolKind::Diagnostics`] — `crates/ucil-lsp-diagnostics::bridge`
+///   reached through the LSP diagnostics fan-in.
+///
+/// SCIP and Joern are explicitly out of scope here (P2-W7-F08 lands
+/// SCIP P1; Joern is post-Phase-2).  The enum is *not*
+/// `#[non_exhaustive]` because each variant maps to a fixed master-plan
+/// §5.1 source — extending it later is a deliberate additive
+/// non-breaking change a future WO can make with an ADR.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum G1ToolKind {
+    /// Tree-sitter structural parse (production wiring: `ucil_treesitter`).
+    TreeSitter,
+    /// Serena MCP `textDocument/hover` channel (production wiring:
+    /// `executor::SerenaHoverClient` from WO-0037).
+    Serena,
+    /// `ast-grep` MCP plugin (production wiring: WO-0044 manifest at
+    /// `plugins/structural/ast-grep/plugin.toml`).
+    AstGrep,
+    /// LSP diagnostics bridge (production wiring:
+    /// `crates/ucil-lsp-diagnostics::bridge`).
+    Diagnostics,
+}
+
+/// Disposition of one G1 source on a given fan-out call.
+///
+/// Each variant is a discriminant with no inner data — the data lives
+/// on [`G1ToolOutput`] via `payload` / `error` / `elapsed_ms`.  Master-
+/// plan §5.1 prescribes per-source dispositions so partial outcomes
+/// remain usable: a single [`G1ToolStatus::Errored`] does not turn the
+/// entire fan-out into a failure.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum G1ToolStatus {
+    /// The source returned a payload within its per-source deadline.
+    Available,
+    /// The source is degraded or not installed in this deployment
+    /// (e.g. `ast-grep` binary absent, Serena plugin disabled).
+    Unavailable,
+    /// The source's per-source `tokio::time::timeout` elapsed before
+    /// it returned a response.
+    TimedOut,
+    /// The source returned an error (transport / decode / internal).
+    Errored,
+}
+
+/// One source's contribution to a G1 fan-out outcome.
+///
+/// `payload` carries the source's emitted JSON (e.g. tree-sitter AST
+/// snippet, Serena hover markdown, ast-grep matches, diagnostics
+/// bundle) when [`Self::status`] is [`G1ToolStatus::Available`];
+/// otherwise it is `serde_json::Value::Null` and `error` carries an
+/// operator-readable description of the degraded path.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct G1ToolOutput {
+    /// Which source produced this output.
+    pub kind: G1ToolKind,
+    /// Disposition of the source on this fan-out call.
+    pub status: G1ToolStatus,
+    /// Wall-clock time the source spent before returning, in
+    /// milliseconds.
+    pub elapsed_ms: u64,
+    /// Source-emitted JSON payload, or `Value::Null` on a degraded
+    /// path.  The shape is source-specific and intentionally untyped
+    /// here so F02 (G1 fusion) can layer a typed projection without
+    /// further changes to this struct.
+    pub payload: serde_json::Value,
+    /// Operator-readable error description for any non-`Available`
+    /// status.  `None` for [`G1ToolStatus::Available`].
+    pub error: Option<String>,
+}
+
+/// Aggregate outcome of one [`execute_g1`] fan-out call.
+///
+/// `results` is a `Vec` (rather than a fixed-size array) so the same
+/// orchestrator can be reused unchanged when SCIP/Joern land in
+/// P2-W7-F08 and Phase-3.  Order matches the order of the input
+/// `sources` argument.
+///
+/// `master_timed_out` is `true` when the outer
+/// [`G1_MASTER_DEADLINE`] elapsed before all per-source futures
+/// completed; in that case `results` carries
+/// [`G1ToolStatus::TimedOut`] placeholders for every source so
+/// downstream code never sees an empty-but-non-`master_timed_out`
+/// outcome.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct G1Outcome {
+    /// Per-source outputs, in the same order as the input `sources`.
+    pub results: Vec<G1ToolOutput>,
+    /// Wall-clock time the orchestrator spent in milliseconds.
+    pub wall_elapsed_ms: u64,
+    /// `true` iff the outer master deadline elapsed before all
+    /// per-source futures completed.
+    pub master_timed_out: bool,
+}
+
+/// Dependency-inversion seam for one of the four G1 (structural)
+/// sources.
+///
+/// Per `DEC-0008` §4 this trait is UCIL-owned — it is **not** a
+/// re-export or adapter of any external wire format.  The unit
+/// acceptance test [`test_g1_parallel_execution`] supplies four local
+/// trait impls of [`G1Source`] (UCIL's own abstraction boundary);
+/// production wiring of real subprocess clients lands in P2-W7-F02
+/// (fusion) and P2-W7-F05 (`find_references`).
+///
+/// The same dependency-inversion seam pattern as
+/// [`SerenaHoverClient`] above (executor.rs:640) — a UCIL-owned
+/// trait that a live implementation converts to whatever wire shape
+/// its upstream speaks.
+///
+/// `Send + Sync` bounds are required so trait objects can live in
+/// `Vec<Box<dyn G1Source + Send + Sync + 'static>>` inside the
+/// daemon's long-lived server state once F02 / F05 land.
+#[async_trait::async_trait]
+pub trait G1Source: Send + Sync {
+    /// Identifies this source's [`G1ToolKind`] without runtime
+    /// introspection so [`execute_g1`] can label results by source.
+    fn kind(&self) -> G1ToolKind;
+
+    /// Run this source's structural query.
+    ///
+    /// Implementations are responsible for emitting their own
+    /// [`G1ToolOutput`] with the appropriate [`G1ToolStatus`] —
+    /// the orchestrator only overrides the status to
+    /// [`G1ToolStatus::TimedOut`] when its per-source
+    /// `tokio::time::timeout` elapses.
+    async fn execute(&self, query: &G1Query) -> G1ToolOutput;
 }
 
 // ── Unit tests ────────────────────────────────────────────────────────────
