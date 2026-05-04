@@ -1748,3 +1748,277 @@ async fn test_serena_g1_fusion() {
         "Scenario C: resolution must thread through unchanged even on Serena error",
     );
 }
+
+// ── G1 parallel-execution acceptance test (P2-W7-F01) ────────────────────
+//
+// Per `DEC-0007` (frozen-selector module-root placement), the
+// acceptance test `test_g1_parallel_execution` lives at the module
+// root of `executor.rs` — NOT inside `mod tests {}` — so the
+// `feature-list.json` selector
+// `-p ucil-daemon executor::test_g1_parallel_execution`
+// resolves cleanly without a `tests::` intermediate.
+//
+// Per `DEC-0008` §4 the four trait impls below (`TestG1Source` driven
+// by `TestBehaviour`) are local to the test — UCIL's own abstraction
+// boundary, not a mock of any external wire format.  Production
+// wiring of real subprocess clients (Serena MCP plugin, ast-grep MCP
+// plugin, real `ucil_treesitter::parser::Parser`, real
+// `crates/ucil-lsp-diagnostics::bridge`) is deferred to P2-W7-F02
+// (G1 fusion) and P2-W7-F05 (`find_references`).
+
+/// Frozen acceptance selector for feature `P2-W7-F01` — see
+/// `ucil-build/feature-list.json` entry for
+/// `-p ucil-daemon executor::test_g1_parallel_execution`.
+///
+/// Asserts three properties of [`execute_g1`] in one function (single
+/// frozen selector — no separate tests, per `DEC-0007`):
+///
+/// 1. **Parallel timing** — 4 sources each sleeping 200 ms must
+///    return with `wall_elapsed_ms` in `[180, 600)` (lower bound
+///    proves at least one source's sleep elapsed; upper bound proves
+///    serial 4×200 ms = 800 ms did not happen → parallelism
+///    confirmed).  Dual-bound discipline per WO-0043 lessons.
+/// 2. **Partial-Errored** — 1 of 4 sources returns
+///    [`G1ToolStatus::Errored`]; outcome carries exactly 1 Errored +
+///    3 [`G1ToolStatus::Available`] entries.
+/// 3. **Partial-TimedOut** — 1 of 4 sources sleeps 6 s
+///    (> [`G1_PER_SOURCE_DEADLINE`]); outcome carries exactly 1
+///    [`G1ToolStatus::TimedOut`] + 3 [`G1ToolStatus::Available`]
+///    entries; whole test wall-time stays under 5500 ms (the
+///    per-source 4.5 s ceiling fires before the master 5 s
+///    deadline).
+#[cfg(test)]
+#[allow(clippy::too_many_lines, clippy::missing_panics_doc)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+pub async fn test_g1_parallel_execution() {
+    use std::time::Instant;
+
+    /// Behaviour switches for the per-test [`G1Source`] impl below.
+    #[derive(Clone)]
+    enum TestBehaviour {
+        /// Sleep then return [`G1ToolStatus::Available`].
+        Sleep(Duration),
+        /// Return [`G1ToolStatus::Errored`] without any sleep.
+        Error(String),
+        /// Sleep longer than [`G1_PER_SOURCE_DEADLINE`] —
+        /// [`run_g1_source`]'s `tokio::time::timeout` wrapper must
+        /// fire and return [`G1ToolStatus::TimedOut`] before this
+        /// branch returns.
+        LongSleep(Duration),
+    }
+
+    /// Local [`G1Source`] impl driving the three sub-scenarios.
+    /// Per `DEC-0008` §4 this is a UCIL-internal trait (the
+    /// dependency-inversion seam), so a local impl in a test is
+    /// not a mock of any external wire format — the same shape as
+    /// `fake_serena_hover_client::ScriptedFakeSerenaHoverClient`
+    /// above.
+    struct TestG1Source {
+        kind: G1ToolKind,
+        behaviour: TestBehaviour,
+    }
+
+    #[async_trait::async_trait]
+    impl G1Source for TestG1Source {
+        fn kind(&self) -> G1ToolKind {
+            self.kind
+        }
+
+        async fn execute(&self, _query: &G1Query) -> G1ToolOutput {
+            match &self.behaviour {
+                TestBehaviour::Sleep(d) => {
+                    let start = Instant::now();
+                    tokio::time::sleep(*d).await;
+                    let elapsed_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+                    G1ToolOutput {
+                        kind: self.kind,
+                        status: G1ToolStatus::Available,
+                        elapsed_ms,
+                        payload: serde_json::json!({
+                            "slept_ms": u64::try_from(d.as_millis())
+                                .unwrap_or(u64::MAX),
+                        }),
+                        error: None,
+                    }
+                }
+                TestBehaviour::Error(msg) => G1ToolOutput {
+                    kind: self.kind,
+                    status: G1ToolStatus::Errored,
+                    elapsed_ms: 0,
+                    payload: serde_json::Value::Null,
+                    error: Some(msg.clone()),
+                },
+                TestBehaviour::LongSleep(d) => {
+                    tokio::time::sleep(*d).await;
+                    // The orchestrator's per-source timeout must
+                    // fire before this branch returns; if the test
+                    // ever sees `Available` here, the timeout
+                    // wrapper has regressed (AC21 mutation #2
+                    // would land us here).
+                    G1ToolOutput {
+                        kind: self.kind,
+                        status: G1ToolStatus::Available,
+                        elapsed_ms: u64::try_from(d.as_millis()).unwrap_or(u64::MAX),
+                        payload: serde_json::Value::Null,
+                        error: None,
+                    }
+                }
+            }
+        }
+    }
+
+    // The four kinds, in master-plan §5.1 order.
+    let all_kinds: [G1ToolKind; 4] = [
+        G1ToolKind::TreeSitter,
+        G1ToolKind::Serena,
+        G1ToolKind::AstGrep,
+        G1ToolKind::Diagnostics,
+    ];
+
+    let q = G1Query {
+        symbol: "foo".to_owned(),
+        file_path: PathBuf::from("src/lib.rs"),
+        line: 1,
+        column: 1,
+    };
+
+    // ── (a) Parallel timing: 4×200 ms sources, wall in [180, 600) ────
+    let sources_a: Vec<Box<dyn G1Source + Send + Sync>> = all_kinds
+        .iter()
+        .map(|k| {
+            Box::new(TestG1Source {
+                kind: *k,
+                behaviour: TestBehaviour::Sleep(Duration::from_millis(200)),
+            }) as Box<dyn G1Source + Send + Sync>
+        })
+        .collect();
+    let outcome_a = execute_g1(q.clone(), sources_a, G1_MASTER_DEADLINE).await;
+    assert!(
+        outcome_a.wall_elapsed_ms >= 180,
+        "(a) parallel timing lower bound: wall_elapsed_ms must be >= 180 \
+         (proves at least one 200 ms sleep elapsed); got {} ms",
+        outcome_a.wall_elapsed_ms
+    );
+    assert!(
+        outcome_a.wall_elapsed_ms < 600,
+        "(a) parallel timing upper bound: wall_elapsed_ms must be < 600 \
+         (proves serial 4x200=800 ms did not happen → parallelism confirmed); \
+         got {} ms",
+        outcome_a.wall_elapsed_ms
+    );
+    assert!(
+        !outcome_a.master_timed_out,
+        "(a) master_timed_out must be false on a 200 ms-per-source happy path"
+    );
+    assert_eq!(
+        outcome_a.results.len(),
+        4,
+        "(a) outcome.results must contain exactly 4 entries (one per source)"
+    );
+    for r in &outcome_a.results {
+        assert_eq!(
+            r.status,
+            G1ToolStatus::Available,
+            "(a) every source must report Available; got {:?} for kind {:?}",
+            r.status,
+            r.kind
+        );
+    }
+
+    // ── (b) Partial-Errored: 1 Errored + 3 Available ─────────────────
+    let sources_b: Vec<Box<dyn G1Source + Send + Sync>> = vec![
+        Box::new(TestG1Source {
+            kind: G1ToolKind::TreeSitter,
+            behaviour: TestBehaviour::Sleep(Duration::from_millis(50)),
+        }),
+        Box::new(TestG1Source {
+            kind: G1ToolKind::Serena,
+            behaviour: TestBehaviour::Error("injected".to_owned()),
+        }),
+        Box::new(TestG1Source {
+            kind: G1ToolKind::AstGrep,
+            behaviour: TestBehaviour::Sleep(Duration::from_millis(50)),
+        }),
+        Box::new(TestG1Source {
+            kind: G1ToolKind::Diagnostics,
+            behaviour: TestBehaviour::Sleep(Duration::from_millis(50)),
+        }),
+    ];
+    let outcome_b = execute_g1(q.clone(), sources_b, G1_MASTER_DEADLINE).await;
+    let errored_b = outcome_b
+        .results
+        .iter()
+        .filter(|r| r.status == G1ToolStatus::Errored)
+        .count();
+    let available_b = outcome_b
+        .results
+        .iter()
+        .filter(|r| r.status == G1ToolStatus::Available)
+        .count();
+    assert_eq!(
+        errored_b, 1,
+        "(b) outcome must contain exactly 1 Errored entry, got {errored_b} \
+         (results = {:?})",
+        outcome_b.results
+    );
+    assert_eq!(
+        available_b, 3,
+        "(b) outcome must contain exactly 3 Available entries, got {available_b} \
+         (results = {:?})",
+        outcome_b.results
+    );
+
+    // ── (c) Partial-TimedOut: 1 TimedOut + 3 Available, wall < 5500 ms ──
+    let sources_c: Vec<Box<dyn G1Source + Send + Sync>> = vec![
+        Box::new(TestG1Source {
+            kind: G1ToolKind::TreeSitter,
+            behaviour: TestBehaviour::Sleep(Duration::from_millis(50)),
+        }),
+        Box::new(TestG1Source {
+            kind: G1ToolKind::Serena,
+            behaviour: TestBehaviour::Sleep(Duration::from_millis(50)),
+        }),
+        Box::new(TestG1Source {
+            kind: G1ToolKind::AstGrep,
+            behaviour: TestBehaviour::LongSleep(Duration::from_secs(6)),
+        }),
+        Box::new(TestG1Source {
+            kind: G1ToolKind::Diagnostics,
+            behaviour: TestBehaviour::Sleep(Duration::from_millis(50)),
+        }),
+    ];
+    let outcome_c = execute_g1(q.clone(), sources_c, G1_MASTER_DEADLINE).await;
+    let timed_out_c = outcome_c
+        .results
+        .iter()
+        .filter(|r| r.status == G1ToolStatus::TimedOut)
+        .count();
+    let available_c = outcome_c
+        .results
+        .iter()
+        .filter(|r| r.status == G1ToolStatus::Available)
+        .count();
+    assert_eq!(
+        timed_out_c, 1,
+        "(c) outcome must contain exactly 1 TimedOut entry, got {timed_out_c} \
+         (results = {:?})",
+        outcome_c.results
+    );
+    assert_eq!(
+        available_c, 3,
+        "(c) outcome must contain exactly 3 Available entries, got {available_c} \
+         (results = {:?})",
+        outcome_c.results
+    );
+    assert!(
+        outcome_c.wall_elapsed_ms < 5_500,
+        "(c) test wall-time must be < 5500 ms \
+         (per-source 4.5 s ceiling, master 5 s); got {} ms",
+        outcome_c.wall_elapsed_ms
+    );
+    assert!(
+        !outcome_c.master_timed_out,
+        "(c) master_timed_out must be false — per-source 4.5 s ceiling \
+         fires before master 5 s; got master_timed_out=true"
+    );
+}
