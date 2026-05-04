@@ -2243,6 +2243,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "ucil-core",
+ "ucil-daemon",
  "ucil-lsp-diagnostics",
 ]
 
