@@ -232,11 +232,17 @@ impl LifecycleSection {
 impl PluginManifest {
     /// Read and parse a `plugin.toml` manifest from disk.
     ///
+    /// Calls [`Self::validate`] before returning so callers always
+    /// receive a well-formed manifest.
+    ///
     /// # Errors
     ///
     /// * [`PluginError::Io`] — the file could not be opened.
     /// * [`PluginError::ManifestParse`] — the file is not valid TOML or
     ///   omits required fields.
+    /// * [`PluginError::InvalidManifest`] — the manifest parses but
+    ///   fails a semantic check (empty required field, activation
+    ///   on a language not declared in `capabilities.languages`).
     pub fn from_path<P: AsRef<Path>>(path: P) -> Result<Self, PluginError> {
         let path = path.as_ref();
         let raw = std::fs::read_to_string(path).map_err(PluginError::Io)?;
@@ -244,7 +250,105 @@ impl PluginManifest {
             path: path.to_path_buf(),
             source: e,
         })?;
+        manifest.validate()?;
         Ok(manifest)
+    }
+
+    /// Validate semantic invariants on top of the TOML schema check.
+    ///
+    /// Master-plan §14.1 requires every manifest to carry a non-empty
+    /// `plugin.name` (no whitespace), `plugin.version`, `transport.kind`,
+    /// and `transport.command`. When `capabilities.languages` is
+    /// non-empty every entry in `capabilities.activation.on_language`
+    /// MUST also appear in `capabilities.languages` — otherwise the
+    /// activation rule is unreachable.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError::InvalidManifest`] with the offending
+    /// `field` and a human-readable `reason`.
+    pub fn validate(&self) -> Result<(), PluginError> {
+        if self.plugin.name.is_empty() {
+            return Err(PluginError::InvalidManifest {
+                field: "plugin.name",
+                reason: "plugin.name must not be empty".to_owned(),
+            });
+        }
+        if self.plugin.name.chars().any(char::is_whitespace) {
+            return Err(PluginError::InvalidManifest {
+                field: "plugin.name",
+                reason: format!(
+                    "plugin.name `{}` must not contain whitespace",
+                    self.plugin.name
+                ),
+            });
+        }
+        if self.plugin.version.is_empty() {
+            return Err(PluginError::InvalidManifest {
+                field: "plugin.version",
+                reason: "plugin.version must not be empty".to_owned(),
+            });
+        }
+        if self.transport.kind.is_empty() {
+            return Err(PluginError::InvalidManifest {
+                field: "transport.type",
+                reason: "transport.type must not be empty".to_owned(),
+            });
+        }
+        if self.transport.command.is_empty() {
+            return Err(PluginError::InvalidManifest {
+                field: "transport.command",
+                reason: "transport.command must not be empty".to_owned(),
+            });
+        }
+        if !self.capabilities.languages.is_empty() {
+            for lang in &self.capabilities.activation.on_language {
+                if !self.capabilities.languages.iter().any(|l| l == lang) {
+                    return Err(PluginError::InvalidManifest {
+                        field: "capabilities.activation.on_language",
+                        reason: format!(
+                            "activation language `{lang}` is not declared in capabilities.languages"
+                        ),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// True when the activation rules say this plugin should fire for
+    /// the given language.
+    ///
+    /// An empty `capabilities.activation.on_language` means the plugin
+    /// is language-agnostic and activates for any language; otherwise
+    /// the rule is a simple membership test.
+    #[must_use]
+    pub fn activates_for_language(&self, language: &str) -> bool {
+        if self.capabilities.activation.on_language.is_empty() {
+            return true;
+        }
+        self.capabilities
+            .activation
+            .on_language
+            .iter()
+            .any(|s| s == language)
+    }
+
+    /// True when the activation rules say this plugin should fire for
+    /// the given MCP tool name.
+    ///
+    /// Same semantics as [`Self::activates_for_language`]: empty
+    /// `on_tool` means activate for every tool; otherwise membership.
+    #[must_use]
+    pub fn activates_for_tool(&self, tool: &str) -> bool {
+        if self.capabilities.activation.on_tool.is_empty() {
+            return true;
+        }
+        self.capabilities
+            .activation
+            .on_tool
+            .iter()
+            .any(|s| s == tool)
     }
 }
 
@@ -426,6 +530,18 @@ pub enum PluginError {
         /// Underlying TOML decoder error.
         #[source]
         source: toml::de::Error,
+    },
+    /// The manifest parsed but failed a semantic check enforced by
+    /// [`PluginManifest::validate`] — e.g. empty `plugin.name` or an
+    /// activation entry that targets an undeclared language.
+    #[error("invalid manifest: {field}: {reason}")]
+    InvalidManifest {
+        /// Dotted name of the offending field (`"plugin.name"`,
+        /// `"capabilities.activation.on_language"`, …).
+        field: &'static str,
+        /// Human-readable explanation suitable for logs / error
+        /// messages.
+        reason: String,
     },
     /// The manifest transport kind is not supported by the skeleton.
     #[error("unsupported transport `{0}` (only `stdio` is implemented)")]
