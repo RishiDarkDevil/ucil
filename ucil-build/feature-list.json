@@ -1447,10 +1447,10 @@
         "P1-W2-F06"
       ],
       "passes": false,
-      "last_verified_ts": null,
-      "last_verified_by": null,
-      "last_verified_commit": null,
-      "attempts": 0,
+      "last_verified_ts": "2026-05-05T19:13:02Z",
+      "last_verified_by": "verifier-e677aaf0-1d4b-4010-a0ac-4b3a93c5a7b7",
+      "last_verified_commit": "7b0932a0559d9eecd5e48c981f32b398ba0b2422",
+      "attempts": 1,
       "blocked_reason": null
     },
     {
