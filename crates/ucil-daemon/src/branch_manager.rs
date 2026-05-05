@@ -346,3 +346,140 @@ pub fn code_chunks_schema() -> SchemaRef {
 fn sanitise_branch_name(name: &str) -> String {
     name.replace('/', "-")
 }
+
+impl BranchManager {
+    /// Open a per-branch `LanceDB` connection root and create the
+    /// `code_chunks` table if it does not already exist.
+    ///
+    /// On `parent = None` this creates a fresh branch from scratch:
+    /// the per-branch `vectors/` directory is `mkdir -p`'d and the
+    /// empty `code_chunks` table conforming to the master-plan §12.2
+    /// schema is created.
+    ///
+    /// On `parent = Some(name)` this performs a *delta clone*: the
+    /// parent's `vectors/` directory is recursively copied to the
+    /// new branch's `vectors/` directory before the connection is
+    /// opened, so the new branch starts with the parent's
+    /// already-indexed Lance dataset files byte-for-byte.  If the
+    /// parent has no `code_chunks` table (e.g. a partial clone), an
+    /// empty one is then created; if it already has one, the table
+    /// listing returned in [`BranchTableInfo::table_count`] reflects
+    /// the inherited table.
+    ///
+    /// Branch names are sanitised by replacing `/` with `-` before
+    /// any filesystem call — callers may pass raw git ref names like
+    /// `feat/foo`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BranchManagerError::NonUtf8Path`] if the per-branch
+    /// `vectors/` path is not valid UTF-8 (cannot be passed to
+    /// `lancedb::connect`).  Returns
+    /// [`BranchManagerError::ParentNotFound`] if `parent =
+    /// Some(name)` but the parent's `vectors/` directory does not
+    /// exist.  Returns [`BranchManagerError::Io`] on any directory-
+    /// creation, recursive-copy, or `try_exists` failure.  Returns
+    /// [`BranchManagerError::Lance`] on `lancedb::connect`,
+    /// `table_names`, or `create_empty_table` failure.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use std::path::PathBuf;
+    /// use ucil_daemon::branch_manager::BranchManager;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # tokio::runtime::Runtime::new()?.block_on(async {
+    /// let mgr = BranchManager::new(PathBuf::from("/repo/.ucil/branches"));
+    /// let info = mgr.create_branch_table("main", None).await?;
+    /// assert_eq!(info.branch, "main");
+    /// assert!(info.vectors_dir.ends_with("main/vectors"));
+    /// # Ok::<(), ucil_daemon::branch_manager::BranchManagerError>(())
+    /// # })?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[tracing::instrument(
+        name = "ucil.daemon.branch_manager.create",
+        level = "debug",
+        skip(self),
+        fields(branch = name, parent = ?parent),
+    )]
+    pub async fn create_branch_table(
+        &self,
+        name: &str,
+        parent: Option<&str>,
+    ) -> Result<BranchTableInfo, BranchManagerError> {
+        let sanitised = sanitise_branch_name(name);
+        let target_branch_dir = self.branches_root.join(&sanitised);
+        let target_vectors = target_branch_dir.join("vectors");
+
+        if let Some(parent_name) = parent {
+            let sanitised_parent = sanitise_branch_name(parent_name);
+            let source_vectors = self.branches_root.join(&sanitised_parent).join("vectors");
+            if !tokio::fs::try_exists(&source_vectors).await? {
+                return Err(BranchManagerError::ParentNotFound {
+                    parent: sanitised_parent,
+                    path: source_vectors,
+                });
+            }
+            copy_dir_recursive(&source_vectors, &target_vectors).await?;
+        }
+
+        // Idempotent — recursive-copy already created the directory
+        // when parent.is_some(); fresh-branch path needs the mkdir.
+        tokio::fs::create_dir_all(&target_vectors).await?;
+
+        let uri = target_vectors
+            .to_str()
+            .ok_or_else(|| BranchManagerError::NonUtf8Path {
+                path: target_vectors.clone(),
+            })?;
+        let conn = lancedb::connect(uri).execute().await?;
+        let existing = conn.table_names().execute().await?;
+        if !existing.iter().any(|t| t == "code_chunks") {
+            conn.create_empty_table("code_chunks", code_chunks_schema())
+                .execute()
+                .await?;
+        }
+        let final_tables = conn.table_names().execute().await?;
+
+        Ok(BranchTableInfo {
+            branch: sanitised,
+            vectors_dir: target_vectors,
+            table_count: final_tables.len(),
+        })
+    }
+}
+
+/// Recursively copy `src` to `dst`, creating directories as needed
+/// and skipping anything that is not a regular file or directory
+/// (symlinks are dropped per master-plan §11.4 line 1090 — branch
+/// trees are pure file/directory hierarchies).
+///
+/// `Box::pin` is required because Rust's async fn does not natively
+/// support recursive calls (the future would have an infinite size);
+/// pinning to the heap breaks the cycle.
+fn copy_dir_recursive<'a>(
+    src: &'a Path,
+    dst: &'a Path,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), BranchManagerError>> + Send + 'a>>
+{
+    Box::pin(async move {
+        tokio::fs::create_dir_all(dst).await?;
+        let mut entries = tokio::fs::read_dir(src).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            let src_path = entry.path();
+            let dst_path = dst.join(entry.file_name());
+            let ftype = entry.file_type().await?;
+            if ftype.is_dir() {
+                copy_dir_recursive(&src_path, &dst_path).await?;
+            } else if ftype.is_file() {
+                tokio::fs::copy(&src_path, &dst_path).await?;
+            }
+            // Skip symlinks / sockets / fifos — branch trees are pure
+            // file/directory hierarchies (master-plan §11.4 line 1090).
+        }
+        Ok(())
+    })
+}
