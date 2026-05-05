@@ -703,6 +703,195 @@ impl G1Source for ScipG1Source {
     }
 }
 
-// The frozen acceptance test `test_scip_p1_install` lands in the next
-// commit per the DEC-0005 module-coherence-driven commit ladder
-// documented in the WO-0055 plan_summary.
+// ── Frozen acceptance test (DEC-0007 module-root placement) ──────────────────
+
+/// Frozen acceptance test for `P2-W7-F08` (WO-0055 / DEC-0014).
+///
+/// Selector: `cargo test -p ucil-daemon scip::test_scip_p1_install` —
+/// resolves to `ucil_daemon::scip::test_scip_p1_install` because the
+/// test lives at MODULE ROOT (not inside `mod tests {}`) per
+/// `DEC-0007`.
+///
+/// Six sub-assertions in order:
+///
+/// * **SA1 (`index_repo` round-trip)** — runs the real `scip-rust`
+///   indexer subprocess against `tests/fixtures/rust-project`,
+///   asserts a non-empty `index.scip` is produced.
+/// * **SA2 (`load_index_to_sqlite`)** — decodes the `.scip` payload
+///   via the real `scip` Rust crate, writes rows to a real `SQLite`
+///   store at a `tempfile::TempDir`-managed path, asserts row count
+///   `> 0` and the `scip_symbols` table exists.
+/// * **SA3 (`query_symbol` against fixture symbol)** — queries
+///   `evaluate` (the load-bearing fixture-anchor `pub fn evaluate` at
+///   `tests/fixtures/rust-project/src/util.rs:128` per WO-0044
+///   lessons line 165), asserts the result contains a `util.rs`
+///   reference.
+/// * **SA4 (`ScipG1Source` standalone)** — invokes
+///   `G1Source::execute(&query)` on a `ScipG1Source` constructed
+///   over the same db, asserts `kind == G1ToolKind::Scip`,
+///   `status == G1ToolStatus::Available`, and entries non-empty.
+/// * **SA5 (fan-into `execute_g1` orchestrator)** — fans the source
+///   through `execute_g1` with the `G1_MASTER_DEADLINE` budget,
+///   asserts the orchestrator outcome includes a `Scip`-kind result
+///   with `status == Available`.
+/// * **SA6 (`authority_rank` regression sentinel)** — calls
+///   `crate::executor::authority_rank(G1ToolKind::Scip)` and asserts
+///   it equals `4` (the rank value is load-bearing for fusion
+///   ordering).
+///
+/// The `which::which("scip-rust").is_err()` guard at the top mirrors
+/// the WO-0044 `UCIL_SKIP_EXTERNAL_PLUGIN_TESTS` opt-out spirit but
+/// does not consult an env-var: the verifier's job is to ensure
+/// `scip-rust` IS on `PATH`; the guard exists only so a developer
+/// without `scip-rust` can `cargo build --tests` cleanly without
+/// failure spam.
+#[cfg(test)]
+#[tokio::test]
+#[allow(clippy::too_many_lines, clippy::uninlined_format_args)]
+async fn test_scip_p1_install() {
+    use crate::executor::{execute_g1, G1_MASTER_DEADLINE};
+
+    if which::which("scip-rust").is_err() {
+        eprintln!("[skip] scip-rust not on PATH — see scripts/devtools/install-scip-rust.sh");
+        return;
+    }
+
+    let tmp = tempfile::TempDir::new().expect("tmpdir");
+    let workspace_root: PathBuf = std::env::var("CARGO_MANIFEST_DIR")
+        .map(PathBuf::from)
+        .expect("CARGO_MANIFEST_DIR");
+    let repo_root = workspace_root
+        .parent()
+        .expect("crate parent")
+        .parent()
+        .expect("workspace root")
+        .to_owned();
+    let fixture = repo_root.join("tests/fixtures/rust-project");
+    let scip_out_dir = tmp.path().join("scip");
+    let db_path = tmp.path().join("scip.db");
+
+    assert!(
+        fixture.exists(),
+        "fixture must exist; got path={:?}",
+        fixture
+    );
+
+    // ── SA1: index_repo round-trip ───────────────────────────────────────
+    let scip_path = index_repo(&fixture, &scip_out_dir)
+        .await
+        .expect("index_repo");
+    assert!(
+        scip_path.exists(),
+        "index.scip must exist; got path={:?}",
+        scip_path
+    );
+    let scip_size = scip_path.metadata().expect("metadata").len();
+    assert!(
+        scip_size > 0,
+        "index.scip must be non-empty; got len={}",
+        scip_size
+    );
+
+    // ── SA2: load_index_to_sqlite ────────────────────────────────────────
+    let row_count = load_index_to_sqlite(&scip_path, &db_path)
+        .await
+        .expect("load_index_to_sqlite");
+    assert!(
+        row_count > 0,
+        "row count must be > 0 from a real fixture index; got {}",
+        row_count
+    );
+    let conn = rusqlite::Connection::open(&db_path).expect("open db");
+    let table_count: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='scip_symbols'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("query sqlite_master");
+    assert_eq!(
+        table_count, 1,
+        "scip_symbols table must exist; got {}",
+        table_count
+    );
+    drop(conn);
+
+    // ── SA3: query_symbol against fixture symbol ─────────────────────────
+    let refs = query_symbol(&db_path, "evaluate")
+        .await
+        .expect("query_symbol");
+    assert!(
+        !refs.is_empty(),
+        "query for 'evaluate' must return at least one ref against \
+         tests/fixtures/rust-project/src/util.rs:128 (`pub fn evaluate`); got {:?}",
+        refs
+    );
+    assert!(
+        refs.iter().any(|r| r.file_path.ends_with("util.rs")),
+        "at least one ref must be in util.rs; got file_paths={:?}",
+        refs.iter().map(|r| &r.file_path).collect::<Vec<_>>()
+    );
+
+    // ── SA4: ScipG1Source standalone ─────────────────────────────────────
+    let g1_source = ScipG1Source::new(db_path.clone());
+    let query = G1Query {
+        symbol: "evaluate".to_owned(),
+        file_path: PathBuf::from("tests/fixtures/rust-project/src/util.rs"),
+        line: 128,
+        column: 8,
+    };
+    let output = G1Source::execute(&g1_source, &query).await;
+    assert_eq!(
+        output.kind,
+        G1ToolKind::Scip,
+        "output kind must be Scip; got {:?}",
+        output.kind
+    );
+    assert_eq!(
+        output.status,
+        G1ToolStatus::Available,
+        "ScipG1Source status must be Available; got {:?} (error={:?})",
+        output.status,
+        output.error
+    );
+    let entries: Vec<G1FusionEntry> = serde_json::from_value(output.payload.clone())
+        .expect("payload deserialises into Vec<G1FusionEntry>");
+    assert!(
+        !entries.is_empty(),
+        "entries non-empty; got count={}",
+        entries.len()
+    );
+
+    // ── SA5: fan into execute_g1 orchestrator ────────────────────────────
+    let outcome = execute_g1(
+        query.clone(),
+        vec![Box::new(g1_source) as Box<dyn G1Source + Send + Sync>],
+        G1_MASTER_DEADLINE,
+    )
+    .await;
+    assert!(
+        outcome.results.iter().any(|r| r.kind == G1ToolKind::Scip),
+        "orchestrator must include Scip in outcome results; got kinds={:?}",
+        outcome.results.iter().map(|r| r.kind).collect::<Vec<_>>()
+    );
+    let scip_result = outcome
+        .results
+        .iter()
+        .find(|r| r.kind == G1ToolKind::Scip)
+        .expect("Scip result");
+    assert_eq!(
+        scip_result.status,
+        G1ToolStatus::Available,
+        "orchestrator-fanned Scip status must be Available; got {:?} (error={:?})",
+        scip_result.status,
+        scip_result.error
+    );
+
+    // ── SA6: authority_rank regression sentinel ──────────────────────────
+    let rank = crate::executor::authority_rank(G1ToolKind::Scip);
+    assert_eq!(
+        rank, 4,
+        "Scip authority rank must be 4 (lower than the 4 existing sources); got {}",
+        rank
+    );
+}
