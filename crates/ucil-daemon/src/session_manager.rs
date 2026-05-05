@@ -615,6 +615,109 @@ async fn test_session_state_tracking() {
     );
 }
 
+// P2-W7-F04 acceptance test. Placed at MODULE ROOT (NOT inside
+// `mod tests { }`) per DEC-0007 so the frozen feature-list selector
+// `session_manager::test_session_dedup` matches by exact path
+// segments — same placement as the sibling `test_session_state_tracking`
+// above. The five sub-assertions (SA1..SA5) cover the master-plan
+// dedup contract end-to-end: empty / partial / bulk-add / full /
+// session-expiry pass-through.
+#[cfg(test)]
+#[tokio::test]
+// DEC-0011: the `env_guard()` MutexGuard fences PATH mutators while
+// `create_session` spawns `git`. See the rationale on
+// `test_session_state_tracking`.
+#[allow(clippy::await_holding_lock)]
+async fn test_session_dedup() {
+    // DEC-0011: fence PATH mutations in watcher tests
+    let _g = crate::test_support::env_guard();
+    let repo = std::env::current_dir().expect("current dir");
+    let sm = SessionManager::new();
+    let id = sm
+        .create_session(&repo)
+        .await
+        .expect("create_session inside a git repo should succeed");
+
+    let candidates = vec![PathBuf::from("src/a.rs"), PathBuf::from("src/b.rs")];
+
+    // (SA1) Empty files_in_context → all candidates pass through unchanged.
+    let kept = sm.dedup_against_context(&id, candidates.clone()).await;
+    assert_eq!(
+        kept, candidates,
+        "empty files_in_context must return all candidates unchanged; got {kept:?}",
+    );
+
+    // (SA2) Partial overlap → in-context paths filtered out.
+    sm.add_file_to_context(&id, PathBuf::from("src/a.rs"))
+        .await
+        .expect("session exists");
+    let kept2 = sm.dedup_against_context(&id, candidates.clone()).await;
+    assert_eq!(
+        kept2,
+        vec![PathBuf::from("src/b.rs")],
+        "a.rs is in files_in_context — must be excluded; got {kept2:?}",
+    );
+
+    // (SA3) Bulk add via add_files_to_context accumulates so subsequent
+    // dedup applies the union.
+    let extras = vec![PathBuf::from("src/c.rs"), PathBuf::from("src/d.rs")];
+    sm.add_files_to_context(&id, &extras)
+        .await
+        .expect("session exists");
+    let kept3 = sm
+        .dedup_against_context(
+            &id,
+            vec![
+                PathBuf::from("src/a.rs"),
+                PathBuf::from("src/b.rs"),
+                PathBuf::from("src/c.rs"),
+                PathBuf::from("src/d.rs"),
+                PathBuf::from("src/e.rs"),
+            ],
+        )
+        .await;
+    assert_eq!(
+        kept3,
+        vec![PathBuf::from("src/b.rs"), PathBuf::from("src/e.rs")],
+        "only b.rs and e.rs survive after a/c/d are in context; got {kept3:?}",
+    );
+
+    // (SA4) Full overlap → empty Vec.
+    let kept4 = sm
+        .dedup_against_context(
+            &id,
+            vec![
+                PathBuf::from("src/a.rs"),
+                PathBuf::from("src/c.rs"),
+                PathBuf::from("src/d.rs"),
+            ],
+        )
+        .await;
+    assert!(
+        kept4.is_empty(),
+        "all candidates already in context — must return empty Vec; got {kept4:?}",
+    );
+
+    // (SA5) Session expiry → dedup pass-through. Verifies the
+    // structural invariant "session-scoped dedup store is cleared on
+    // session expiry" — once purge_expired removes the SessionInfo,
+    // its files_in_context BTreeSet is gone with it, and future dedup
+    // calls against the (now-missing) id return candidates unchanged.
+    let created_at = sm.get_session(&id).await.expect("session").created_at;
+    sm.set_ttl(&id, 1).await.expect("session exists");
+    let removed = sm.purge_expired(created_at + 2).await;
+    assert_eq!(removed, 1, "exactly one session expired");
+    assert!(
+        sm.get_session(&id).await.is_none(),
+        "session must be gone after purge",
+    );
+    let kept5 = sm.dedup_against_context(&id, candidates.clone()).await;
+    assert_eq!(
+        kept5, candidates,
+        "purged session → dedup-store-cleared → all candidates pass through; got {kept5:?}",
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
