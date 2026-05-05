@@ -949,7 +949,7 @@ pub struct G1Outcome {
 ///
 /// Per `DEC-0008` §4 this trait is UCIL-owned — it is **not** a
 /// re-export or adapter of any external wire format.  The unit
-/// acceptance test [`test_g1_parallel_execution`] supplies four local
+/// acceptance test `test_g1_parallel_execution` supplies four local
 /// trait impls of [`G1Source`] (UCIL's own abstraction boundary);
 /// production wiring of real subprocess clients lands in P2-W7-F02
 /// (fusion) and P2-W7-F05 (`find_references`).
@@ -1070,7 +1070,7 @@ where
 /// 1. Cap each source's per-call timeout at `min(deadline,
 ///    G1_PER_SOURCE_DEADLINE)` so the master deadline always wins
 ///    on a true global stall.
-/// 2. Build one boxed future per source via [`run_g1_source`] and
+/// 2. Build one boxed future per source via `run_g1_source` and
 ///    poll them concurrently through `join_all_g1` (single-task
 ///    poll-fn fan-out — equivalent to `futures::join_all` but
 ///    pulls in zero new dependencies, per WO-0047 AC18).
@@ -1218,7 +1218,7 @@ pub struct G1FusionEntry {
     /// Source location of this entry.
     pub location: G1FusedLocation,
     /// Free-form per-source fields.  Field-name collisions across
-    /// sources at the same location are resolved by [`authority_rank`]
+    /// sources at the same location are resolved by `authority_rank`
     /// during fusion.
     pub fields: serde_json::Map<String, serde_json::Value>,
 }
@@ -1227,7 +1227,7 @@ pub struct G1FusionEntry {
 ///
 /// Recorded when two or more sources contributed non-equal
 /// `serde_json::Value`s for the same field key at the same location.
-/// `winner` is the higher-authority source per [`authority_rank`];
+/// `winner` is the higher-authority source per `authority_rank`;
 /// `losers` carries the lower-authority `(source, value)` pairs whose
 /// values were not equal to `winner_value`, ordered by authority rank
 /// ascending.  Equal-value contributors are corroboration, not
@@ -1323,7 +1323,7 @@ const fn authority_rank(kind: G1ToolKind) -> u8 {
 /// 3. Group entries by [`G1FusedLocation`] (file + line range).
 /// 4. Within each group, union the per-entry `fields` map.  On
 ///    field-name collision with non-equal values, the higher-authority
-///    source wins via [`authority_rank`] and a [`G1Conflict`] row is
+///    source wins via `authority_rank` and a [`G1Conflict`] row is
 ///    recorded.  Equal-value contributors are corroboration, not
 ///    conflicts, and are not recorded.
 /// 5. Sort fused entries by location for deterministic output —

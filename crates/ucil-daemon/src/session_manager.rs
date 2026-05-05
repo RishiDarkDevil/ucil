@@ -6,6 +6,19 @@
 //!
 //! Git subprocess calls are wrapped in [`tokio::time::timeout`] (5 s) and use
 //! [`tokio::process::Command`] so they are non-blocking in the async runtime.
+//!
+//! Session-scoped result deduplication (P2-W7-F04, master-plan §5.2 line
+//! 459 and §6.3 line 666) is provided by the
+//! [`SessionManager::dedup_against_context`] /
+//! [`SessionManager::add_files_to_context`] method-pair: a candidate
+//! `Vec<PathBuf>` is filtered against the session's `files_in_context`
+//! `BTreeSet`, so the agent never sees the same code block twice in one
+//! session. The dedup state is the existing `files_in_context` field on
+//! [`SessionInfo`] — no separate dedup store — so the master-plan
+//! invariant "session-scoped dedup store is cleared on session expiry"
+//! is structural: once [`SessionManager::purge_expired`] retains a
+//! session out, the next `dedup_against_context` call against the
+//! purged id observes `None` and returns its candidates unchanged.
 
 // Public API items intentionally share a name prefix with the module
 // ("session_manager" → "SessionId", "SessionInfo", "SessionManager",
@@ -236,6 +249,118 @@ impl SessionManager {
         self.sessions.write().await.get_mut(id).map(|info| {
             info.files_in_context.insert(file);
         })
+    }
+
+    /// Filter `candidates` against the session's `files_in_context`,
+    /// returning only the paths the agent does NOT already have.
+    ///
+    /// Implements session-scoped result deduplication per master-plan
+    /// §5.2 line 459 ("Session dedup: don't return same code block twice
+    /// in a session") and §6.3 line 666 ("1. Session dedup: remove
+    /// results the agent already has (`files_in_context`)"); see also
+    /// §18 Phase 2 Week 7 line 1782 ("Session deduplication tracking").
+    ///
+    /// # Invariants
+    ///
+    /// - If `id` does not name a live session — either it was never
+    ///   created or [`SessionManager::purge_expired`] has retained it
+    ///   out — the candidates are returned unchanged. This is the
+    ///   structural realisation of the master-plan invariant
+    ///   "session-scoped dedup store is cleared on session expiry":
+    ///   the dedup state is the `files_in_context` field on
+    ///   [`SessionInfo`], so the moment the session is purged the
+    ///   future-dedup pass-through is automatic — no separate cleanup
+    ///   step is needed.
+    /// - Order is preserved: the kept entries appear in the same order
+    ///   as in `candidates`.
+    /// - Equality is `PathBuf` equality (lexical), not filesystem
+    ///   canonicalisation; callers that need canonicalised matching
+    ///   must normalise both sides before populating the session.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use std::path::PathBuf;
+    /// use ucil_daemon::session_manager::SessionManager;
+    ///
+    /// # #[tokio::main]
+    /// # async fn main() {
+    /// let sm = SessionManager::new();
+    /// let id = sm
+    ///     .create_session(std::env::current_dir().unwrap().as_path())
+    ///     .await
+    ///     .unwrap();
+    /// sm.add_file_to_context(&id, PathBuf::from("src/lib.rs"))
+    ///     .await
+    ///     .unwrap();
+    /// let candidates = vec![
+    ///     PathBuf::from("src/lib.rs"),
+    ///     PathBuf::from("src/main.rs"),
+    /// ];
+    /// let kept = sm.dedup_against_context(&id, candidates).await;
+    /// // kept == [PathBuf::from("src/main.rs")] — `src/lib.rs` was
+    /// // filtered out because it was already in `files_in_context`.
+    /// debug_assert_eq!(kept, vec![PathBuf::from("src/main.rs")]);
+    /// # }
+    /// ```
+    pub async fn dedup_against_context(
+        &self,
+        id: &SessionId,
+        candidates: Vec<PathBuf>,
+    ) -> Vec<PathBuf> {
+        let sessions = self.sessions.read().await;
+        match sessions.get(id) {
+            Some(info) => candidates
+                .into_iter()
+                .filter(|p| !info.files_in_context.contains(p))
+                .collect(),
+            None => candidates,
+        }
+    }
+
+    /// Bulk-insert `files` into the session's `files_in_context` set
+    /// under a single write-lock acquisition.
+    ///
+    /// This is the bulk companion of [`SessionManager::add_file_to_context`]
+    /// and is intended for the post-fusion path of multi-result tools
+    /// (e.g. `search_code` returning N file paths in one shot — see
+    /// master-plan §6.3 line 666). One write-lock per call beats N
+    /// round-trips through `add_file_to_context`.
+    ///
+    /// The signature takes `&[PathBuf]` so callers can pass either a
+    /// `&Vec<PathBuf>` or a slice without an extra allocation. Returns
+    /// `Some(())` when the session exists, `None` when it does not —
+    /// the same shape as `add_file_to_context`.
+    ///
+    /// `BTreeSet::extend` de-duplicates internally, so calling this
+    /// twice with overlapping slices is a no-op on duplicates.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use std::path::PathBuf;
+    /// use ucil_daemon::session_manager::SessionManager;
+    ///
+    /// # #[tokio::main]
+    /// # async fn main() {
+    /// let sm = SessionManager::new();
+    /// let id = sm
+    ///     .create_session(std::env::current_dir().unwrap().as_path())
+    ///     .await
+    ///     .unwrap();
+    /// let hits = vec![
+    ///     PathBuf::from("src/lib.rs"),
+    ///     PathBuf::from("src/main.rs"),
+    /// ];
+    /// sm.add_files_to_context(&id, &hits).await.unwrap();
+    /// # }
+    /// ```
+    pub async fn add_files_to_context(&self, id: &SessionId, files: &[PathBuf]) -> Option<()> {
+        self.sessions
+            .write()
+            .await
+            .get_mut(id)
+            .map(|info| info.files_in_context.extend(files.iter().cloned()))
     }
 
     /// Set the session's `inferred_domain` field.
@@ -502,6 +627,109 @@ async fn test_session_state_tracking() {
     assert!(
         sm.get_session(&id).await.is_none(),
         "purged session must no longer be retrievable"
+    );
+}
+
+// P2-W7-F04 acceptance test. Placed at MODULE ROOT (NOT inside
+// `mod tests { }`) per DEC-0007 so the frozen feature-list selector
+// `session_manager::test_session_dedup` matches by exact path
+// segments — same placement as the sibling `test_session_state_tracking`
+// above. The five sub-assertions (SA1..SA5) cover the master-plan
+// dedup contract end-to-end: empty / partial / bulk-add / full /
+// session-expiry pass-through.
+#[cfg(test)]
+#[tokio::test]
+// DEC-0011: the `env_guard()` MutexGuard fences PATH mutators while
+// `create_session` spawns `git`. See the rationale on
+// `test_session_state_tracking`.
+#[allow(clippy::await_holding_lock)]
+async fn test_session_dedup() {
+    // DEC-0011: fence PATH mutations in watcher tests
+    let _g = crate::test_support::env_guard();
+    let repo = std::env::current_dir().expect("current dir");
+    let sm = SessionManager::new();
+    let id = sm
+        .create_session(&repo)
+        .await
+        .expect("create_session inside a git repo should succeed");
+
+    let candidates = vec![PathBuf::from("src/a.rs"), PathBuf::from("src/b.rs")];
+
+    // (SA1) Empty files_in_context → all candidates pass through unchanged.
+    let kept = sm.dedup_against_context(&id, candidates.clone()).await;
+    assert_eq!(
+        kept, candidates,
+        "empty files_in_context must return all candidates unchanged; got {kept:?}",
+    );
+
+    // (SA2) Partial overlap → in-context paths filtered out.
+    sm.add_file_to_context(&id, PathBuf::from("src/a.rs"))
+        .await
+        .expect("session exists");
+    let kept2 = sm.dedup_against_context(&id, candidates.clone()).await;
+    assert_eq!(
+        kept2,
+        vec![PathBuf::from("src/b.rs")],
+        "a.rs is in files_in_context — must be excluded; got {kept2:?}",
+    );
+
+    // (SA3) Bulk add via add_files_to_context accumulates so subsequent
+    // dedup applies the union.
+    let extras = vec![PathBuf::from("src/c.rs"), PathBuf::from("src/d.rs")];
+    sm.add_files_to_context(&id, &extras)
+        .await
+        .expect("session exists");
+    let kept3 = sm
+        .dedup_against_context(
+            &id,
+            vec![
+                PathBuf::from("src/a.rs"),
+                PathBuf::from("src/b.rs"),
+                PathBuf::from("src/c.rs"),
+                PathBuf::from("src/d.rs"),
+                PathBuf::from("src/e.rs"),
+            ],
+        )
+        .await;
+    assert_eq!(
+        kept3,
+        vec![PathBuf::from("src/b.rs"), PathBuf::from("src/e.rs")],
+        "only b.rs and e.rs survive after a/c/d are in context; got {kept3:?}",
+    );
+
+    // (SA4) Full overlap → empty Vec.
+    let kept4 = sm
+        .dedup_against_context(
+            &id,
+            vec![
+                PathBuf::from("src/a.rs"),
+                PathBuf::from("src/c.rs"),
+                PathBuf::from("src/d.rs"),
+            ],
+        )
+        .await;
+    assert!(
+        kept4.is_empty(),
+        "all candidates already in context — must return empty Vec; got {kept4:?}",
+    );
+
+    // (SA5) Session expiry → dedup pass-through. Verifies the
+    // structural invariant "session-scoped dedup store is cleared on
+    // session expiry" — once purge_expired removes the SessionInfo,
+    // its files_in_context BTreeSet is gone with it, and future dedup
+    // calls against the (now-missing) id return candidates unchanged.
+    let created_at = sm.get_session(&id).await.expect("session").created_at;
+    sm.set_ttl(&id, 1).await.expect("session exists");
+    let removed = sm.purge_expired(created_at + 2).await;
+    assert_eq!(removed, 1, "exactly one session expired");
+    assert!(
+        sm.get_session(&id).await.is_none(),
+        "session must be gone after purge",
+    );
+    let kept5 = sm.dedup_against_context(&id, candidates.clone()).await;
+    assert_eq!(
+        kept5, candidates,
+        "purged session → dedup-store-cleared → all candidates pass through; got {kept5:?}",
     );
 }
 
