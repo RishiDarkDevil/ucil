@@ -298,7 +298,9 @@ impl SessionManager {
     ///     PathBuf::from("src/main.rs"),
     /// ];
     /// let kept = sm.dedup_against_context(&id, candidates).await;
-    /// assert_eq!(kept, vec![PathBuf::from("src/main.rs")]);
+    /// // kept == [PathBuf::from("src/main.rs")] — `src/lib.rs` was
+    /// // filtered out because it was already in `files_in_context`.
+    /// debug_assert_eq!(kept, vec![PathBuf::from("src/main.rs")]);
     /// # }
     /// ```
     pub async fn dedup_against_context(
