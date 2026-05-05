@@ -1,0 +1,78 @@
+# SCIP plugin manifest (master-plan §14.1 category = "structural").
+#
+# pinned 2026-05-06: scip-rust v0.0.5 + scip CLI v0.7.1
+#   indexer source : https://github.com/sourcegraph/scip-rust/releases/tag/v0.0.5
+#   forensic CLI   : https://github.com/sourcegraph/scip/releases/tag/v0.7.1
+#   indexer binary : `scip-rust` from system PATH (one-shot, not an MCP server)
+#   forensic binary: `scip` from system PATH (forensic operations only)
+#   capability     : `navigate.cross-repo`, `references.cross-repo` —
+#                    compiler-accurate symbol index with cross-repo
+#                    resolution, currently for Rust only.
+#   transport mode : NONE — CLI-pipeline plugin per DEC-0014, NOT stdio-MCP.
+#
+# DEC-0014 (scip-cli-to-sqlite-pipeline.md): SCIP follows master-plan §3
+# line 284's "CLI → SQLite" classification verbatim, NOT the WO-0044
+# stdio-MCP plugin pattern.  SCIP-rust is a one-shot language-specific
+# indexer that emits a `index.scip` protobuf file; it does NOT speak
+# JSON-RPC over stdio.  The `scip` CLI exposes forensic operations
+# (`scip print`, `scip stats`, `scip snapshot`, `scip lint`) — none of
+# which is an MCP surface.  UCIL owns the SQLite ingest path: the daemon
+# decodes the `.scip` protobuf via the in-process `scip` Rust crate,
+# writes rows into a UCIL-owned SQLite schema, and exposes a query API.
+#
+# Why this manifest exists despite carrying no transport-launch table:
+# `plugins/structural/scip/` lives in the conventional location for
+# `ucil plugin list` (P2-W6-F07) discovery so operators can enumerate /
+# version-check installed structural plugins uniformly.  The new
+# indexer + ingest tables are forward-extensible additive schema fields
+# (matching the WO-0042 capabilities + resources precedent at
+# `crates/ucil-daemon/src/plugin_manager.rs:104-122`); the parser
+# tolerates the missing transport-launch table because the field is
+# now `#[serde(default)]` and CLI-pipeline plugins are recognised by
+# `validate()` as "no-transport" rather than rejected.
+#
+# Reproducibility: a moving `main` ref is deliberately avoided per
+# .claude/rules/commit-style.md.  Both binary versions are pinned to
+# immutable upstream release tags so the manifest produces byte-identical
+# install hints and verify-script behaviour across CI machines and
+# operator workstations.
+#
+# Revisit trigger (per DEC-0014 §"Revisit trigger"):
+#   1. Sourcegraph publishes a first-party `scip-mcp` server speaking
+#      JSON-RPC stdio: supersede via ADR; the manifest can grow a
+#      transport-launch table additively without removing the CLI ingest
+#      path.
+#   2. The `scip` Rust crate on crates.io becomes unmaintained or its
+#      licence incompatible: fall back to shelling out to `scip print --json`.
+#   3. Broader language coverage (TypeScript, Java, Python via
+#      `scip-typescript`, `scip-java`, `scip-python`) lands as Phase 3+
+#      sibling manifests under `plugins/structural/scip/` family.
+
+[plugin]
+name = "scip"
+version = "0.7.1"
+description = "Cross-repo compiler-accurate symbol index via scip-rust + scip CLI → SQLite pipeline."
+
+[capabilities]
+provides = ["navigate.cross-repo", "references.cross-repo"]
+languages = ["rust"]
+
+# `[indexer]` table — UCIL-substituted CLI invocation that produces a
+# `.scip` protobuf payload.  The `{output}` placeholder is substituted
+# by the daemon at invocation time; the manifest parser does NOT expand
+# it (the value is forwarded verbatim into the indexer's `args` shape
+# and substituted by `crates/ucil-daemon/src/scip.rs::index_repo`).
+[indexer]
+binary = "scip-rust"
+version = "0.0.5"
+args = ["index", "--output", "{output}"]
+
+# `[ingest]` table — destination SQLite store for the decoded protobuf.
+# Format `scip-protobuf` indicates the input is a SCIP `index.scip`
+# binary file (decoded in-process via the `scip` Rust crate); the
+# destination `sqlite` writes rows into the UCIL-owned `scip_symbols`
+# table whose schema is defined by `crates/ucil-daemon/src/scip.rs::SCIP_SCHEMA`.
+[ingest]
+format = "scip-protobuf"
+destination = "sqlite"
+table = "scip_symbols"
