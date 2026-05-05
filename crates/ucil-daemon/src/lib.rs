@@ -95,6 +95,7 @@
 #![warn(clippy::all, clippy::pedantic, clippy::nursery)]
 #![deny(rustdoc::broken_intra_doc_links)]
 
+pub mod branch_manager;
 pub mod executor;
 pub mod lifecycle;
 pub mod plugin_manager;
@@ -117,6 +118,9 @@ pub mod watcher;
 #[rustfmt::skip]
 #[cfg(test)] mod test_support;
 
+pub use branch_manager::{
+    code_chunks_schema, BranchManager, BranchManagerError, BranchTableInfo, ARCHIVE_DIR_NAME,
+};
 #[rustfmt::skip]
 pub use executor::{enrich_find_definition, execute_g1, fuse_g1, Caller, EnrichedFindDefinition, ExecutorError, G1Conflict, G1FusedEntry, G1FusedLocation, G1FusedOutcome, G1FusionEntry, G1Outcome, G1Query, G1Source, G1ToolKind, G1ToolOutput, G1ToolStatus, HoverDoc, HoverFetchError, HoverSource, IngestPipeline, SerenaHoverClient, G1_MASTER_DEADLINE, G1_PER_SOURCE_DEADLINE, SOURCE_TOOL, TREE_SITTER_VALID_FROM};
 #[rustfmt::skip]
