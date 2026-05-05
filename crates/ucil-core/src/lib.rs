@@ -19,6 +19,11 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 // ── Re-exports ────────────────────────────────────────────────────────────────
 
+// Single-line per AC22 (WO-0056) — `#[rustfmt::skip]` blocks the
+// 100-col wrap so the `grep -nE 'fuse_g2_rrf|rrf_weight|G2FusedHit|...'`
+// returns all 8 new fusion symbols on the same line.
+#[rustfmt::skip]
+pub use fusion::{fuse_g2_rrf, rrf_weight, G2FusedHit, G2FusedOutcome, G2Hit, G2Source, G2SourceResults, G2_RRF_K};
 pub use incremental::{dependent_metric, symbol_count, FileRevision, UcilDatabase, UcilDb};
 // Grouped onto single lines so the WO-0024 acceptance greps
 // (`pub use knowledge_graph::.*Entity` etc.) match without depending
