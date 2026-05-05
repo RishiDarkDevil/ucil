@@ -132,8 +132,8 @@ pub use plugin_manager::{
 // re-exported `PluginManager` above — no additional item-level re-export is needed.
 pub use priority_queue::{PriorityIndexingQueue, QueueEntry};
 pub use scip::{
-    index_repo, load_index_to_sqlite, ScipError, ScipReference, SCIP_INDEX_DEADLINE_SECS,
-    SCIP_SCHEMA,
+    index_repo, load_index_to_sqlite, query_symbol, ScipError, ScipG1Source, ScipReference,
+    SCIP_INDEX_DEADLINE_SECS, SCIP_SCHEMA,
 };
 pub use server::{
     ceqp_input_schema, ucil_tools, McpError, McpServer, ToolDescriptor, JSONRPC_VERSION,

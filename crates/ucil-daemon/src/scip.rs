@@ -63,6 +63,10 @@ use protobuf::Message;
 use scip::types::{Document, Index, SymbolInformation, SymbolRole};
 use thiserror::Error;
 
+use crate::executor::{
+    G1FusedLocation, G1FusionEntry, G1Query, G1Source, G1ToolKind, G1ToolOutput, G1ToolStatus,
+};
+
 // ── Constants ────────────────────────────────────────────────────────────────
 
 /// Subprocess deadline for [`index_repo`] — the budget within which
@@ -534,6 +538,171 @@ const _: fn() = || {
     let _ = std::mem::size_of::<Document>();
 };
 
-// `query_symbol`, `ScipG1Source` and the frozen acceptance test land
-// in subsequent commits per the DEC-0005 module-coherence-driven
-// commit ladder documented in the WO-0055 plan_summary.
+// ── Query API ────────────────────────────────────────────────────────────────
+
+/// Read back rows whose `symbol` column matches the `LIKE`-pattern
+/// `%symbol%` from the `scip_symbols` table at `db_path`.
+///
+/// Results are sorted deterministically by `(file_path, start_line)`
+/// so callers and the verifier never observe row-order flakes.
+///
+/// The `LIKE`-with-wildcards shape is the cross-repo equivalent of the
+/// existing `KnowledgeGraph::resolve_symbol` substring lookup: SCIP
+/// symbol identifiers are opaque structured strings (e.g.
+/// `rust-analyzer cargo ucil_treesitter 0.1.0 parser/Parser#parse().`)
+/// where the human-readable name lives in the middle, so a substring
+/// match against an unqualified name (e.g. `evaluate`) surfaces every
+/// definition + reference that has that token.  Production wiring of
+/// a structured-symbol lookup is deferred to a future WO + ADR.
+///
+/// # Errors
+///
+/// * [`ScipError::Sqlite`] — open / prepare / query failed.
+/// * [`ScipError::Io`] — `spawn_blocking` join failure.
+///
+/// # Examples
+///
+/// ```no_run
+/// # use ucil_daemon::scip::query_symbol;
+/// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+/// let db = std::path::Path::new("/tmp/scip.db");
+/// let refs = query_symbol(db, "evaluate").await?;
+/// assert!(!refs.is_empty());
+/// # Ok(()) }
+/// ```
+#[tracing::instrument(
+    name = "ucil.daemon.scip.query_symbol",
+    level = "debug",
+    skip(db_path),
+    fields(db_path = %db_path.display(), symbol = %symbol),
+)]
+pub async fn query_symbol(db_path: &Path, symbol: &str) -> Result<Vec<ScipReference>, ScipError> {
+    let db_path = db_path.to_owned();
+    let pattern = format!("%{symbol}%");
+
+    let refs = tokio::task::spawn_blocking(move || -> Result<Vec<ScipReference>, ScipError> {
+        let conn =
+            rusqlite::Connection::open(&db_path).map_err(|source| ScipError::Sqlite { source })?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT symbol, kind, file_path, start_line, end_line, role \
+                 FROM scip_symbols \
+                 WHERE symbol LIKE ?1 \
+                 ORDER BY file_path ASC, start_line ASC",
+            )
+            .map_err(|source| ScipError::Sqlite { source })?;
+        let rows = stmt
+            .query_map(rusqlite::params![pattern], |row| {
+                Ok(ScipReference {
+                    symbol: row.get::<_, String>(0)?,
+                    kind: row.get::<_, String>(1)?,
+                    file_path: row.get::<_, String>(2)?,
+                    start_line: row.get::<_, u32>(3)?,
+                    end_line: row.get::<_, u32>(4)?,
+                    role: row.get::<_, String>(5)?,
+                })
+            })
+            .map_err(|source| ScipError::Sqlite { source })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(|source| ScipError::Sqlite { source })?);
+        }
+        Ok(out)
+    })
+    .await
+    .map_err(|join_err| ScipError::Io {
+        source: std::io::Error::other(format!("spawn_blocking join error: {join_err}")),
+    })??;
+
+    Ok(refs)
+}
+
+// ── G1Source impl ────────────────────────────────────────────────────────────
+
+/// `G1Source` impl backed by a SCIP `scip_symbols` `SQLite` store.
+///
+/// Holds an owned `db_path` so the same source can be cloned across
+/// the orchestrator's fan-out without forcing the caller to share an
+/// `Arc`.  `kind()` always reports [`G1ToolKind::Scip`]; `execute()`
+/// invokes [`query_symbol`] against `db_path` and projects the
+/// returned `Vec<ScipReference>` into a [`G1ToolOutput`] with
+/// status [`G1ToolStatus::Available`] on success or
+/// [`G1ToolStatus::Errored`] on a `SQLite` failure.
+///
+/// Per `DEC-0008`, this is **not** a critical-dep mock — it is a
+/// real `G1Source` impl backed by a real on-disk `SQLite` store.  The
+/// upstream subprocess (`scip-rust`) and the protobuf decode happen
+/// upstream of this struct (in [`index_repo`] +
+/// [`load_index_to_sqlite`]); the fan-out path is a real `SQLite`
+/// `SELECT`.
+#[derive(Debug, Clone)]
+pub struct ScipG1Source {
+    db_path: PathBuf,
+}
+
+impl ScipG1Source {
+    /// Construct a new [`ScipG1Source`] backed by the `SQLite` store at
+    /// `db_path`.  The path is not validated here — the first
+    /// [`G1Source::execute`] call surfaces any failure as a
+    /// [`G1ToolStatus::Errored`] output.
+    pub fn new(db_path: impl Into<PathBuf>) -> Self {
+        Self {
+            db_path: db_path.into(),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl G1Source for ScipG1Source {
+    fn kind(&self) -> G1ToolKind {
+        G1ToolKind::Scip
+    }
+
+    async fn execute(&self, query: &G1Query) -> G1ToolOutput {
+        let start = std::time::Instant::now();
+        match query_symbol(&self.db_path, &query.symbol).await {
+            Ok(refs) => {
+                let entries: Vec<G1FusionEntry> = refs
+                    .into_iter()
+                    .map(|r| {
+                        let mut fields = serde_json::Map::new();
+                        fields.insert("symbol".to_owned(), serde_json::Value::String(r.symbol));
+                        fields.insert("kind".to_owned(), serde_json::Value::String(r.kind));
+                        fields.insert("role".to_owned(), serde_json::Value::String(r.role));
+                        G1FusionEntry {
+                            location: G1FusedLocation {
+                                file_path: PathBuf::from(r.file_path),
+                                start_line: r.start_line,
+                                end_line: r.end_line,
+                            },
+                            fields,
+                        }
+                    })
+                    .collect();
+                let payload = serde_json::to_value(&entries).unwrap_or(serde_json::Value::Null);
+                let elapsed_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+                G1ToolOutput {
+                    kind: G1ToolKind::Scip,
+                    status: G1ToolStatus::Available,
+                    elapsed_ms,
+                    payload,
+                    error: None,
+                }
+            }
+            Err(e) => {
+                let elapsed_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+                G1ToolOutput {
+                    kind: G1ToolKind::Scip,
+                    status: G1ToolStatus::Errored,
+                    elapsed_ms,
+                    payload: serde_json::Value::Null,
+                    error: Some(format!("scip query_symbol error: {e}")),
+                }
+            }
+        }
+    }
+}
+
+// The frozen acceptance test `test_scip_p1_install` lands in the next
+// commit per the DEC-0005 module-coherence-driven commit ladder
+// documented in the WO-0055 plan_summary.
