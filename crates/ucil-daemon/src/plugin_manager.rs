@@ -100,11 +100,15 @@ pub const CIRCUIT_BREAKER_BASE_BACKOFF_MS: u64 = 1_000;
 /// `[transport]`, the optional `[resources]`, and the optional
 /// `[lifecycle]`. `[capabilities]` and `[resources]` were added in
 /// Phase 2 Week 6 (P2-W6-F01); `#[serde(default)]` on both keeps
-/// minimal Phase-1 manifests parsing without edits. P2-W7-F08
-/// (WO-0055, DEC-0014) added `#[serde(default)]` on `transport` plus
-/// the additive `[indexer]` + `[ingest]` tables so CLI-pipeline plugins
-/// (e.g. SCIP) can declare their indexer + SQLite-ingest shape without
-/// a stdio-MCP transport-launch table.
+/// minimal Phase-1 manifests parsing without edits.  P2-W7-F08
+/// (WO-0055, DEC-0014) added `#[serde(default)]` on `transport` so
+/// CLI-pipeline plugins (e.g. SCIP) can omit the
+/// `[transport]` table entirely.  The `[indexer]` and `[ingest]`
+/// tables those manifests declare for documentation purposes parse
+/// into [`IndexerSection`] / [`IngestSection`] when read directly via
+/// `toml::from_str`; serde silently ignores them at the
+/// `PluginManifest` level since neither is a struct field here (no
+/// `#[serde(deny_unknown_fields)]` is set).
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq, Default)]
 pub struct PluginManifest {
     /// Identity table.
@@ -129,20 +133,6 @@ pub struct PluginManifest {
     /// Optional `[lifecycle]` table: HOT/COLD mode + idle-timeout knobs.
     #[serde(default)]
     pub lifecycle: Option<LifecycleSection>,
-    /// Optional `[indexer]` table — declared by CLI-pipeline plugins
-    /// (per DEC-0014) that produce a one-shot index file rather than
-    /// running as a long-lived stdio MCP server. The table is purely
-    /// declarative: `PluginManager` does not spawn the indexer; the
-    /// plugin's owner module (e.g. `crates/ucil-daemon/src/scip.rs`
-    /// for SCIP) holds the `tokio::process::Command` invocation.
-    #[serde(default)]
-    pub indexer: Option<IndexerSection>,
-    /// Optional `[ingest]` table — declared by CLI-pipeline plugins
-    /// (per DEC-0014) that ingest their indexer's output into a
-    /// UCIL-owned store (typically `SQLite`). Purely declarative; the
-    /// plugin's owner module performs the actual ingest.
-    #[serde(default)]
-    pub ingest: Option<IngestSection>,
 }
 
 /// `[plugin]` section of a plugin manifest.
@@ -1610,8 +1600,6 @@ async fn test_hot_cold_lifecycle() {
             hot_cold: true,
             idle_timeout_minutes: Some(1),
         }),
-        indexer: None,
-        ingest: None,
     };
 
     // ── Phase 1: activate → Registered → Loading → Active ────────────
@@ -1728,8 +1716,6 @@ async fn test_hot_reload() {
         },
         resources: None,
         lifecycle: None,
-        indexer: None,
-        ingest: None,
     };
 
     let mut mgr = PluginManager::new();
@@ -1843,8 +1829,6 @@ async fn test_circuit_breaker() {
         },
         resources: None,
         lifecycle: None,
-        indexer: None,
-        ingest: None,
     };
 
     let runtime = PluginRuntime::new(manifest);
@@ -2040,8 +2024,6 @@ fn helper_manifest() -> PluginManifest {
         },
         resources: None,
         lifecycle: None,
-        indexer: None,
-        ingest: None,
     }
 }
 
@@ -2117,8 +2099,6 @@ async fn test_lifecycle_state_machine() {
         },
         resources: None,
         lifecycle: None,
-        indexer: None,
-        ingest: None,
     };
 
     // ── Phase 1: Discovered → Registered ─────────────────────────────
@@ -2328,8 +2308,6 @@ args = ["--hello"]
             },
             resources: None,
             lifecycle: None,
-            indexer: None,
-            ingest: None,
         };
         let err = PluginManager::spawn(&manifest).expect_err("non-stdio must be rejected");
         assert!(
@@ -2391,8 +2369,6 @@ args = ["--hello"]
             },
             resources: None,
             lifecycle: None,
-            indexer: None,
-            ingest: None,
         };
 
         // Use a tighter budget in-process so the test doesn't wait 5 s.
