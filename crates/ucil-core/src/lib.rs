@@ -7,6 +7,7 @@
 #![warn(clippy::all, clippy::pedantic, clippy::nursery)]
 #![deny(rustdoc::broken_intra_doc_links)]
 
+pub mod fusion;
 pub mod incremental;
 pub mod knowledge_graph;
 pub mod otel;
