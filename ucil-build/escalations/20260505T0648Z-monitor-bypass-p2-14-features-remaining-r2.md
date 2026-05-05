@@ -3,7 +3,7 @@ ts: 2026-05-05T06:48:00Z
 phase: 2
 session: monitor
 trigger: stop-hook-blocks-on-mid-phase-gate-red
-resolved: false
+resolved: true
 blocks_loop: false
 severity: low
 auto_classify: bucket-A-admin
@@ -30,3 +30,19 @@ state, not a regression.
 `blocks_loop: false`, `severity: low`. Triage applies bucket-A and
 closes on next pass. Each per-turn advisory of this shape only needs
 to survive a single Stop-hook invocation. Fresh one written when needed.
+
+## Resolution
+
+Bucket A — auto-resolved by triage pass 1 (phase 2).
+
+Verified the underlying condition is exactly as the advisory describes:
+- `jq .phase ucil-build/progress.json` → 2 (week 1)
+- P2 feature tally: 11/25 passing, 14 remaining — the expected mid-phase
+  state, not a regression.
+- WO-0049 fully shipped (last commit `00574b9`); WO-0050 emitted by the
+  planner at `bf6c5de` (G2 RRF fusion, P2-W7-F03). Pipeline is cycling
+  normally on the next W7 feature.
+- No `blocks_loop: true`, no source-code action required.
+
+This advisory existed only to survive a single Stop-hook invocation
+during the prior turn. Closing.
