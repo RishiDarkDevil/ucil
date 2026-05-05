@@ -303,6 +303,51 @@ impl SessionManager {
         }
     }
 
+    /// Bulk-insert `files` into the session's `files_in_context` set
+    /// under a single write-lock acquisition.
+    ///
+    /// This is the bulk companion of [`SessionManager::add_file_to_context`]
+    /// and is intended for the post-fusion path of multi-result tools
+    /// (e.g. `search_code` returning N file paths in one shot — see
+    /// master-plan §6.3 line 666). One write-lock per call beats N
+    /// round-trips through `add_file_to_context`.
+    ///
+    /// The signature takes `&[PathBuf]` so callers can pass either a
+    /// `&Vec<PathBuf>` or a slice without an extra allocation. Returns
+    /// `Some(())` when the session exists, `None` when it does not —
+    /// the same shape as `add_file_to_context`.
+    ///
+    /// `BTreeSet::extend` de-duplicates internally, so calling this
+    /// twice with overlapping slices is a no-op on duplicates.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use std::path::PathBuf;
+    /// use ucil_daemon::session_manager::SessionManager;
+    ///
+    /// # #[tokio::main]
+    /// # async fn main() {
+    /// let sm = SessionManager::new();
+    /// let id = sm
+    ///     .create_session(std::env::current_dir().unwrap().as_path())
+    ///     .await
+    ///     .unwrap();
+    /// let hits = vec![
+    ///     PathBuf::from("src/lib.rs"),
+    ///     PathBuf::from("src/main.rs"),
+    /// ];
+    /// sm.add_files_to_context(&id, &hits).await.unwrap();
+    /// # }
+    /// ```
+    pub async fn add_files_to_context(&self, id: &SessionId, files: &[PathBuf]) -> Option<()> {
+        self.sessions
+            .write()
+            .await
+            .get_mut(id)
+            .map(|info| info.files_in_context.extend(files.iter().cloned()))
+    }
+
     /// Set the session's `inferred_domain` field.
     ///
     /// Overwrites any prior value.
