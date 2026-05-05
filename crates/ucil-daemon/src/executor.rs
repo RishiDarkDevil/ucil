@@ -838,7 +838,7 @@ pub struct G1Query {
     pub column: u32,
 }
 
-/// Identifier for one of the four G1 (structural) sources the
+/// Identifier for one of the five G1 (structural) sources the
 /// orchestrator fans out to.
 ///
 /// Variants name each source's expected production wiring:
@@ -852,9 +852,12 @@ pub struct G1Query {
 ///   (see `plugins/structural/ast-grep/plugin.toml`).
 /// * [`G1ToolKind::Diagnostics`] — `crates/ucil-lsp-diagnostics::bridge`
 ///   reached through the LSP diagnostics fan-in.
+/// * [`G1ToolKind::Scip`] — `crate::scip::ScipG1Source` (CLI → `SQLite`
+///   pipeline per `DEC-0014`; cross-repo compiler-accurate symbol
+///   index emitted by `scip-rust` and queried via
+///   `crate::scip::query_symbol`).
 ///
-/// SCIP and Joern are explicitly out of scope here (P2-W7-F08 lands
-/// SCIP P1; Joern is post-Phase-2).  The enum is *not*
+/// Joern is explicitly out of scope (post-Phase-2).  The enum is *not*
 /// `#[non_exhaustive]` because each variant maps to a fixed master-plan
 /// §5.1 source — extending it later is a deliberate additive
 /// non-breaking change a future WO can make with an ADR.
@@ -871,6 +874,13 @@ pub enum G1ToolKind {
     /// LSP diagnostics bridge (production wiring:
     /// `crates/ucil-lsp-diagnostics::bridge`).
     Diagnostics,
+    /// SCIP cross-repo symbol index (production wiring:
+    /// `crate::scip::ScipG1Source` per `DEC-0014`).  Authority rank
+    /// 4 — below the four pre-existing sources because SCIP is an
+    /// offline batch indexer, so a freshly-indexed Serena/LSP signal
+    /// beats a stale SCIP entry whenever they conflict.  Master-plan
+    /// §22 line 616: "LSP/AST → SCIP → Dep tools → KG → Text".
+    Scip,
 }
 
 /// Disposition of one G1 source on a given fan-out call.
@@ -1293,16 +1303,24 @@ pub struct G1FusedOutcome {
 ///
 /// Master-plan §5.1 prescribes Serena > tree-sitter > ast-grep >
 /// diagnostics; we encode this as `0` through `3` so the natural
-/// ordering on `u8` matches the authority ordering.  The exhaustive
-/// `match` is the compile-time guarantee that any future
-/// [`G1ToolKind`] variant gains an explicit rank — adding a variant
-/// without updating this function fails the build.
-const fn authority_rank(kind: G1ToolKind) -> u8 {
+/// ordering on `u8` matches the authority ordering.  P2-W7-F08
+/// (WO-0055, DEC-0014) added rank `4` for [`G1ToolKind::Scip`] —
+/// below the four pre-existing sources because SCIP is an offline
+/// batch indexer (a freshly-indexed Serena/LSP signal beats a stale
+/// SCIP entry whenever they conflict).  Master-plan §22 line 616:
+/// "Source authority as soft guidance: LSP/AST → SCIP → Dep tools →
+/// KG → Text".
+///
+/// The exhaustive `match` is the compile-time guarantee that any
+/// future [`G1ToolKind`] variant gains an explicit rank — adding a
+/// variant without updating this function fails the build.
+pub(crate) const fn authority_rank(kind: G1ToolKind) -> u8 {
     match kind {
         G1ToolKind::Serena => 0,
         G1ToolKind::TreeSitter => 1,
         G1ToolKind::AstGrep => 2,
         G1ToolKind::Diagnostics => 3,
+        G1ToolKind::Scip => 4,
     }
 }
 
