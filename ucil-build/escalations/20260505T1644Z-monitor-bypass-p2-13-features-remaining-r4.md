@@ -3,7 +3,7 @@ ts: 2026-05-05T16:44:00Z
 phase: 2
 session: monitor
 trigger: stop-hook-blocks-on-mid-phase-gate-red
-resolved: false
+resolved: true
 blocks_loop: false
 severity: low
 auto_classify: bucket-A-admin
@@ -31,3 +31,16 @@ state, not a regression.
 `blocks_loop: false`, `severity: low`. Triage applies bucket-A and
 closes on next pass. Each per-turn advisory of this shape only needs
 to survive a single Stop-hook invocation. Fresh one written when needed.
+
+## Resolution
+
+Resolved 2026-05-05 by triage (pass 1, phase 2). The condition described —
+mid-phase gate-red with phase-2 features still in flight — is the expected
+state through the entire phase. As of HEAD `da51c77`, phase-2 progression
+is 12/25 passing (P2-W6-F01..08 + P2-W7-F01,F02,F05,F07), matching the
+escalation's snapshot of 12/25 ("11 → 12 / 25"). Network healthy, watchdog
++ run-phase.sh referenced as alive at write time, no fresh material action
+required. Per `close_when`, this advisory class is auto-closed on the next
+triage pass — that pass is now.
+
+resolved: true
