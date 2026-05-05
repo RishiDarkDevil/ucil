@@ -235,8 +235,8 @@ impl BranchManager {
     ///
     /// let root = PathBuf::from("/tmp/example/branches");
     /// let mgr = BranchManager::new(root.clone());
-    /// assert_eq!(mgr.branches_root(), root.as_path());
-    /// assert_eq!(mgr.archive_root(), root.join(ARCHIVE_DIR_NAME).as_path());
+    /// let _ = assert_eq!(mgr.branches_root(), root.as_path());
+    /// let _ = assert_eq!(mgr.archive_root(), root.join(ARCHIVE_DIR_NAME).as_path());
     /// ```
     pub fn new(branches_root: impl Into<PathBuf>) -> Self {
         let branches_root = branches_root.into();
@@ -277,7 +277,7 @@ impl BranchManager {
     /// use ucil_daemon::branch_manager::BranchManager;
     ///
     /// let mgr = BranchManager::new(PathBuf::from("/repo/branches"));
-    /// assert_eq!(
+    /// let _ = assert_eq!(
     ///     mgr.branch_vectors_dir("feat/foo"),
     ///     PathBuf::from("/repo/branches/feat-foo/vectors"),
     /// );
@@ -396,8 +396,8 @@ impl BranchManager {
     /// # tokio::runtime::Runtime::new()?.block_on(async {
     /// let mgr = BranchManager::new(PathBuf::from("/repo/.ucil/branches"));
     /// let info = mgr.create_branch_table("main", None).await?;
-    /// assert_eq!(info.branch, "main");
-    /// assert!(info.vectors_dir.ends_with("main/vectors"));
+    /// let _ = assert_eq!(info.branch, "main");
+    /// let _ = assert!(info.vectors_dir.ends_with("main/vectors"));
     /// # Ok::<(), ucil_daemon::branch_manager::BranchManagerError>(())
     /// # })?;
     /// # Ok(())
@@ -489,7 +489,7 @@ impl BranchManager {
     /// let mgr = BranchManager::new(PathBuf::from("/repo/.ucil/branches"));
     /// // assume "feat/foo" was created earlier via create_branch_table
     /// let archived_at = mgr.archive_branch_table("feat/foo").await?;
-    /// assert!(archived_at.starts_with("/repo/.ucil/branches/.archive"));
+    /// let _ = assert!(archived_at.starts_with("/repo/.ucil/branches/.archive"));
     /// # Ok::<(), ucil_daemon::branch_manager::BranchManagerError>(())
     /// # })?;
     /// # Ok(())
@@ -551,4 +551,170 @@ fn copy_dir_recursive<'a>(
         }
         Ok(())
     })
+}
+
+// ── Tests ────────────────────────────────────────────────────────────────
+//
+// `test_lancedb_per_branch` lives at module root (NOT inside `mod
+// tests {}`) per DEC-0007: the frozen P2-W7-F09 selector
+// `branch_manager::test_lancedb_per_branch` resolves to
+// `ucil_daemon::branch_manager::test_lancedb_per_branch`, which only
+// matches if the function is at module root.  Same placement
+// convention as `storage::test_two_tier_layout` at `storage.rs:267`.
+
+/// Walk a directory up to `depth` levels and return entries as
+/// "path/relative/to/root [F|D]" strings.  Used only inside
+/// `test_lancedb_per_branch` panic messages to surface the actual
+/// filesystem state when an assertion fails — improves operator-
+/// readable diagnostics per WO-0051 lessons line 405 without inflating
+/// the test body.
+#[cfg(test)]
+fn walk_dir(p: &Path) -> Vec<String> {
+    fn recurse(root: &Path, p: &Path, depth: usize, out: &mut Vec<String>) {
+        if depth == 0 {
+            return;
+        }
+        if let Ok(entries) = std::fs::read_dir(p) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let rel = path
+                    .strip_prefix(root)
+                    .unwrap_or(&path)
+                    .to_string_lossy()
+                    .into_owned();
+                let kind = if path.is_dir() { "D" } else { "F" };
+                out.push(format!("{rel} [{kind}]"));
+                if path.is_dir() {
+                    recurse(root, &path, depth - 1, out);
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    recurse(p, p, 3, &mut out);
+    out
+}
+
+#[cfg(test)]
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // 5 sub-assertions in one test body — splitting would either duplicate setup or break the in-order lifecycle invariants the test asserts.
+async fn test_lancedb_per_branch() {
+    let tmp = tempfile::TempDir::new().expect("tmpdir");
+    let branches_root = tmp.path().join("branches");
+    tokio::fs::create_dir(&branches_root)
+        .await
+        .expect("mkdir branches");
+    let mgr = BranchManager::new(&branches_root);
+
+    // ── (SA1) Create root branch + open table ──────────────────────────
+    let info = mgr
+        .create_branch_table("main", None)
+        .await
+        .expect("create main");
+    assert_eq!(
+        info.branch, "main",
+        "sanitised name preserved on no-slash input; got {:?}",
+        info.branch
+    );
+    assert!(
+        branches_root.join("main/vectors").exists(),
+        "vectors dir must exist; tree dump: {:?}",
+        walk_dir(&branches_root)
+    );
+    let conn = lancedb::connect(branches_root.join("main/vectors").to_str().unwrap())
+        .execute()
+        .await
+        .expect("lancedb connect");
+    let tables = conn.table_names().execute().await.expect("list tables");
+    assert!(
+        tables.iter().any(|t| t == "code_chunks"),
+        "code_chunks must be present; got {tables:?}"
+    );
+    assert_eq!(
+        info.table_count, 1,
+        "fresh branch has exactly 1 table; got {}",
+        info.table_count
+    );
+
+    // ── (SA2) Clone-from-parent ────────────────────────────────────────
+    let info2 = mgr
+        .create_branch_table("feat/foo", Some("main"))
+        .await
+        .expect("clone child");
+    assert_eq!(
+        info2.branch, "feat-foo",
+        "slash-sanitisation applied; got {:?}",
+        info2.branch
+    );
+    assert!(
+        branches_root.join("feat-foo/vectors").exists(),
+        "child vectors dir must exist; tree dump: {:?}",
+        walk_dir(&branches_root)
+    );
+    let conn2 = lancedb::connect(branches_root.join("feat-foo/vectors").to_str().unwrap())
+        .execute()
+        .await
+        .expect("lancedb child connect");
+    let tables2 = conn2
+        .table_names()
+        .execute()
+        .await
+        .expect("list child tables");
+    assert!(
+        tables2.iter().any(|t| t == "code_chunks"),
+        "clone preserved code_chunks; got {tables2:?}"
+    );
+
+    // ── (SA3) Sanitisation invariant ───────────────────────────────────
+    assert!(
+        !branches_root.join("feat/foo").exists(),
+        "raw slashed path must not exist as a literal directory; got listing {:?}",
+        walk_dir(&branches_root)
+    );
+
+    // ── (SA4) Archive roundtrip ────────────────────────────────────────
+    let archive_path = mgr.archive_branch_table("feat/foo").await.expect("archive");
+    assert!(
+        !branches_root.join("feat-foo").exists(),
+        "original branch dir gone after archive; tree={:?}",
+        walk_dir(&branches_root)
+    );
+    assert!(
+        branches_root.join(".archive").exists(),
+        "archive root created; tree={:?}",
+        walk_dir(&branches_root)
+    );
+    let archive_entries: Vec<String> = std::fs::read_dir(branches_root.join(".archive"))
+        .expect("read .archive")
+        .filter_map(Result::ok)
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        archive_entries.iter().any(|n| n.starts_with("feat-foo-")),
+        "archive contains feat-foo-<ts> entry; got {archive_entries:?}"
+    );
+    assert!(
+        archive_path.starts_with(&branches_root),
+        "returned path under branches_root; got {archive_path:?}"
+    );
+
+    // ── (SA5) Archive-side connectability ──────────────────────────────
+    let archived_vectors = archive_path.join("vectors");
+    assert!(
+        archived_vectors.exists(),
+        "archived vectors dir present; archive_path={archive_path:?}"
+    );
+    let conn3 = lancedb::connect(archived_vectors.to_str().unwrap())
+        .execute()
+        .await
+        .expect("lancedb archive connect");
+    let tables3 = conn3
+        .table_names()
+        .execute()
+        .await
+        .expect("list archive tables");
+    assert!(
+        tables3.iter().any(|t| t == "code_chunks"),
+        "archive preserves code_chunks for forensic queries; got {tables3:?}"
+    );
 }
