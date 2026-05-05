@@ -32,3 +32,20 @@ state, not a regression.
 `blocks_loop: false`, `severity: low`. Triage applies bucket-A and
 closes on next pass. Each per-turn advisory of this shape only needs
 to survive a single Stop-hook invocation. Fresh one written when needed.
+
+## Resolution
+
+Bucket A — auto-resolve. Per `ucil-build/feature-list.json`, P2 features
+now stand at 15/25 passing, 10 remaining (latest flip: P2-W7-F08 via
+verifier commit `e705e97` from WO-0055). This is the expected mid-phase
+state called out by the escalation's own `close_when` clause:
+
+> 11 P2 features still unfinished is the expected mid-phase state;
+> triage may close on next pass
+
+The Stop-hook gate-red signal is the normal mid-phase signal, not a
+regression. Recent commits (WO-0055 merged + post-mortem `09637b2`)
+show the loop continuing to make forward progress. No fresh action
+needed.
+
+resolved: true
