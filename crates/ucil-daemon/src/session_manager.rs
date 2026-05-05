@@ -6,6 +6,19 @@
 //!
 //! Git subprocess calls are wrapped in [`tokio::time::timeout`] (5 s) and use
 //! [`tokio::process::Command`] so they are non-blocking in the async runtime.
+//!
+//! Session-scoped result deduplication (P2-W7-F04, master-plan §5.2 line
+//! 459 and §6.3 line 666) is provided by the
+//! [`SessionManager::dedup_against_context`] /
+//! [`SessionManager::add_files_to_context`] method-pair: a candidate
+//! `Vec<PathBuf>` is filtered against the session's `files_in_context`
+//! `BTreeSet`, so the agent never sees the same code block twice in one
+//! session. The dedup state is the existing `files_in_context` field on
+//! [`SessionInfo`] — no separate dedup store — so the master-plan
+//! invariant "session-scoped dedup store is cleared on session expiry"
+//! is structural: once [`SessionManager::purge_expired`] retains a
+//! session out, the next `dedup_against_context` call against the
+//! purged id observes `None` and returns its candidates unchanged.
 
 // Public API items intentionally share a name prefix with the module
 // ("session_manager" → "SessionId", "SessionInfo", "SessionManager",
