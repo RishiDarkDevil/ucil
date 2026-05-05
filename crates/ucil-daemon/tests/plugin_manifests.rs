@@ -145,4 +145,50 @@ mod plugin_manifests {
             health.tools,
         );
     }
+
+    // DEC-0009 (search-code-in-process-ripgrep): ripgrep runs in-process
+    // via `crates/ucil-daemon/src/text_search.rs` from WO-0035, NOT as a
+    // long-lived MCP server. The manifest's `[transport]` table is a
+    // declarative sentinel that satisfies the `PluginManifest` schema but
+    // is never spawned. This test is therefore PARSE-ONLY — calling
+    // `PluginManager::health_check` here would spawn `rg --version`,
+    // which exits without speaking JSON-RPC and would (correctly) fail.
+    #[test]
+    fn ripgrep_manifest_parses() {
+        let manifest_path = repo_root().join("plugins/search/ripgrep/plugin.toml");
+        let manifest =
+            PluginManifest::from_path(&manifest_path).expect("ripgrep manifest must parse cleanly");
+
+        assert_eq!(
+            manifest.plugin.name, "ripgrep",
+            "plugin.name must be exactly `ripgrep`; observed `{}`",
+            manifest.plugin.name,
+        );
+        assert!(
+            manifest
+                .capabilities
+                .provides
+                .contains(&"search.text".to_string()),
+            "capabilities.provides must include `search.text`; observed {:?}",
+            manifest.capabilities.provides,
+        );
+        assert!(
+            manifest.capabilities.languages.is_empty(),
+            "capabilities.languages must be empty (ripgrep is language-agnostic); observed {:?}",
+            manifest.capabilities.languages,
+        );
+        assert_eq!(
+            manifest.transport.kind, "stdio",
+            "transport.type must be `stdio`; observed `{}`",
+            manifest.transport.kind,
+        );
+        let lifecycle = manifest
+            .lifecycle
+            .as_ref()
+            .expect("ripgrep manifest must declare a [lifecycle] section");
+        assert!(
+            !lifecycle.hot_cold,
+            "lifecycle.hot_cold must be false (ripgrep is per-query spawn-and-exit); observed true",
+        );
+    }
 }

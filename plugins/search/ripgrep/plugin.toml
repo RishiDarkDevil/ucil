@@ -1,0 +1,47 @@
+# Ripgrep plugin manifest (master-plan §14.1 category = "search").
+#
+# Pinned 2026-05-05: ripgrep 14.1.1
+#   source        : https://github.com/BurntSushi/ripgrep
+#   binary launch : `rg` from system PATH (no npm / no MCP server).
+#   capability    : `search.text` — fast regex/text search with .gitignore
+#                   awareness. Language-agnostic.
+#
+# DEC-0009 (search-code-in-process-ripgrep): ripgrep is invoked
+# IN-PROCESS via `crates/ucil-daemon/src/text_search.rs` (from WO-0035),
+# not as a long-lived MCP server. This manifest exists as DECLARATIVE
+# METADATA so the planning layer can enumerate ripgrep alongside ast-grep
+# and probe under the `search` category, but the daemon's runtime path
+# short-circuits the `[transport]` table — `rg` does not speak JSON-RPC.
+#
+# Why a sentinel `[transport]` table is still required:
+# `PluginManifest` (crates/ucil-daemon/src/plugin_manager.rs:105) requires
+# every manifest to declare a `[transport]` section with `type` and
+# `command`. The fields below (`type = "stdio"`, `command = "rg"`,
+# `args = ["--version"]`) parse cleanly through `PluginManifest::from_path`
+# but are NEVER spawned as an MCP server: the daemon's DEC-0009 in-process
+# path bypasses transport spawn entirely for ripgrep. If a future code path
+# accidentally tried to drive this transport as an MCP server, `rg --version`
+# would exit immediately without speaking JSON-RPC and the health-check
+# would (correctly) fail loudly.
+#
+# `commit-style.md` forbids moving refs — the version above is the
+# concrete `rg --version` output on the build host, NOT a `latest` /
+# `main` floater. Bump in a new ADR when ripgrep upstream cuts a release.
+
+[plugin]
+name = "ripgrep"
+version = "14.1.1"
+description = "Fast text search via ripgrep CLI; in-process runtime per DEC-0009."
+
+[capabilities]
+provides = ["search.text"]
+languages = []
+
+[transport]
+type = "stdio"
+command = "rg"
+args = ["--version"]
+
+[lifecycle]
+hot_cold = false
+idle_timeout_minutes = 0
