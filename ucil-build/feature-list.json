@@ -1356,10 +1356,10 @@
         "P2-W7-F02"
       ],
       "passes": false,
-      "last_verified_ts": null,
-      "last_verified_by": null,
-      "last_verified_commit": null,
-      "attempts": 0,
+      "last_verified_ts": "2026-05-05T01:05:32Z",
+      "last_verified_by": "verifier-162f0721-7655-4ee7-a843-23bbc200ff78",
+      "last_verified_commit": "f197ad1389c0e2ef67b67e5364b45fc25970bcfd",
+      "attempts": 1,
       "blocked_reason": null
     },
     {
