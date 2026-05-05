@@ -54,10 +54,13 @@
 #![allow(clippy::module_name_repetitions)]
 
 use std::{
+    collections::HashMap,
     path::{Path, PathBuf},
     time::Duration,
 };
 
+use protobuf::Message;
+use scip::types::{Document, Index, SymbolInformation, SymbolRole};
 use thiserror::Error;
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -322,7 +325,215 @@ pub async fn index_repo(repo_root: &Path, output_dir: &Path) -> Result<PathBuf, 
     Ok(output_path)
 }
 
-// `load_index_to_sqlite`, `query_symbol`, `ScipG1Source` and the frozen
-// acceptance test land in subsequent commits per the DEC-0005
-// module-coherence-driven commit ladder documented in the WO-0055
-// plan_summary.
+// ── SCIP → SQLite ingest ─────────────────────────────────────────────────────
+
+/// Decode a `.scip` payload at `scip_path` and write one row per
+/// `(document, occurrence)` pair into the [`SCIP_SCHEMA`]-defined
+/// `scip_symbols` table at `db_path`.
+///
+/// # Behaviour
+///
+/// 1. `tokio::fs::read` the `.scip` payload off disk.
+/// 2. Decode via the in-process `scip` Rust crate
+///    (`Index::parse_from_bytes`) — DEC-0009 in-process precedent;
+///    avoids a `scip print --json` shell-out on the hot path.
+/// 3. Open `rusqlite::Connection` at `db_path` inside a
+///    `tokio::task::spawn_blocking` so the synchronous `rusqlite`
+///    work does not block the tokio worker pool.
+/// 4. Execute the [`SCIP_SCHEMA`] DDL (idempotent — `CREATE TABLE IF
+///    NOT EXISTS`).
+/// 5. Open a single transaction and `INSERT` one row per
+///    `(document, occurrence)` pair.  `kind` is looked up against the
+///    document's `symbols` list (and as a fallback `external_symbols`
+///    on the index); `role` is a comma-separated lowercase
+///    projection of the `SymbolRole` bitset.  Lines are converted
+///    from SCIP's 0-based `range` representation to 1-based
+///    `(start_line, end_line)` to match other UCIL line-numbering
+///    conventions (master-plan §11.2).
+/// 6. Commit the transaction and return the inserted row count.
+///
+/// # Errors
+///
+/// * [`ScipError::Io`] — payload read failed.
+/// * [`ScipError::ProtobufDecode`] — decoder rejected the payload.
+/// * [`ScipError::Sqlite`] — open / DDL / insert / commit failed.
+///
+/// # Examples
+///
+/// ```no_run
+/// # use ucil_daemon::scip::{load_index_to_sqlite};
+/// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+/// let scip = std::path::Path::new("/tmp/index.scip");
+/// let db   = std::path::Path::new("/tmp/scip.db");
+/// let row_count = load_index_to_sqlite(scip, db).await?;
+/// assert!(row_count > 0);
+/// # Ok(()) }
+/// ```
+#[tracing::instrument(
+    name = "ucil.daemon.scip.load_index_to_sqlite",
+    level = "debug",
+    skip(scip_path, db_path),
+    fields(
+        scip_path = %scip_path.display(),
+        db_path = %db_path.display(),
+    ),
+)]
+pub async fn load_index_to_sqlite(scip_path: &Path, db_path: &Path) -> Result<usize, ScipError> {
+    let bytes = tokio::fs::read(scip_path)
+        .await
+        .map_err(|source| ScipError::Io { source })?;
+
+    let index =
+        Index::parse_from_bytes(&bytes).map_err(|source| ScipError::ProtobufDecode { source })?;
+
+    let db_path = db_path.to_owned();
+    let row_count = tokio::task::spawn_blocking(move || -> Result<usize, ScipError> {
+        let mut conn =
+            rusqlite::Connection::open(&db_path).map_err(|source| ScipError::Sqlite { source })?;
+        conn.execute_batch(SCIP_SCHEMA)
+            .map_err(|source| ScipError::Sqlite { source })?;
+
+        // Build the cross-document symbol → kind lookup once. Index
+        // external_symbols first; document-local entries override on
+        // the same key.
+        let mut kind_index: HashMap<String, String> = HashMap::new();
+        for ext in &index.external_symbols {
+            kind_index.insert(ext.symbol.clone(), kind_string(ext));
+        }
+        for doc in &index.documents {
+            for sym in &doc.symbols {
+                kind_index.insert(sym.symbol.clone(), kind_string(sym));
+            }
+        }
+
+        let tx = conn
+            .transaction()
+            .map_err(|source| ScipError::Sqlite { source })?;
+        let mut count = 0usize;
+        {
+            let mut stmt = tx
+                .prepare(
+                    "INSERT INTO scip_symbols \
+                       (symbol, kind, file_path, start_line, end_line, role) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                )
+                .map_err(|source| ScipError::Sqlite { source })?;
+            for doc in &index.documents {
+                let file_path = doc.relative_path.as_str();
+                for occ in &doc.occurrences {
+                    if occ.symbol.is_empty() {
+                        continue;
+                    }
+                    let (start_line, end_line) = decode_range(&occ.range);
+                    let kind = kind_index.get(&occ.symbol).cloned().unwrap_or_default();
+                    let role = role_string(occ.symbol_roles);
+                    stmt.execute(rusqlite::params![
+                        occ.symbol, kind, file_path, start_line, end_line, role,
+                    ])
+                    .map_err(|source| ScipError::Sqlite { source })?;
+                    count += 1;
+                }
+            }
+        }
+        tx.commit().map_err(|source| ScipError::Sqlite { source })?;
+        Ok(count)
+    })
+    .await
+    .map_err(|join_err| ScipError::Io {
+        source: std::io::Error::other(format!("spawn_blocking join error: {join_err}")),
+    })??;
+
+    Ok(row_count)
+}
+
+/// Convert a SCIP 0-based `range` triple/quadruple into 1-based
+/// `(start_line, end_line)`.
+///
+/// Per the SCIP protobuf comment:
+///
+/// * 4-element range: `[startLine, startCharacter, endLine, endCharacter]`
+/// * 3-element range: `[startLine, startCharacter, endCharacter]` —
+///   `endLine == startLine`.
+///
+/// All values are 0-based on the wire; this helper increments to
+/// 1-based to match other UCIL line-numbering conventions
+/// (master-plan §11.2).  Empty / malformed ranges fall back to
+/// `(0, 0)` — defensive default; the protobuf spec guarantees
+/// well-formed ranges so this is reachable only on a corrupt
+/// payload.
+fn decode_range(range: &[i32]) -> (u32, u32) {
+    match range.len() {
+        4 => {
+            let start = u32::try_from(range[0]).unwrap_or(0).saturating_add(1);
+            let end = u32::try_from(range[2]).unwrap_or(0).saturating_add(1);
+            (start, end)
+        }
+        3 => {
+            let line = u32::try_from(range[0]).unwrap_or(0).saturating_add(1);
+            (line, line)
+        }
+        _ => (0, 0),
+    }
+}
+
+/// Lowercase string projection of a [`SymbolInformation`]'s `kind`
+/// enum.  Returns `""` for `UnspecifiedKind`.
+///
+/// The full SCIP `Kind` enum has dozens of variants
+/// (`Function`, `Method`, `Class`, `Trait`, ...); this helper
+/// projects via the protobuf-generated `EnumOrUnknown::enum_value`
+/// path rather than enumerating them by hand so new SCIP enum
+/// values land automatically.
+fn kind_string(sym: &SymbolInformation) -> String {
+    sym.kind.enum_value().map_or_else(
+        |_| String::new(),
+        |k| {
+            let s = format!("{k:?}");
+            if s == "UnspecifiedKind" {
+                String::new()
+            } else {
+                s.to_lowercase()
+            }
+        },
+    )
+}
+
+/// Comma-separated lowercase projection of the [`SymbolRole`] bitset
+/// stored on `Occurrence.symbol_roles`.
+///
+/// Empty string when no role bits are set (a plain reference).
+/// Multiple bits stable-ordered by the wire enum order:
+/// `definition,import,write_access,read_access,generated,test,forward_definition`.
+fn role_string(bits: i32) -> String {
+    const ALL: &[(SymbolRole, &str)] = &[
+        (SymbolRole::Definition, "definition"),
+        (SymbolRole::Import, "import"),
+        (SymbolRole::WriteAccess, "write_access"),
+        (SymbolRole::ReadAccess, "read_access"),
+        (SymbolRole::Generated, "generated"),
+        (SymbolRole::Test, "test"),
+        (SymbolRole::ForwardDefinition, "forward_definition"),
+    ];
+    let mut out = String::new();
+    for (role, name) in ALL {
+        let mask = *role as i32;
+        if bits & mask != 0 {
+            if !out.is_empty() {
+                out.push(',');
+            }
+            out.push_str(name);
+        }
+    }
+    out
+}
+
+// `Document` is named so a future commit can ergonomically build a
+// per-document filter on top of `load_index_to_sqlite` without
+// re-importing the symbol.
+const _: fn() = || {
+    let _ = std::mem::size_of::<Document>();
+};
+
+// `query_symbol`, `ScipG1Source` and the frozen acceptance test land
+// in subsequent commits per the DEC-0005 module-coherence-driven
+// commit ladder documented in the WO-0055 plan_summary.
