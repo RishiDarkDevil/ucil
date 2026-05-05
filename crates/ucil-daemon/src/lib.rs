@@ -80,6 +80,28 @@
 //! fusion path is deferred to P2-W7-F05 (`find_references`); F02 ships
 //! the fusion algorithm only.
 //!
+//! WO-0053 for `P2-W7-F09` lands the
+//! [`branch_manager`] module owning the per-branch `LanceDB`
+//! vector-store lifecycle described by master-plan §6.4 line 144
+//! ("Branch index manager: Creates, updates, prunes, and archives
+//! per-branch code indexes. Delta indexing from parent branches for
+//! fast creation"), §11.2 line 1074 (per-branch `vectors/` directory)
+//! and §12.2 lines 1321-1346 (the 12-field `code_chunks` table
+//! schema).  [`branch_manager::BranchManager`] exposes
+//! [`branch_manager::BranchManager::create_branch_table`] (with
+//! optional `parent` for filesystem-level delta-clone of an
+//! already-indexed branch),
+//! [`branch_manager::BranchManager::archive_branch_table`] (atomic
+//! rename to `<base>/branches/.archive/<sanitised>-<unix_ts_micros>/`),
+//! and [`branch_manager::BranchManager::branch_vectors_dir`] +
+//! [`branch_manager::BranchManager::archive_root`] /
+//! [`branch_manager::BranchManager::branches_root`] for path
+//! arithmetic.  Production wiring of `BranchManager` into the daemon's
+//! startup / branch-detection / session paths is deferred to
+//! `P2-W8-F04` (`LanceDB` background chunk indexing per master-plan §18
+//! Phase 2 Week 8 line 1788); F09 ships the standalone API + the unit
+//! test verifying its lifecycle semantics.
+//!
 //! The `server` module (introduced in WO-0010 for `P1-W3-F07`) owns
 //! the MCP JSON-RPC 2.0 skeleton.  WO-0033 for `P1-W4-F05` (master-plan
 //! §3.2 row 2 + §18 Phase 1 Week 4 line 1751) promoted the
