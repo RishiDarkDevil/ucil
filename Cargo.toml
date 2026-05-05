@@ -149,6 +149,24 @@ grep-regex = "0.1"
 # `ucil-daemon` can name the trait in its own type signatures.
 grep-matcher = "0.1"
 
+# rust-protobuf runtime — pulled in directly so `ucil-daemon::scip` can
+# name `protobuf::Message::parse_from_bytes` and the `protobuf::Error`
+# error type in its own signatures without going through the `scip`
+# crate's re-exports.  Pinned to `=3.7.2` to align with `scip = "0.7"`'s
+# canonical dependency (verified via crates.io API on 2026-05-06).
+# DEC-0014's "transitive prost" hedge resolves to `protobuf` here:
+# `scip` 0.7.x uses rust-protobuf, NOT `prost`.
+protobuf = "=3.7.2"
+
+# Sourcegraph SCIP protobuf Rust bindings — back the cross-repo symbol
+# index pipeline introduced in `P2-W7-F08` (master-plan §3 line 284,
+# §18 Phase 2 Week 7 line 1782; DEC-0014).  The 0.7 line is the current
+# stable as of 2026-05-06; it is a thin generated-code wrapper around
+# the canonical `index.proto` shipped by `sourcegraph/scip`.  Used by
+# `ucil-daemon::scip::load_index_to_sqlite` to decode `.scip` payloads
+# emitted by the `scip-rust` indexer.
+scip = "0.7"
+
 [profile.dev]
 opt-level = 0
 

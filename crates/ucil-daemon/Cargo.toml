@@ -66,6 +66,13 @@ async-trait = { workspace = true }
 # `serve` loop so SQLite's WAL file + lock file stay on disk for the
 # duration of the stdio session.
 tempfile.workspace = true
+# SCIP cross-repo symbol indexing pipeline (P2-W7-F08, WO-0055,
+# DEC-0014).  `scip` decodes the protobuf payload emitted by the
+# `scip-rust` indexer; `protobuf` provides the `Message::parse_from_bytes`
+# entry-point and the `protobuf::Error` type the `ScipError` enum names
+# in its `ProtobufDecode` variant.
+scip = { workspace = true }
+protobuf = { workspace = true }
 
 [dev-dependencies]
 tempfile.workspace = true
