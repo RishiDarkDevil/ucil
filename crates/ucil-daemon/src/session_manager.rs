@@ -238,6 +238,71 @@ impl SessionManager {
         })
     }
 
+    /// Filter `candidates` against the session's `files_in_context`,
+    /// returning only the paths the agent does NOT already have.
+    ///
+    /// Implements session-scoped result deduplication per master-plan
+    /// §5.2 line 459 ("Session dedup: don't return same code block twice
+    /// in a session") and §6.3 line 666 ("1. Session dedup: remove
+    /// results the agent already has (`files_in_context`)"); see also
+    /// §18 Phase 2 Week 7 line 1782 ("Session deduplication tracking").
+    ///
+    /// # Invariants
+    ///
+    /// - If `id` does not name a live session — either it was never
+    ///   created or [`SessionManager::purge_expired`] has retained it
+    ///   out — the candidates are returned unchanged. This is the
+    ///   structural realisation of the master-plan invariant
+    ///   "session-scoped dedup store is cleared on session expiry":
+    ///   the dedup state is the `files_in_context` field on
+    ///   [`SessionInfo`], so the moment the session is purged the
+    ///   future-dedup pass-through is automatic — no separate cleanup
+    ///   step is needed.
+    /// - Order is preserved: the kept entries appear in the same order
+    ///   as in `candidates`.
+    /// - Equality is `PathBuf` equality (lexical), not filesystem
+    ///   canonicalisation; callers that need canonicalised matching
+    ///   must normalise both sides before populating the session.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use std::path::PathBuf;
+    /// use ucil_daemon::session_manager::SessionManager;
+    ///
+    /// # #[tokio::main]
+    /// # async fn main() {
+    /// let sm = SessionManager::new();
+    /// let id = sm
+    ///     .create_session(std::env::current_dir().unwrap().as_path())
+    ///     .await
+    ///     .unwrap();
+    /// sm.add_file_to_context(&id, PathBuf::from("src/lib.rs"))
+    ///     .await
+    ///     .unwrap();
+    /// let candidates = vec![
+    ///     PathBuf::from("src/lib.rs"),
+    ///     PathBuf::from("src/main.rs"),
+    /// ];
+    /// let kept = sm.dedup_against_context(&id, candidates).await;
+    /// assert_eq!(kept, vec![PathBuf::from("src/main.rs")]);
+    /// # }
+    /// ```
+    pub async fn dedup_against_context(
+        &self,
+        id: &SessionId,
+        candidates: Vec<PathBuf>,
+    ) -> Vec<PathBuf> {
+        let sessions = self.sessions.read().await;
+        match sessions.get(id) {
+            Some(info) => candidates
+                .into_iter()
+                .filter(|p| !info.files_in_context.contains(p))
+                .collect(),
+            None => candidates,
+        }
+    }
+
     /// Set the session's `inferred_domain` field.
     ///
     /// Overwrites any prior value.
