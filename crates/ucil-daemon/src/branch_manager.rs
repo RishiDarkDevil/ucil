@@ -14,17 +14,18 @@
 //!
 //! [`BranchManager`] exposes three async lifecycle operations:
 //!
-//! * `create_branch_table` opens a `lancedb::connect()` at the
-//!   per-branch `vectors/` directory and creates an empty
-//!   `code_chunks` table conforming to the §12.2 schema.  Passing
-//!   `parent = Some(other)` performs a *delta clone* by recursively
-//!   copying the parent branch's `vectors/` directory tree before
-//!   opening the connection — the new branch starts with the parent's
-//!   already-indexed Lance dataset files byte-for-byte, then
-//!   subsequent indexing only re-processes changed files (per the
-//!   `file_hash` column populated by `P2-W8-F04` background
-//!   indexing).
-//! * `archive_branch_table` renames `<base>/branches/<sanitised>/` to
+//! * [`BranchManager::create_branch_table`] opens a
+//!   `lancedb::connect()` at the per-branch `vectors/` directory and
+//!   creates an empty `code_chunks` table conforming to the §12.2
+//!   schema.  Passing `parent = Some(other)` performs a *delta
+//!   clone* by recursively copying the parent branch's `vectors/`
+//!   directory tree before opening the connection — the new branch
+//!   starts with the parent's already-indexed Lance dataset files
+//!   byte-for-byte, then subsequent indexing only re-processes
+//!   changed files (per the `file_hash` column populated by
+//!   `P2-W8-F04` background indexing).
+//! * [`BranchManager::archive_branch_table`] renames
+//!   `<base>/branches/<sanitised>/` to
 //!   `<base>/branches/.archive/<sanitised>-<unix_ts_micros>/` so the
 //!   table data persists for forensics but the live tree is clean.
 //!   The whole branch directory moves atomically (vectors/,
@@ -55,9 +56,9 @@
 //!   hidden-dir conventions skips it by default.
 //! * **No symlink traversal.**  Per master-plan §11.4 line 1090,
 //!   branch trees are pure file/directory hierarchies.  The
-//!   `create_branch_table` recursive-copy helper skips entries that
-//!   are not `is_file()` or `is_dir()` — symlinks are silently
-//!   dropped on clone.
+//!   [`BranchManager::create_branch_table`] recursive-copy helper
+//!   skips entries that are not `is_file()` or `is_dir()` —
+//!   symlinks are silently dropped on clone.
 //!
 //! Production wiring (creating a per-branch `code_chunks` table on
 //! first session against a previously-unseen branch, archiving on
@@ -137,9 +138,10 @@ pub enum BranchManagerError {
     },
 
     /// Cloning a branch from a parent failed because the parent has
-    /// no `vectors/` directory.  Returned by `create_branch_table`
-    /// when `parent = Some(name)` but
-    /// `<base>/branches/<sanitised parent>/vectors/` does not exist.
+    /// no `vectors/` directory.  Returned by
+    /// [`BranchManager::create_branch_table`] when `parent =
+    /// Some(name)` but `<base>/branches/<sanitised parent>/vectors/`
+    /// does not exist.
     #[error("parent branch '{parent}' has no vectors directory at {path:?}")]
     ParentNotFound {
         /// Sanitised parent branch name (after `/` → `-`).
@@ -149,7 +151,8 @@ pub enum BranchManagerError {
     },
 
     /// Archiving a branch failed because the target branch directory
-    /// does not exist.  Returned by `archive_branch_table` when
+    /// does not exist.  Returned by
+    /// [`BranchManager::archive_branch_table`] when
     /// `<base>/branches/<sanitised name>/` is absent.
     #[error("branch '{name}' has no directory to archive at {path:?}")]
     BranchNotFound {
@@ -160,8 +163,9 @@ pub enum BranchManagerError {
     },
 }
 
-/// Description of a `code_chunks` table after `create_branch_table`
-/// has populated the per-branch `vectors/` directory.
+/// Description of a `code_chunks` table after
+/// [`BranchManager::create_branch_table`] has populated the per-branch
+/// `vectors/` directory.
 ///
 /// Returned so callers can audit the post-creation state without
 /// re-opening the `lancedb::Connection`.
@@ -219,9 +223,9 @@ impl BranchManager {
     /// `branches_root` is typically `<base>/branches/` where `<base>`
     /// is the `.ucil/` directory.  The archive subdirectory
     /// (`<branches_root>/.archive/`) is computed eagerly from the
-    /// root; it is NOT created here — the `archive_branch_table`
-    /// method creates it lazily on first archive (added later in this
-    /// module).
+    /// root; it is NOT created here —
+    /// [`BranchManager::archive_branch_table`] creates it lazily on
+    /// first archive.
     ///
     /// # Examples
     ///
@@ -449,6 +453,71 @@ impl BranchManager {
             vectors_dir: target_vectors,
             table_count: final_tables.len(),
         })
+    }
+
+    /// Move a per-branch directory tree under
+    /// `<branches_root>/.archive/<sanitised>-<unix_ts_micros>/` and
+    /// return the absolute path of the archive target on success.
+    ///
+    /// The whole branch directory moves atomically (`tokio::fs::rename`
+    /// is atomic on the same filesystem), preserving cross-table
+    /// consistency: `vectors/`, `symbols.db`, `tags.lmdb`, and
+    /// `state.json` all land under the archive in one operation.
+    /// `<unix_ts_micros>` is the microsecond Unix timestamp at archive
+    /// time (clock-skew safe via `unwrap_or_default` on the duration
+    /// since `UNIX_EPOCH` — system clocks earlier than 1970 give a
+    /// deterministic zero suffix instead of panicking).
+    ///
+    /// The archive `.archive/` directory itself is created lazily on
+    /// first archive (`tokio::fs::create_dir_all` is idempotent).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BranchManagerError::BranchNotFound`] if the branch
+    /// directory is absent (nothing to archive).  Returns
+    /// [`BranchManagerError::Io`] on any directory-creation or
+    /// rename failure (e.g. cross-device rename, permission denied).
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use std::path::PathBuf;
+    /// use ucil_daemon::branch_manager::BranchManager;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # tokio::runtime::Runtime::new()?.block_on(async {
+    /// let mgr = BranchManager::new(PathBuf::from("/repo/.ucil/branches"));
+    /// // assume "feat/foo" was created earlier via create_branch_table
+    /// let archived_at = mgr.archive_branch_table("feat/foo").await?;
+    /// assert!(archived_at.starts_with("/repo/.ucil/branches/.archive"));
+    /// # Ok::<(), ucil_daemon::branch_manager::BranchManagerError>(())
+    /// # })?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[tracing::instrument(
+        name = "ucil.daemon.branch_manager.archive",
+        level = "debug",
+        skip(self),
+        fields(branch = name),
+    )]
+    pub async fn archive_branch_table(&self, name: &str) -> Result<PathBuf, BranchManagerError> {
+        let sanitised = sanitise_branch_name(name);
+        let source = self.branches_root.join(&sanitised);
+        if !tokio::fs::try_exists(&source).await? {
+            return Err(BranchManagerError::BranchNotFound {
+                name: sanitised,
+                path: source,
+            });
+        }
+        let ts_micros = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_micros())
+            .unwrap_or_default();
+        tokio::fs::create_dir_all(&self.archive_root).await?;
+        let target = self.archive_root.join(format!("{sanitised}-{ts_micros}"));
+        tokio::fs::rename(&source, &target).await?;
+        Ok(target)
     }
 }
 
