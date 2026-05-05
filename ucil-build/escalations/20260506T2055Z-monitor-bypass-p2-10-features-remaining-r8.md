@@ -3,12 +3,22 @@ ts: 2026-05-06T20:55:00Z
 phase: 2
 session: monitor
 trigger: stop-hook-blocks-on-mid-phase-gate-red
-resolved: false
+resolved: true
 blocks_loop: false
 severity: low
 auto_classify: bucket-A-admin
 close_when: 10 P2 features still unfinished is the expected mid-phase state; triage may close on next pass
 ---
+
+## Resolution
+
+Manually closed by user-authorised monitor session after triage pass-3 force-halt
+(see triage-log entry 2026-05-05T23:42Z). HEAD now at 4b54f12 with WO-0056 merged
+(P2 at 16/25, +1 from this advisory's count). Triage's anti-thrashing rule fired
+correctly — the per-cycle heartbeat series is noisy and worth revisiting at the
+monitor source.
+
+resolved: true
 
 # Monitor Stop-hook bypass — P2 has 10 features remaining (round 8, post-WO-0055 ship)
 
