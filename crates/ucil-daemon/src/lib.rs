@@ -99,6 +99,7 @@ pub mod executor;
 pub mod lifecycle;
 pub mod plugin_manager;
 pub mod priority_queue;
+pub mod scip;
 pub mod server;
 pub mod session_manager;
 pub mod session_ttl;
@@ -130,6 +131,7 @@ pub use plugin_manager::{
 // `health_check_with_timeout` is a method on `PluginManager`; it is reached via the
 // re-exported `PluginManager` above — no additional item-level re-export is needed.
 pub use priority_queue::{PriorityIndexingQueue, QueueEntry};
+pub use scip::{ScipError, ScipReference, SCIP_INDEX_DEADLINE_SECS, SCIP_SCHEMA};
 pub use server::{
     ceqp_input_schema, ucil_tools, McpError, McpServer, ToolDescriptor, JSONRPC_VERSION,
     MCP_PROTOCOL_VERSION, READ_TIMEOUT_MS, TOOL_COUNT, WRITE_TIMEOUT_MS,
