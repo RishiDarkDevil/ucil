@@ -3,7 +3,7 @@ ts: 2026-05-05T18:12:00Z
 phase: 2
 session: monitor
 trigger: stop-hook-blocks-on-mid-phase-gate-red
-resolved: false
+resolved: true
 blocks_loop: false
 severity: low
 auto_classify: bucket-A-admin
@@ -32,3 +32,24 @@ state, not a regression.
 `blocks_loop: false`, `severity: low`. Triage applies bucket-A and
 closes on next pass. Each per-turn advisory of this shape only needs
 to survive a single Stop-hook invocation. Fresh one written when needed.
+
+## Resolution
+
+Resolved 2026-05-06 by triage (cap-rescue pass, phase 2) — Bucket A.
+
+The author's `close_when` clause has fired:
+
+- Phase 2 has progressed from 13 → 14 / 25 features passing (P2-W7-F09
+  flipped via WO-0053 retry-2 at commit `2f4dcd1`). The escalation's
+  premise — "12 features remaining is the expected mid-phase state" —
+  remains true (now 11 remaining, still mid-phase).
+- The autonomous loop is alive: `run-phase.sh 2` PID 265099, watchdog
+  PID 9517 both running. HEAD at `9588cdc`.
+- No drift, no OOM, no cross-feature conflict observed.
+- This was the umbrella Stop-hook bypass for the monitor's
+  post-WO-0052 turn; that turn has long since ended.
+
+No code, harness, or ADR work required. The next monitor-heartbeat
+advisory (if any) is a fresh file, not a re-open of this one.
+
+resolved: true
