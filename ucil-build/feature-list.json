@@ -1334,10 +1334,10 @@
         "P1-W4-F07"
       ],
       "passes": false,
-      "last_verified_ts": null,
-      "last_verified_by": null,
-      "last_verified_commit": null,
-      "attempts": 0,
+      "last_verified_ts": "2026-05-05T17:29:20Z",
+      "last_verified_by": "verifier-def33d94-74b1-4ba0-801b-91b259e1d5e2",
+      "last_verified_commit": "901c8b5001cdc5f03a9680f68987aba0b8d1456e",
+      "attempts": 1,
       "blocked_reason": null
     },
     {
