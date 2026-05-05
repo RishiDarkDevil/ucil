@@ -100,7 +100,11 @@ pub const CIRCUIT_BREAKER_BASE_BACKOFF_MS: u64 = 1_000;
 /// `[transport]`, the optional `[resources]`, and the optional
 /// `[lifecycle]`. `[capabilities]` and `[resources]` were added in
 /// Phase 2 Week 6 (P2-W6-F01); `#[serde(default)]` on both keeps
-/// minimal Phase-1 manifests parsing without edits.
+/// minimal Phase-1 manifests parsing without edits. P2-W7-F08
+/// (WO-0055, DEC-0014) added `#[serde(default)]` on `transport` plus
+/// the additive `[indexer]` + `[ingest]` tables so CLI-pipeline plugins
+/// (e.g. SCIP) can declare their indexer + SQLite-ingest shape without
+/// a stdio-MCP transport-launch table.
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq, Default)]
 pub struct PluginManifest {
     /// Identity table.
@@ -111,6 +115,12 @@ pub struct PluginManifest {
     #[serde(default)]
     pub capabilities: CapabilitiesSection,
     /// How to launch the plugin and what wire protocol to use.
+    /// `#[serde(default)]` so CLI-pipeline plugins (e.g. SCIP per
+    /// DEC-0014) can omit the table entirely; in that case both
+    /// `transport.kind` and `transport.command` are empty strings and
+    /// [`Self::validate`] treats this as "no transport" rather than
+    /// rejecting the manifest.
+    #[serde(default)]
     pub transport: TransportSection,
     /// Optional `[resources]` table — soft hints used by the daemon's
     /// scheduler to size sandbox + memory caps.
@@ -119,6 +129,20 @@ pub struct PluginManifest {
     /// Optional `[lifecycle]` table: HOT/COLD mode + idle-timeout knobs.
     #[serde(default)]
     pub lifecycle: Option<LifecycleSection>,
+    /// Optional `[indexer]` table — declared by CLI-pipeline plugins
+    /// (per DEC-0014) that produce a one-shot index file rather than
+    /// running as a long-lived stdio MCP server. The table is purely
+    /// declarative: `PluginManager` does not spawn the indexer; the
+    /// plugin's owner module (e.g. `crates/ucil-daemon/src/scip.rs`
+    /// for SCIP) holds the `tokio::process::Command` invocation.
+    #[serde(default)]
+    pub indexer: Option<IndexerSection>,
+    /// Optional `[ingest]` table — declared by CLI-pipeline plugins
+    /// (per DEC-0014) that ingest their indexer's output into a
+    /// UCIL-owned store (typically `SQLite`). Purely declarative; the
+    /// plugin's owner module performs the actual ingest.
+    #[serde(default)]
+    pub ingest: Option<IngestSection>,
 }
 
 /// `[plugin]` section of a plugin manifest.
@@ -247,6 +271,55 @@ impl LifecycleSection {
     }
 }
 
+/// `[indexer]` section of a CLI-pipeline plugin manifest (per DEC-0014).
+///
+/// Declares the indexer binary (e.g. `scip-rust`) plus its argument
+/// shape. The `args` list MAY contain a `{output}` placeholder which
+/// the plugin's owner module substitutes at invocation time; the
+/// manifest parser does NOT expand placeholders.
+///
+/// This section is purely declarative — `PluginManager` does not spawn
+/// the indexer. The plugin's owner module
+/// (e.g. `crates/ucil-daemon/src/scip.rs` for SCIP) holds the
+/// `tokio::process::Command` invocation.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq, Default)]
+pub struct IndexerSection {
+    /// Indexer binary on `PATH` (e.g. `"scip-rust"`).
+    #[serde(default)]
+    pub binary: String,
+    /// Pinned indexer version (e.g. `"0.0.5"`). Documentation only;
+    /// `PluginManager` does not enforce.
+    #[serde(default)]
+    pub version: String,
+    /// Argument shape passed to the indexer. Tokens such as
+    /// `"{output}"` are substituted by the owner module at invocation
+    /// time.
+    #[serde(default)]
+    pub args: Vec<String>,
+}
+
+/// `[ingest]` section of a CLI-pipeline plugin manifest (per DEC-0014).
+///
+/// Declares the destination store layout that the indexer's output is
+/// loaded into. UCIL-owned modules (e.g.
+/// `crates/ucil-daemon/src/scip.rs::load_index_to_sqlite`) perform the
+/// actual ingest; this section is purely declarative.  Typical
+/// destinations are bundled-`SQLite` and `LanceDB`.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq, Default)]
+pub struct IngestSection {
+    /// Format identifier of the indexer's output (e.g.
+    /// `"scip-protobuf"`).
+    #[serde(default)]
+    pub format: String,
+    /// Destination store kind (e.g. `"sqlite"`).
+    #[serde(default)]
+    pub destination: String,
+    /// Destination table name within the store (e.g.
+    /// `"scip_symbols"`).
+    #[serde(default)]
+    pub table: String,
+}
+
 impl PluginManifest {
     /// Read and parse a `plugin.toml` manifest from disk.
     ///
@@ -307,13 +380,23 @@ impl PluginManifest {
                 reason: "plugin.version must not be empty".to_owned(),
             });
         }
-        if self.transport.kind.is_empty() {
+        // CLI-pipeline plugins (per DEC-0014, e.g. SCIP) may omit the
+        // `[transport]` table entirely — `transport` defaults to empty
+        // strings via `#[serde(default)]` on `PluginManifest::transport`.
+        // Validate transport fields ONLY when at least one is non-empty
+        // so a partial declaration (one set, one empty) is still
+        // rejected, but a fully-absent transport is treated as a valid
+        // "no-transport" plugin per the master-plan §3 line 284
+        // "CLI → SQLite" classification.
+        let transport_declared =
+            !self.transport.kind.is_empty() || !self.transport.command.is_empty();
+        if transport_declared && self.transport.kind.is_empty() {
             return Err(PluginError::InvalidManifest {
                 field: "transport.type",
                 reason: "transport.type must not be empty".to_owned(),
             });
         }
-        if self.transport.command.is_empty() {
+        if transport_declared && self.transport.command.is_empty() {
             return Err(PluginError::InvalidManifest {
                 field: "transport.command",
                 reason: "transport.command must not be empty".to_owned(),
@@ -1527,6 +1610,8 @@ async fn test_hot_cold_lifecycle() {
             hot_cold: true,
             idle_timeout_minutes: Some(1),
         }),
+        indexer: None,
+        ingest: None,
     };
 
     // ── Phase 1: activate → Registered → Loading → Active ────────────
@@ -1643,6 +1728,8 @@ async fn test_hot_reload() {
         },
         resources: None,
         lifecycle: None,
+        indexer: None,
+        ingest: None,
     };
 
     let mut mgr = PluginManager::new();
@@ -1756,6 +1843,8 @@ async fn test_circuit_breaker() {
         },
         resources: None,
         lifecycle: None,
+        indexer: None,
+        ingest: None,
     };
 
     let runtime = PluginRuntime::new(manifest);
@@ -1951,6 +2040,8 @@ fn helper_manifest() -> PluginManifest {
         },
         resources: None,
         lifecycle: None,
+        indexer: None,
+        ingest: None,
     }
 }
 
@@ -2026,6 +2117,8 @@ async fn test_lifecycle_state_machine() {
         },
         resources: None,
         lifecycle: None,
+        indexer: None,
+        ingest: None,
     };
 
     // ── Phase 1: Discovered → Registered ─────────────────────────────
@@ -2235,6 +2328,8 @@ args = ["--hello"]
             },
             resources: None,
             lifecycle: None,
+            indexer: None,
+            ingest: None,
         };
         let err = PluginManager::spawn(&manifest).expect_err("non-stdio must be rejected");
         assert!(
@@ -2296,6 +2391,8 @@ args = ["--hello"]
             },
             resources: None,
             lifecycle: None,
+            indexer: None,
+            ingest: None,
         };
 
         // Use a tighter budget in-process so the test doesn't wait 5 s.
