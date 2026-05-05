@@ -53,7 +53,10 @@
 
 #![allow(clippy::module_name_repetitions)]
 
-use std::path::PathBuf;
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use thiserror::Error;
 
@@ -201,9 +204,125 @@ pub struct ScipReference {
     pub role: String,
 }
 
-// ── Acceptance test scaffolding (placeholders for follow-up commits) ─────────
+// ── Indexer subprocess wrapper ───────────────────────────────────────────────
 
-// `index_repo`, `load_index_to_sqlite`, `query_symbol`, `ScipG1Source`
-// and the frozen acceptance test land in subsequent commits per the
-// DEC-0005 module-coherence-driven commit ladder documented in the
-// WO-0055 plan_summary.
+/// Run the `scip-rust` indexer over `repo_root` and write the produced
+/// `.scip` payload into `output_dir/index.scip`.
+///
+/// The indexer is invoked with `current_dir = repo_root` so any
+/// workspace-relative paths it writes into the protobuf payload are
+/// expressed relative to the workspace, matching the
+/// `Document.relative_path` shape `query_symbol` later projects.
+///
+/// # Behaviour
+///
+/// 1. Ensure `output_dir` exists via `tokio::fs::create_dir_all`.
+/// 2. Build the absolute target path `output_dir/index.scip`.
+/// 3. Spawn `scip-rust index --output <target>` with stdout/stderr
+///    captured + `kill_on_drop` so a panicking caller cannot leak the
+///    child.
+/// 4. Wait under [`SCIP_INDEX_DEADLINE_SECS`].  Timeout →
+///    [`ScipError::IndexerTimedOut`]; non-zero exit →
+///    [`ScipError::IndexerExitCode`] with captured stderr.
+/// 5. Validate the output file exists; absent →
+///    [`ScipError::OutputMissing`].
+/// 6. Return the absolute path of the produced `.scip` file.
+///
+/// # Errors
+///
+/// * [`ScipError::Io`] — the output directory could not be created.
+/// * [`ScipError::NonUtf8Path`] — `output_dir` contains a non-UTF-8
+///   component (the indexer accepts only UTF-8 CLI args).
+/// * [`ScipError::IndexerSpawn`] — `scip-rust` is not on `PATH` or
+///   spawn failed.
+/// * [`ScipError::IndexerTimedOut`] — the subprocess did not exit
+///   within [`SCIP_INDEX_DEADLINE_SECS`].
+/// * [`ScipError::IndexerExitCode`] — the subprocess exited non-zero.
+/// * [`ScipError::OutputMissing`] — the subprocess exited cleanly but
+///   produced no output file.
+///
+/// # Examples
+///
+/// ```no_run
+/// # use ucil_daemon::scip::index_repo;
+/// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+/// let repo = std::path::Path::new(".");
+/// let outdir = std::path::Path::new("/tmp/scip-out");
+/// let scip_path = index_repo(repo, outdir).await?;
+/// assert!(scip_path.exists());
+/// # Ok(()) }
+/// ```
+#[tracing::instrument(
+    name = "ucil.daemon.scip.index_repo",
+    level = "debug",
+    skip(repo_root, output_dir),
+    fields(
+        repo_root = %repo_root.display(),
+        output_dir = %output_dir.display(),
+    ),
+)]
+pub async fn index_repo(repo_root: &Path, output_dir: &Path) -> Result<PathBuf, ScipError> {
+    tokio::fs::create_dir_all(output_dir)
+        .await
+        .map_err(|source| ScipError::Io { source })?;
+
+    let output_path = output_dir.join("index.scip");
+    let output_str = output_path.to_str().ok_or_else(|| ScipError::NonUtf8Path {
+        path: output_path.clone(),
+    })?;
+
+    let mut cmd = tokio::process::Command::new("scip-rust");
+    cmd.current_dir(repo_root)
+        .args(["index", "--output", output_str])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+
+    let child = cmd.spawn().map_err(|source| ScipError::IndexerSpawn {
+        command: "scip-rust".to_owned(),
+        source,
+    })?;
+
+    let wait = tokio::time::timeout(
+        Duration::from_secs(SCIP_INDEX_DEADLINE_SECS),
+        child.wait_with_output(),
+    )
+    .await;
+
+    let output = match wait {
+        Ok(Ok(o)) => o,
+        Ok(Err(source)) => {
+            return Err(ScipError::IndexerSpawn {
+                command: "scip-rust".to_owned(),
+                source,
+            });
+        }
+        Err(_) => {
+            return Err(ScipError::IndexerTimedOut {
+                command: "scip-rust".to_owned(),
+                secs: SCIP_INDEX_DEADLINE_SECS,
+            });
+        }
+    };
+
+    if !output.status.success() {
+        return Err(ScipError::IndexerExitCode {
+            command: "scip-rust".to_owned(),
+            code: output.status.code().unwrap_or(-1),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        });
+    }
+
+    if !output_path.exists() {
+        return Err(ScipError::OutputMissing {
+            path: output_path.clone(),
+        });
+    }
+
+    Ok(output_path)
+}
+
+// `load_index_to_sqlite`, `query_symbol`, `ScipG1Source` and the frozen
+// acceptance test land in subsequent commits per the DEC-0005
+// module-coherence-driven commit ladder documented in the WO-0055
+// plan_summary.
