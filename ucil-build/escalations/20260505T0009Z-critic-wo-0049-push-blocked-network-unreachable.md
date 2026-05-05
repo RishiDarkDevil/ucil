@@ -9,6 +9,7 @@ upstream_head: 3b51c78
 blocks_loop: false
 severity: harness-config
 requires_planner_action: false
+resolved: true
 ---
 
 # Critic WO-0049: push to origin blocked — network unreachable
@@ -77,4 +78,18 @@ networking, not at UCIL).
 - Network probe (this session): `getent hosts github.com → 20.207.73.82`; `ping → Network is unreachable`.
 - Same-host previous successful push: commit `3b51c78` (planner WO-0049 plan, ~5 hours ago) — the outage is recent.
 
-resolved: false
+resolved: true
+
+## Resolution
+
+Resolved 2026-05-05 by monitor session per the file's own self-classification
+(Bucket A auto-resolve when origin matches main).
+
+Network outage ended; both local commits are now on origin/main:
+
+- `6955d19` (critic WO-0049 BLOCKED report) — pushed
+- `149233a` (this escalation file) — pushed
+
+`git rev-list @{u}..HEAD --count` returns `0`. `curl https://github.com`
+returns 200. The critic report is durable on origin and triage/orchestrator
+can see it next pass. WO-0049 will retry per BLOCKED verdict.
