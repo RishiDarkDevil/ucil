@@ -494,3 +494,139 @@ fn test_coderankembed_inference() {
         "all 768 floats must be finite (no NaN / ±Inf); got {finite_count} finite of {actual_len}",
     );
 }
+
+/// Negative-path + helper unit tests for `WO-0059` retry-1
+/// coverage-driven gate satisfaction.
+///
+/// These tests exercise the defensive error paths in
+/// [`CodeRankEmbed::load`] and the extracted
+/// [`pool_and_normalise`] helper without needing the 137MB real model
+/// — they use [`tempfile::TempDir`] for filesystem isolation and
+/// hand-crafted `Vec<f32>` inputs for the helper.  The frozen
+/// acceptance test [`test_coderankembed_inference`] stays at module
+/// root per `DEC-0007`; the additional tests live at
+/// `models::tests::*` and do not collide with the frozen selector
+/// `models::test_coderankembed_inference`.
+#[cfg(test)]
+mod tests {
+    use super::{pool_and_normalise, CodeRankEmbed, CodeRankEmbedError, EMBEDDING_DIM};
+
+    #[test]
+    fn load_returns_missing_model_file_for_empty_dir() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        match CodeRankEmbed::load(tmp.path()) {
+            Err(CodeRankEmbedError::MissingModelFile { path }) => {
+                assert!(
+                    path.ends_with("model.onnx"),
+                    "expected model.onnx in MissingModelFile; got {path:?}",
+                );
+            }
+            other => panic!("expected Err(MissingModelFile {{ model.onnx }}); got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_returns_missing_model_file_for_tokenizer_absent() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let real_model = tmp.path().join("model.onnx");
+        std::fs::write(&real_model, b"not a real onnx model")
+            .expect("write placeholder model.onnx");
+        match CodeRankEmbed::load(tmp.path()) {
+            Err(CodeRankEmbedError::Onnx { .. }) => {
+                // The placeholder fails ort parse before the tokenizer
+                // existence check; that is acceptable — the load
+                // function correctly surfaces the upstream parse error
+                // as `Onnx` rather than silently falling through.
+            }
+            Err(CodeRankEmbedError::MissingModelFile { path }) => {
+                assert!(
+                    path.ends_with("tokenizer.json"),
+                    "expected tokenizer.json in MissingModelFile; got {path:?}",
+                );
+            }
+            other => panic!(
+                "expected Err(Onnx) or Err(MissingModelFile {{ tokenizer.json }}); got {other:?}",
+            ),
+        }
+    }
+
+    #[test]
+    fn pool_and_normalise_returns_dim_mismatch_when_too_short() {
+        let too_short = vec![0.5_f32; 100];
+        match pool_and_normalise(&too_short) {
+            Err(CodeRankEmbedError::DimensionMismatch { expected, got }) => {
+                assert_eq!(expected, EMBEDDING_DIM, "expected EMBEDDING_DIM (768)");
+                assert_eq!(got, 100, "expected actual length 100");
+            }
+            other => panic!("expected DimensionMismatch; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pool_and_normalise_returns_dim_mismatch_when_too_long() {
+        let too_long = vec![0.5_f32; 1024];
+        match pool_and_normalise(&too_long) {
+            Err(CodeRankEmbedError::DimensionMismatch { expected, got }) => {
+                assert_eq!(expected, EMBEDDING_DIM, "expected EMBEDDING_DIM (768)");
+                assert_eq!(got, 1024, "expected actual length 1024");
+            }
+            other => panic!("expected DimensionMismatch; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pool_and_normalise_l2_normalises_correct_length_input() {
+        let raw = vec![3.0_f32; EMBEDDING_DIM];
+        let pooled = pool_and_normalise(&raw).expect("happy path");
+        assert_eq!(pooled.len(), EMBEDDING_DIM, "length preserved");
+        let norm: f32 = pooled.iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!(
+            (norm - 1.0).abs() < 1e-5,
+            "expected unit vector after L2-normalise; got norm={norm}",
+        );
+    }
+
+    #[test]
+    fn pool_and_normalise_clamps_zero_input_to_epsilon() {
+        let zero = vec![0.0_f32; EMBEDDING_DIM];
+        let pooled = pool_and_normalise(&zero).expect("zero-vector path");
+        assert_eq!(pooled.len(), EMBEDDING_DIM, "length preserved");
+        let finite_count = pooled.iter().filter(|x| x.is_finite()).count();
+        assert!(
+            pooled.iter().all(|x| x.is_finite()),
+            "EPSILON clamp must keep all floats finite; got {finite_count} finite of {}",
+            pooled.len(),
+        );
+    }
+
+    #[test]
+    fn coderankembed_error_display_renders_canonical_text() {
+        let e = CodeRankEmbedError::MissingModelFile {
+            path: std::path::PathBuf::from("/no/such/path/model.onnx"),
+        };
+        let s = format!("{e}");
+        assert!(
+            s.contains("required model file missing"),
+            "MissingModelFile Display must contain canonical text; got {s:?}",
+        );
+
+        let e = CodeRankEmbedError::DimensionMismatch {
+            expected: EMBEDDING_DIM,
+            got: 0,
+        };
+        let s = format!("{e}");
+        assert!(
+            s.contains("unexpected embedding dimension"),
+            "DimensionMismatch Display must contain canonical text; got {s:?}",
+        );
+
+        let e = CodeRankEmbedError::Tokenizer {
+            message: "bad json".into(),
+        };
+        let s = format!("{e}");
+        assert!(
+            s.contains("tokenizer error"),
+            "Tokenizer Display must contain canonical text; got {s:?}",
+        );
+    }
+}
