@@ -412,6 +412,474 @@ fn pool_and_normalise(raw: &[f32]) -> Result<Vec<f32>, CodeRankEmbedError> {
     Ok(pooled)
 }
 
+// ─── Qwen3-Embedding GPU upgrade path (P2-W8-F03 / WO-0062) ───────────
+//
+// Master-plan §4.2 line 303 freezes the upgrade-path model:
+// "Qwen3-Embedding-8B (Apache 2.0, 80.68 MTEB-Code, 32K context,
+// Matryoshka dimension support 32–7168). Substantially better
+// retrieval quality but requires GPU for reasonable throughput."
+// Master-plan §18 Phase 2 Week 8 line 1787 reiterates the choice as
+// "Qwen3-Embedding (8B, GPU optional) as upgrade".
+//
+// This crate's `ort` workspace dep is currently configured
+// `default-features = false` (Cargo.toml line 194), so the underlying
+// ONNX Runtime shared library does NOT include the CUDA / TensorRT /
+// DirectML execution providers.  The [`detect_gpu_execution_provider`]
+// function therefore returns `Err(NoGpuDetected)` on this build —
+// that is the EXPECTED behaviour and the frozen acceptance test
+// [`test_qwen3_config_gate`] asserts on it.  A future workspace `ort`
+// feature flip (`features = ["cuda"]` or analogue) will activate the
+// GPU code path WITHOUT requiring any API surface change here.
+
+/// Master-plan-frozen Matryoshka dimension lower bound for Qwen3-Embedding-8B.
+///
+/// Master-plan §4.2 line 303 — "Matryoshka dimension support 32–7168".
+/// Inclusive on both ends per the standard
+/// Matryoshka-Representation-Learning convention.
+pub const MIN_MATRYOSHKA_DIM: usize = 32;
+
+/// Master-plan-frozen Matryoshka dimension upper bound for Qwen3-Embedding-8B.
+///
+/// Master-plan §4.2 line 303 — "Matryoshka dimension support 32–7168".
+/// Inclusive on both ends.
+pub const MAX_MATRYOSHKA_DIM: usize = 7168;
+
+/// The kind of GPU execution provider detected at runtime.
+///
+/// Master-plan §4.2 line 303 frames Qwen3-Embedding-8B as a
+/// GPU-only upgrade; the three EPs that ONNX Runtime supports for
+/// Qwen3-class workloads on consumer / data-center hardware are
+/// `CUDA` (NVIDIA), `TensorRT` (NVIDIA optimised graph), and
+/// `DirectML` (Windows GPU layer that targets D3D12).  Absence of
+/// any GPU is signalled via `Result::Err(NoGpuDetected)`, NOT a
+/// `None` variant on this enum — that keeps the success path
+/// unambiguous.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GpuKind {
+    /// NVIDIA CUDA execution provider.
+    Cuda,
+    /// NVIDIA `TensorRT` execution provider (optimised CUDA graph).
+    TensorRt,
+    /// Windows `DirectML` execution provider.
+    DirectMl,
+}
+
+/// Errors emitted by [`Qwen3Embedding`] operations and the
+/// helper functions that back it.
+///
+/// `#[non_exhaustive]` so future variants (e.g. a `BatchSizeExceeded`
+/// when GPU batched inference lands) can be added without breaking
+/// downstream `match` exhaustiveness.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum Qwen3EmbeddingError {
+    /// No GPU execution provider was detected.  On the current
+    /// workspace `ort` build (`default-features = false`), this
+    /// variant fires unconditionally — the EXPECTED behaviour for
+    /// `P2-W8-F03` per the master-plan-frozen GPU-only upgrade
+    /// requirement.
+    #[error("no GPU execution provider available: {reason}")]
+    NoGpuDetected {
+        /// Operator-readable description of why the GPU was not
+        /// available (workspace feature flags, runtime probe failure,
+        /// etc.).
+        reason: String,
+    },
+
+    /// The requested Matryoshka dimension is outside the
+    /// master-plan-frozen `[32, 7168]` range (master-plan §4.2
+    /// line 303).  Bounds are inclusive on both ends per the
+    /// standard `MRL` convention.
+    #[error("Matryoshka dimension {value} out of range [{min}, {max}]")]
+    DimensionOutOfRange {
+        /// The requested dimension that failed the bounds check.
+        value: usize,
+        /// The master-plan-frozen lower bound
+        /// ([`MIN_MATRYOSHKA_DIM`]).
+        min: usize,
+        /// The master-plan-frozen upper bound
+        /// ([`MAX_MATRYOSHKA_DIM`]).
+        max: usize,
+    },
+
+    /// A required Qwen3 model artefact (`model.onnx` or
+    /// `tokenizer.json`) is missing from the configured
+    /// `model_dir`.  Defensive — the current build returns
+    /// [`Qwen3EmbeddingError::NoGpuDetected`] before reaching the
+    /// load path, but the variant is wired in for the future
+    /// GPU-enabled flow.
+    #[error("required Qwen3 model file missing at {path:?}")]
+    MissingModelFile {
+        /// The absolute path that was looked up.
+        path: PathBuf,
+    },
+
+    /// Wraps an `ort::Error` from the underlying `ONNX` Runtime —
+    /// covers session construction / inference failures when GPU
+    /// inference is enabled.  Defensive — wired in for the future
+    /// GPU-enabled load path.
+    #[error("ort session error: {source}")]
+    Onnx {
+        /// The underlying `ort::Error`.
+        #[from]
+        source: ort::Error,
+    },
+
+    /// Wraps a `tokenizers`-crate error.  Defensive — see the
+    /// equivalent variant on [`CodeRankEmbedError`] for the
+    /// upstream-fit rationale (boxed-error → `String` shim).
+    #[error("tokenizer error: {message}")]
+    Tokenizer {
+        /// The rendered upstream error message.
+        message: String,
+    },
+
+    /// Filesystem error while resolving a model artefact — wraps
+    /// [`std::io::Error`] for the future GPU-enabled flow.
+    #[error("io error: {source}")]
+    Io {
+        /// The underlying [`std::io::Error`].
+        #[from]
+        source: std::io::Error,
+    },
+}
+
+/// Validate a requested Matryoshka dimension against the
+/// master-plan-frozen `[MIN_MATRYOSHKA_DIM, MAX_MATRYOSHKA_DIM]`
+/// range.
+///
+/// Master-plan §4.2 line 303 fixes the bounds at `32-7168`
+/// inclusive on both ends.  The function is `pub` and pure (no
+/// IO, no `&self`), so it is testable in isolation per `WO-0059`
+/// lessons line 600 ("extract `pub(crate)` helpers for in-test
+/// invocation"; the more-`pub` shape is fine here because the
+/// bounds are part of the API surface).
+///
+/// # Errors
+///
+/// - [`Qwen3EmbeddingError::DimensionOutOfRange`] if `d` is below
+///   [`MIN_MATRYOSHKA_DIM`] or above [`MAX_MATRYOSHKA_DIM`].
+///
+/// # Examples
+///
+/// ```
+/// use ucil_embeddings::models::validate_matryoshka_dimension;
+/// assert!(validate_matryoshka_dimension(1024).is_ok());
+/// assert!(validate_matryoshka_dimension(31).is_err());
+/// ```
+pub fn validate_matryoshka_dimension(d: usize) -> Result<usize, Qwen3EmbeddingError> {
+    if (MIN_MATRYOSHKA_DIM..=MAX_MATRYOSHKA_DIM).contains(&d) {
+        Ok(d)
+    } else {
+        Err(Qwen3EmbeddingError::DimensionOutOfRange {
+            value: d,
+            min: MIN_MATRYOSHKA_DIM,
+            max: MAX_MATRYOSHKA_DIM,
+        })
+    }
+}
+
+/// Detect an available GPU execution provider in the loaded `ONNX`
+/// Runtime shared library.
+///
+/// Implementation strategy: probe each candidate `EP` via the
+/// `ort::ep::ExecutionProvider::is_available()` trait method
+/// (`ort 2.0.0-rc.12 src/ep/mod.rs:118`).  The probe queries the
+/// loaded `ONNX` Runtime shared library at runtime via the C-API
+/// `GetAvailableProviders` call (`is_ep_available` in
+/// `src/ep/mod.rs:371`); the workspace `ort` dep is configured
+/// `default-features = false` (Cargo.toml line 194), so the
+/// downloaded CPU-only `ONNX` Runtime shared library does NOT
+/// register any GPU `EP` and every probe returns `Ok(false)` — the
+/// function therefore returns
+/// [`Qwen3EmbeddingError::NoGpuDetected`] unconditionally on this
+/// build.  A future workspace `ort` feature flip
+/// (`features = ["cuda", "download-binaries"]` etc.) pulls in a
+/// GPU-capable shared library and the probe path activates without
+/// any API surface change here.
+///
+/// The function NEVER panics — operator-readable error always.
+///
+/// # Errors
+///
+/// - [`Qwen3EmbeddingError::NoGpuDetected`] when no GPU EP is
+///   available (the current workspace state always returns this).
+#[tracing::instrument(name = "ucil.embeddings.qwen3.detect_gpu", level = "debug")]
+pub fn detect_gpu_execution_provider() -> Result<GpuKind, Qwen3EmbeddingError> {
+    use ort::ep::ExecutionProvider;
+
+    if matches!(ort::ep::CUDA::default().is_available(), Ok(true)) {
+        return Ok(GpuKind::Cuda);
+    }
+    if matches!(ort::ep::TensorRT::default().is_available(), Ok(true)) {
+        return Ok(GpuKind::TensorRt);
+    }
+    if matches!(ort::ep::DirectML::default().is_available(), Ok(true)) {
+        return Ok(GpuKind::DirectMl);
+    }
+
+    Err(Qwen3EmbeddingError::NoGpuDetected {
+        reason: "no GPU execution provider compiled in (workspace ort: \
+                 default-features=false; need cuda/tensorrt/directml feature \
+                 flag to enable GPU inference)"
+            .to_owned(),
+    })
+}
+
+/// A loaded Qwen3-Embedding bundle: model directory + Matryoshka
+/// dimension configuration.
+///
+/// Mirrors the [`CodeRankEmbed`] structural template but does NOT
+/// open an actual `.onnx` file — the production Qwen3-Embedding-8B
+/// model is ~16-32 GB and is operator-installed at a future
+/// consumer site (`P2-W8-F04` `LanceDB` indexer or `P2-W8-F08`
+/// `find_similar` MCP tool, per `WO-0062` `scope_out`).  The
+/// current build's [`Qwen3Embedding::load`] returns
+/// `Err(NoGpuDetected)` before any filesystem IO because GPU
+/// detection runs first; the actual model loading is wired for
+/// the future GPU-enabled flow.
+///
+/// **Not** `Clone`; **`Send`** so the bundle composes with
+/// `tokio::task::spawn_blocking` at consumer sites.
+#[derive(Debug)]
+pub struct Qwen3Embedding {
+    #[allow(dead_code)]
+    model_dir: PathBuf,
+    dimensions: usize,
+}
+
+impl Qwen3Embedding {
+    /// Load a [`Qwen3Embedding`] bundle.
+    ///
+    /// Implementation order:
+    ///
+    /// 1. [`validate_matryoshka_dimension`] checks `dimensions` is
+    ///    in `[MIN_MATRYOSHKA_DIM, MAX_MATRYOSHKA_DIM]` (master-plan
+    ///    §4.2 line 303 — `32-7168` inclusive);
+    /// 2. [`detect_gpu_execution_provider`] checks at least one
+    ///    GPU `EP` is available — on the current workspace state
+    ///    this returns `Err(NoGpuDetected)` because the workspace
+    ///    `ort` dep is configured `default-features = false` with
+    ///    no `cuda` / `tensorrt` / `directml` features compiled
+    ///    (Cargo.toml line 194);
+    /// 3. only if both checks pass, returns
+    ///    `Ok(Qwen3Embedding { ... })` with the validated
+    ///    `model_dir` and `dimensions`.
+    ///
+    /// The check ordering is load-bearing — the dimension validation
+    /// runs FIRST so an invalid `dimensions` argument surfaces as
+    /// [`Qwen3EmbeddingError::DimensionOutOfRange`] regardless of
+    /// the GPU state.  The frozen acceptance test
+    /// [`test_qwen3_config_gate`] (`SA1`) and the negative-path
+    /// `models::qwen3_tests::test_qwen3_load_returns_dim_out_of_range_before_gpu_check`
+    /// both pin this contract.
+    ///
+    /// # Errors
+    ///
+    /// - [`Qwen3EmbeddingError::DimensionOutOfRange`] if `dimensions`
+    ///   is outside `[MIN_MATRYOSHKA_DIM, MAX_MATRYOSHKA_DIM]`;
+    /// - [`Qwen3EmbeddingError::NoGpuDetected`] if no GPU `EP` is
+    ///   available (the current workspace state always returns
+    ///   this on dimension-valid inputs).
+    #[tracing::instrument(
+        name = "ucil.embeddings.qwen3.load",
+        level = "debug",
+        skip(model_dir),
+        fields(model_dir = ?model_dir, dimensions = dimensions)
+    )]
+    pub fn load(model_dir: &Path, dimensions: usize) -> Result<Self, Qwen3EmbeddingError> {
+        let validated = validate_matryoshka_dimension(dimensions)?;
+        let _gpu = detect_gpu_execution_provider()?;
+        Ok(Self {
+            model_dir: model_dir.to_owned(),
+            dimensions: validated,
+        })
+    }
+
+    /// Return the validated Matryoshka dimension this bundle was
+    /// loaded with.
+    #[tracing::instrument(name = "ucil.embeddings.qwen3.dimensions", level = "debug", skip(self))]
+    pub fn dimensions(&self) -> usize {
+        self.dimensions
+    }
+
+    /// Return the configured model directory.
+    #[tracing::instrument(name = "ucil.embeddings.qwen3.model_dir", level = "debug", skip(self))]
+    pub fn model_dir(&self) -> &Path {
+        &self.model_dir
+    }
+}
+
+/// Frozen acceptance test for `P2-W8-F03` per `DEC-0007` module-root
+/// placement (matches `feature-list.json:P2-W8-F03.acceptance_tests[0].selector`
+/// = `-p ucil-embeddings models::test_qwen3_config_gate`, the
+/// frozen `JSON` selector key).
+///
+/// Exercises 12 sub-assertions covering the config-gate-only surface
+/// per `WO-0062` `scope_in[9]`:
+///
+/// - (`SA1`): [`Qwen3Embedding::load`] returns
+///   `Err(NoGpuDetected)` on the current workspace build (no GPU
+///   EP features compiled);
+/// - (`SA2`): [`validate_matryoshka_dimension`] accepts the
+///   master-plan-default Qwen3 dim `1024` (master-plan §17.6
+///   line 2029 comment);
+/// - (`SA3`): [`validate_matryoshka_dimension`] accepts the
+///   lower-bound inclusive `32`;
+/// - (`SA4`): [`validate_matryoshka_dimension`] accepts the
+///   upper-bound inclusive `7168`;
+/// - (`SA5`): [`validate_matryoshka_dimension`] rejects `31` (just
+///   below min);
+/// - (`SA6`): [`validate_matryoshka_dimension`] rejects `7169`
+///   (just above max);
+/// - (`SA7`): [`crate::EmbeddingBackend::from_config_str`] parses
+///   `"qwen3-embedding"` to [`crate::EmbeddingBackend::Qwen3`];
+/// - (`SA8`): same parses `"coderankembed"` to
+///   [`crate::EmbeddingBackend::CodeRankEmbed`];
+/// - (`SA9`): same returns `Err(UnknownEmbeddingModel { name })`
+///   on an arbitrary string;
+/// - (`SA10`): [`crate::config::from_toml_str`] returns the
+///   master-plan-frozen defaults on empty input;
+/// - (`SA11`): [`crate::config::from_toml_str`] preserves
+///   overrides on an explicit `[vector_store]` table;
+/// - (`SA12`): [`detect_gpu_execution_provider`] returns
+///   `Err(NoGpuDetected)` on the current workspace build.
+///
+/// Per `WO-0062` `scope_in[20]`, no real Qwen3 model file is
+/// committed — the 8B Qwen3-Embedding model is ~16-32 GB and is
+/// operator-installed at a future site.  The test uses
+/// [`tempfile::TempDir`] for the `model_dir` argument in `SA1` so
+/// the load function exercises the full path argument plumbing
+/// without touching real on-disk model artefacts.
+#[test]
+fn test_qwen3_config_gate() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+
+    // SA1: Qwen3Embedding::load returns Err(NoGpuDetected) on the
+    // current workspace (no GPU EP features compiled).
+    match Qwen3Embedding::load(tmp.path(), 1024) {
+        Err(Qwen3EmbeddingError::NoGpuDetected { reason }) => {
+            assert!(
+                reason.contains("GPU execution provider") || reason.contains("default-features"),
+                "NoGpuDetected reason must mention GPU EP or workspace flags; got {reason:?}",
+            );
+        }
+        other => panic!("SA1: expected Err(Qwen3EmbeddingError::NoGpuDetected); got {other:?}",),
+    }
+
+    // SA2: master-plan-default Qwen3 dimension 1024 (mid-range)
+    let r = validate_matryoshka_dimension(1024);
+    assert!(
+        matches!(r, Ok(1024)),
+        "SA2: validate_matryoshka_dimension(1024) must be Ok(1024); got {r:?}",
+    );
+
+    // SA3: lower-bound inclusive
+    let r = validate_matryoshka_dimension(32);
+    assert!(
+        matches!(r, Ok(32)),
+        "SA3: validate_matryoshka_dimension(32) must be Ok(32) (inclusive lower bound); got {r:?}",
+    );
+
+    // SA4: upper-bound inclusive
+    let r = validate_matryoshka_dimension(7168);
+    assert!(
+        matches!(r, Ok(7168)),
+        "SA4: validate_matryoshka_dimension(7168) must be Ok(7168) (inclusive upper bound); got {r:?}",
+    );
+
+    // SA5: just below min
+    let r = validate_matryoshka_dimension(31);
+    assert!(
+        matches!(
+            r,
+            Err(Qwen3EmbeddingError::DimensionOutOfRange { value: 31, .. })
+        ),
+        "SA5: validate_matryoshka_dimension(31) must be Err(DimensionOutOfRange {{ value: 31 }}); got {r:?}",
+    );
+
+    // SA6: just above max
+    let r = validate_matryoshka_dimension(7169);
+    assert!(
+        matches!(
+            r,
+            Err(Qwen3EmbeddingError::DimensionOutOfRange { value: 7169, .. })
+        ),
+        "SA6: validate_matryoshka_dimension(7169) must be Err(DimensionOutOfRange {{ value: 7169 }}); got {r:?}",
+    );
+
+    // SA7: EmbeddingBackend::from_config_str("qwen3-embedding")
+    let r = crate::config::EmbeddingBackend::from_config_str("qwen3-embedding");
+    match r {
+        Ok(crate::config::EmbeddingBackend::Qwen3) => {}
+        other => panic!(
+            "SA7: from_config_str(\"qwen3-embedding\") must be Ok(EmbeddingBackend::Qwen3); got {other:?}",
+        ),
+    }
+
+    // SA8: EmbeddingBackend::from_config_str("coderankembed")
+    let r = crate::config::EmbeddingBackend::from_config_str("coderankembed");
+    match r {
+        Ok(crate::config::EmbeddingBackend::CodeRankEmbed) => {}
+        other => panic!(
+            "SA8: from_config_str(\"coderankembed\") must be Ok(EmbeddingBackend::CodeRankEmbed); got {other:?}",
+        ),
+    }
+
+    // SA9: invalid model name returns Err(UnknownEmbeddingModel)
+    let r = crate::config::EmbeddingBackend::from_config_str("invalid-model-name");
+    match r {
+        Err(crate::config::ConfigError::UnknownEmbeddingModel { name }) => {
+            assert_eq!(
+                name, "invalid-model-name",
+                "SA9: UnknownEmbeddingModel must preserve the supplied name; got {name:?}",
+            );
+        }
+        other => panic!(
+            "SA9: expected Err(UnknownEmbeddingModel {{ name: \"invalid-model-name\" }}); got {other:?}",
+        ),
+    }
+
+    // SA10: empty TOML parses to master-plan-frozen defaults
+    let cfg = crate::config::from_toml_str("").expect("SA10: empty TOML must parse");
+    assert_eq!(cfg.backend, "lancedb", "SA10: default backend");
+    assert_eq!(
+        cfg.embedding_model, "coderankembed",
+        "SA10: default embedding_model",
+    );
+    assert_eq!(
+        cfg.embedding_dimensions, 768,
+        "SA10: default embedding_dimensions",
+    );
+    assert_eq!(cfg.chunk_max_tokens, 512, "SA10: default chunk_max_tokens",);
+    assert!(!cfg.reindex_on_startup, "SA10: default reindex_on_startup",);
+
+    // SA11: explicit qwen3 override TOML round-trips
+    let toml_str =
+        "[vector_store]\nembedding_model = \"qwen3-embedding\"\nembedding_dimensions = 1024\n";
+    let cfg = crate::config::from_toml_str(toml_str).expect("SA11: explicit qwen3 TOML must parse");
+    assert_eq!(
+        cfg.embedding_model, "qwen3-embedding",
+        "SA11: embedding_model override preserved",
+    );
+    assert_eq!(
+        cfg.embedding_dimensions, 1024,
+        "SA11: embedding_dimensions override preserved",
+    );
+    assert_eq!(
+        cfg.backend, "lancedb",
+        "SA11: non-overridden backend keeps default",
+    );
+
+    // SA12: detect_gpu_execution_provider returns Err(NoGpuDetected)
+    match detect_gpu_execution_provider() {
+        Err(Qwen3EmbeddingError::NoGpuDetected { .. }) => {}
+        other => panic!(
+            "SA12: detect_gpu_execution_provider must return Err(NoGpuDetected) on this build; got {other:?}",
+        ),
+    }
+}
+
 /// Frozen acceptance test for `P2-W8-F02` per `DEC-0007` module-root
 /// placement (matches `feature-list.json:P2-W8-F02.acceptance_tests[0].selector`
 /// = `-p ucil-embeddings models::test_coderankembed_inference`,
@@ -628,5 +1096,129 @@ mod tests {
             s.contains("tokenizer error"),
             "Tokenizer Display must contain canonical text; got {s:?}",
         );
+    }
+}
+
+/// Negative-path + variant-coverage tests for `P2-W8-F03`
+/// (`WO-0062`).
+///
+/// The frozen acceptance test [`test_qwen3_config_gate`] stays at
+/// module root per `DEC-0007`; these supplementary tests live at
+/// `models::qwen3_tests::*` and do not collide with the frozen
+/// substring selector `models::test_qwen3_config_gate`.
+///
+/// Per `WO-0060` lessons line 643, every reachable variant of
+/// [`Qwen3EmbeddingError`] is exercised at least once so the
+/// coverage gate at `AC24` is satisfied.
+#[cfg(test)]
+mod qwen3_tests {
+    use std::path::PathBuf;
+
+    use super::{
+        detect_gpu_execution_provider, validate_matryoshka_dimension, Qwen3Embedding,
+        Qwen3EmbeddingError, MAX_MATRYOSHKA_DIM, MIN_MATRYOSHKA_DIM,
+    };
+
+    #[test]
+    fn test_dimension_out_of_range_value_zero() {
+        match validate_matryoshka_dimension(0) {
+            Err(Qwen3EmbeddingError::DimensionOutOfRange { value, min, max }) => {
+                assert_eq!(value, 0, "DimensionOutOfRange must report supplied value");
+                assert_eq!(
+                    min, MIN_MATRYOSHKA_DIM,
+                    "DimensionOutOfRange.min must equal MIN_MATRYOSHKA_DIM (32)",
+                );
+                assert_eq!(
+                    max, MAX_MATRYOSHKA_DIM,
+                    "DimensionOutOfRange.max must equal MAX_MATRYOSHKA_DIM (7168)",
+                );
+            }
+            other => panic!("expected Err(DimensionOutOfRange) for d=0; got {other:?}",),
+        }
+    }
+
+    #[test]
+    fn test_dimension_out_of_range_max_value() {
+        match validate_matryoshka_dimension(usize::MAX) {
+            Err(Qwen3EmbeddingError::DimensionOutOfRange { value, .. }) => {
+                assert_eq!(
+                    value,
+                    usize::MAX,
+                    "DimensionOutOfRange must report supplied value (usize::MAX)",
+                );
+            }
+            other => panic!("expected Err(DimensionOutOfRange) for d=usize::MAX; got {other:?}",),
+        }
+    }
+
+    #[test]
+    fn test_qwen3_error_display_renders_no_gpu() {
+        let e = Qwen3EmbeddingError::NoGpuDetected {
+            reason: "test".into(),
+        };
+        let s = format!("{e}");
+        assert!(
+            s.contains("no GPU execution provider"),
+            "NoGpuDetected Display must contain canonical text; got {s:?}",
+        );
+    }
+
+    #[test]
+    fn test_qwen3_error_display_renders_dimension_out_of_range() {
+        let e = Qwen3EmbeddingError::DimensionOutOfRange {
+            value: 8000,
+            min: MIN_MATRYOSHKA_DIM,
+            max: MAX_MATRYOSHKA_DIM,
+        };
+        let s = format!("{e}");
+        assert!(
+            s.contains("Matryoshka dimension"),
+            "DimensionOutOfRange Display must mention `Matryoshka dimension`; got {s:?}",
+        );
+        assert!(
+            s.contains("out of range"),
+            "DimensionOutOfRange Display must mention `out of range`; got {s:?}",
+        );
+    }
+
+    #[test]
+    fn test_qwen3_error_display_renders_missing_model_file() {
+        let e = Qwen3EmbeddingError::MissingModelFile {
+            path: PathBuf::from("/nonexistent/qwen3/model.onnx"),
+        };
+        let s = format!("{e}");
+        assert!(
+            s.contains("model file missing"),
+            "MissingModelFile Display must mention `model file missing`; got {s:?}",
+        );
+    }
+
+    #[test]
+    fn test_gpu_detection_returns_no_gpu_on_default_workspace() {
+        match detect_gpu_execution_provider() {
+            Err(Qwen3EmbeddingError::NoGpuDetected { .. }) => {}
+            other => panic!(
+                "expected Err(NoGpuDetected) under default workspace ort features; got {other:?}",
+            ),
+        }
+    }
+
+    #[test]
+    fn test_qwen3_load_returns_dim_out_of_range_before_gpu_check() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        match Qwen3Embedding::load(tmp.path(), 16) {
+            Err(Qwen3EmbeddingError::DimensionOutOfRange { value, .. }) => {
+                assert_eq!(
+                    value, 16,
+                    "DimensionOutOfRange must report supplied value (16); got {value}",
+                );
+            }
+            Err(Qwen3EmbeddingError::NoGpuDetected { .. }) => {
+                panic!(
+                    "load must validate dim FIRST; got NoGpuDetected (load-bearing check ordering: dim → gpu)",
+                );
+            }
+            other => panic!("expected Err(DimensionOutOfRange) for d=16; got {other:?}",),
+        }
     }
 }
