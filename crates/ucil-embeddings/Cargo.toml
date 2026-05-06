@@ -15,6 +15,7 @@ tokenizers.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 ucil-core = { path = "../ucil-core" }
+ucil-treesitter = { path = "../ucil-treesitter" }
 
 [dev-dependencies]
 tempfile.workspace = true

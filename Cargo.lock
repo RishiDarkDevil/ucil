@@ -2735,6 +2735,7 @@ dependencies = [
  "tokio",
  "tracing",
  "ucil-core",
+ "ucil-treesitter",
 ]
 
 [[package]]
