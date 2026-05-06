@@ -80,6 +80,19 @@
 //! fusion path is deferred to P2-W7-F05 (`find_references`); F02 ships
 //! the fusion algorithm only.
 //!
+//! WO-0063 for `P2-W7-F06` lights up
+//! [`server::McpServer::with_g2_sources`] and the G2-fused half of the
+//! `search_code` MCP tool (master-plan §3.2 row 4 / §5.2 G2 fan-out):
+//! the handler fans out via [`g2_search::G2SourceFactory::build`], runs
+//! the three providers in parallel ([`g2_search::ProbeProvider`] /
+//! [`g2_search::RipgrepProvider`] / [`g2_search::LancedbProvider`]),
+//! and fuses via `ucil_core::fuse_g2_rrf` (WO-0056).  The legacy
+//! P1-W5-F09 KG+ripgrep merge stays byte-identical per `DEC-0015` D1;
+//! the fused output appears on a new additive `_meta.g2_fused` field.
+//! [`g2_search::LancedbProvider`] returns empty `hits` until P2-W8-F04
+//! populates the per-branch `code_chunks.lance` table per `DEC-0015`
+//! D3.
+//!
 //! The `server` module (introduced in WO-0010 for `P1-W3-F07`) owns
 //! the MCP JSON-RPC 2.0 skeleton.  WO-0033 for `P1-W4-F05` (master-plan
 //! §3.2 row 2 + §18 Phase 1 Week 4 line 1751) promoted the
@@ -96,6 +109,7 @@
 #![deny(rustdoc::broken_intra_doc_links)]
 
 pub mod executor;
+pub mod g2_search;
 pub mod lifecycle;
 pub mod plugin_manager;
 pub mod priority_queue;
@@ -120,6 +134,8 @@ pub mod watcher;
 
 #[rustfmt::skip]
 pub use executor::{enrich_find_definition, execute_g1, fuse_g1, Caller, EnrichedFindDefinition, ExecutorError, G1Conflict, G1FusedEntry, G1FusedLocation, G1FusedOutcome, G1FusionEntry, G1Outcome, G1Query, G1Source, G1ToolKind, G1ToolOutput, G1ToolStatus, HoverDoc, HoverFetchError, HoverSource, IngestPipeline, SerenaHoverClient, G1_MASTER_DEADLINE, G1_PER_SOURCE_DEADLINE, SOURCE_TOOL, TREE_SITTER_VALID_FROM};
+#[rustfmt::skip]
+pub use g2_search::{G2SearchError, G2SourceFactory, G2SourceProvider, LancedbProvider, ProbeProvider, RipgrepProvider};
 #[rustfmt::skip]
 pub use lifecycle::{Checkpoint, CheckpointError, Lifecycle, PidFile, PidFileError, ShutdownReason};
 pub use plugin_manager::{
