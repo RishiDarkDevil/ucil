@@ -52,7 +52,9 @@ use tokio::{
 };
 use ucil_core::KnowledgeGraph;
 
+use crate::g2_search::G2SourceFactory;
 use crate::text_search::{self, TextMatch, TextSearchError};
+use ucil_core::{fuse_g2_rrf, G2FusedOutcome, G2SourceResults};
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -90,6 +92,19 @@ pub const TOOL_COUNT: usize = 22;
 /// [`SEARCH_CODE_MAX_RESULTS`], which caps whatever the caller asks
 /// for so a pathological query cannot flood the response.
 pub const SEARCH_CODE_DEFAULT_MAX_RESULTS: usize = 50;
+
+/// Per-source deadline for the G2 fan-out per `DEC-0015` D1.
+///
+/// Wraps each [`crate::g2_search::G2SourceProvider::execute`] future so
+/// a single slow engine cannot stall the response — partial results
+/// semantics matching `fuse_g1` from WO-0048.
+pub const G2_PER_SOURCE_DEADLINE: Duration = Duration::from_secs(2);
+
+/// Master deadline for the G2 fan-out per `DEC-0015` D1.
+///
+/// Bounds the total wall-time across all parallel providers — the
+/// outer cap on top of the per-source deadlines.
+pub const G2_MASTER_DEADLINE: Duration = Duration::from_secs(5);
 
 /// Saturating cap on `search_code`'s `arguments.max_results`.
 ///
@@ -345,6 +360,14 @@ pub struct McpServer {
     /// falls through to the `_meta.not_yet_implemented: true` stub path
     /// every other tool still uses (phase-1 invariant #9).
     pub kg: Option<Arc<Mutex<KnowledgeGraph>>>,
+    /// Optional G2 source factory.  When present, `handle_search_code`
+    /// additively emits a `_meta.g2_fused` field carrying the result
+    /// of fanning out to Probe / ripgrep / `LanceDB` and fusing via
+    /// [`ucil_core::fuse_g2_rrf`] per master-plan §5.2 lines 447-461 —
+    /// `P2-W7-F06`, master-plan §3.2 row 4 G2 lane.  When absent, the
+    /// handler returns the legacy `P1-W5-F09` KG+ripgrep merge envelope
+    /// byte-identically per `DEC-0015` D1.
+    pub g2_sources: Option<Arc<G2SourceFactory>>,
 }
 
 impl Default for McpServer {
@@ -367,6 +390,7 @@ impl McpServer {
         Self {
             tools: ucil_tools(),
             kg: None,
+            g2_sources: None,
         }
     }
 
@@ -397,7 +421,26 @@ impl McpServer {
         Self {
             tools: ucil_tools(),
             kg: Some(kg),
+            g2_sources: None,
         }
+    }
+
+    /// Attach a G2 source factory so `handle_search_code` additively
+    /// emits `_meta.g2_fused` — the master-plan §5.2 G2 fan-out lane
+    /// that runs Probe / ripgrep / `LanceDB` in parallel and fuses via
+    /// [`ucil_core::fuse_g2_rrf`].
+    ///
+    /// Builder method: chains off [`Self::new`] or
+    /// [`Self::with_knowledge_graph`] so callers (the daemon's startup
+    /// orchestrator) can attach the factory after the KG handle.
+    /// Per `DEC-0015` D1 the legacy `_meta.{tool, source, count, query,
+    /// root, symbol_match_count, text_match_count, results}` shape is
+    /// preserved byte-identically; the fused output is purely additive
+    /// on a new `_meta.g2_fused` field.
+    #[must_use]
+    pub fn with_g2_sources(mut self, factory: Arc<G2SourceFactory>) -> Self {
+        self.g2_sources = Some(factory);
+        self
     }
 
     /// Serve newline-delimited JSON-RPC 2.0 requests from `reader`,
@@ -438,7 +481,7 @@ impl McpServer {
                 return Ok(());
             }
 
-            let response = self.handle_line(line.trim_end_matches(['\r', '\n']));
+            let response = self.handle_line(line.trim_end_matches(['\r', '\n'])).await;
             let encoded = serde_json::to_string(&response).map_err(McpError::Encode)?;
 
             timeout(WRITE_TIMEOUT, async {
@@ -459,7 +502,7 @@ impl McpServer {
     /// acceptance test can (indirectly) exercise the dispatcher via
     /// the real [`Self::serve`] loop, while unit tests can call it
     /// without an in-memory duplex.
-    fn handle_line(&self, line: &str) -> Value {
+    async fn handle_line(&self, line: &str) -> Value {
         if line.trim().is_empty() {
             return jsonrpc_error(&Value::Null, -32600, "empty request");
         }
@@ -481,7 +524,7 @@ impl McpServer {
         match method.as_str() {
             "initialize" => Self::handle_initialize(&id),
             "tools/list" => self.handle_tools_list(&id),
-            "tools/call" => self.handle_tools_call(&id, &params),
+            "tools/call" => self.handle_tools_call(&id, &params).await,
             other => jsonrpc_error(&id, -32601, &format!("Method not found: {other}")),
         }
     }
@@ -512,7 +555,7 @@ impl McpServer {
         })
     }
 
-    fn handle_tools_call(&self, id: &Value, params: &Value) -> Value {
+    async fn handle_tools_call(&self, id: &Value, params: &Value) -> Value {
         let name = params.get("name").and_then(Value::as_str).unwrap_or("");
         if !self.tools.iter().any(|t| t.name == name) {
             return jsonrpc_error(id, -32602, &format!("Unknown tool: {name}"));
@@ -536,7 +579,7 @@ impl McpServer {
         }
         if name == "search_code" {
             if let Some(kg) = self.kg.as_ref() {
-                return Self::handle_search_code(id, params, kg);
+                return Self::handle_search_code(id, params, kg, self.g2_sources.as_ref()).await;
             }
         }
         if name == "understand_code" {
@@ -732,9 +775,28 @@ impl McpServer {
     /// * `text_match_count`: raw number of ripgrep hits (pre-merge,
     ///   post-cap inside the searcher).
     /// * `results`: the merged array of [`SearchCodeResult`] objects.
+    /// * `g2_fused` (optional, additive per `DEC-0015` D1): when the
+    ///   server was built with [`Self::with_g2_sources`], the handler
+    ///   fans out to Probe / ripgrep / `LanceDB` in parallel, fuses
+    ///   the per-source ranked outputs via [`ucil_core::fuse_g2_rrf`]
+    ///   (weights `Probe×2.0` / `Ripgrep×1.5` / `Lancedb×1.5`,
+    ///   `k = 60`) and surfaces the resulting [`G2FusedOutcome`] on
+    ///   this field.  When the factory is absent, the field is omitted
+    ///   so the legacy `P1-W5-F09` envelope shape is preserved
+    ///   byte-identically.
     ///
     /// Empty result is a non-error response (`isError: false`,
     /// `content[0].text == "no matches for …"`).
+    ///
+    /// # Examples
+    ///
+    /// A 3-source fan-out at `(util.rs, 10, 20)` where Probe and
+    /// `Ripgrep` both rank the location at 1: the merged `g2_fused.hits[0]`
+    /// carries `contributing_sources == [Probe, Ripgrep]` (descending
+    /// `rrf_weight`), `fused_score == 2.0/61 + 1.5/61 ≈ 0.05738`, and
+    /// `snippet` from the `Probe` row (highest weight).  The legacy
+    /// `_meta.results` array still carries the `P1-W5-F09` KG+ripgrep
+    /// merge unchanged.
     ///
     /// # Error codes
     ///
@@ -744,7 +806,17 @@ impl McpServer {
     ///   the text searcher (the caller supplied an invalid regex).
     /// * `-32603` — internal KG or I/O failure (mutex poisoned,
     ///   per-file I/O errors aggregating past the walker).
-    fn handle_search_code(id: &Value, params: &Value, kg: &Arc<Mutex<KnowledgeGraph>>) -> Value {
+    #[tracing::instrument(
+        name = "ucil.group.search",
+        level = "debug",
+        skip(id, params, kg, g2_sources)
+    )]
+    async fn handle_search_code(
+        id: &Value,
+        params: &Value,
+        kg: &Arc<Mutex<KnowledgeGraph>>,
+        g2_sources: Option<&Arc<G2SourceFactory>>,
+    ) -> Value {
         let args = params
             .get("arguments")
             .cloned()
@@ -784,14 +856,29 @@ impl McpServer {
         let symbol_match_count = symbols.len();
         let text_match_count = text_hits.len();
         let merged = merge_search_results(&symbols, &text_hits, max_results);
-        search_code_response(
+        let mut envelope = search_code_response(
             id,
             &query,
             &root,
             symbol_match_count,
             text_match_count,
             &merged,
-        )
+        );
+
+        // ── G2 fan-out half (additive per DEC-0015 D1) ──────────────
+        if let Some(factory) = g2_sources {
+            let fused = run_g2_fan_out(factory, &query, &root, max_results).await;
+            let fused_value = serde_json::to_value(&fused).expect("G2FusedOutcome serializes");
+            if let Some(meta) = envelope
+                .get_mut("result")
+                .and_then(|r| r.get_mut("_meta"))
+                .and_then(Value::as_object_mut)
+            {
+                meta.insert("g2_fused".to_owned(), fused_value);
+            }
+        }
+
+        envelope
     }
 }
 
@@ -1372,6 +1459,61 @@ fn merge_search_results(
     }
 
     out
+}
+
+/// Fan out a search query over the three G2 providers in parallel and
+/// fuse the per-source ranked outputs via [`fuse_g2_rrf`] per
+/// master-plan §5.2 lines 447-461 / `DEC-0015` D1.
+///
+/// Each provider future is wrapped in
+/// `tokio::time::timeout(G2_PER_SOURCE_DEADLINE, ...)` so a single slow
+/// engine cannot stall the response — `Err` and `Timeout` are dropped
+/// silently with a `tracing::warn!`, matching the partial-results
+/// semantics of `fuse_g1` from WO-0048.
+async fn run_g2_fan_out(
+    factory: &Arc<G2SourceFactory>,
+    query: &str,
+    root: &Path,
+    max_results: usize,
+) -> G2FusedOutcome {
+    let providers = factory.build();
+    let mut tasks = Vec::with_capacity(providers.len());
+    for provider in providers {
+        let q = query.to_owned();
+        let r = root.to_path_buf();
+        tasks.push(tokio::spawn(async move {
+            let label = provider.source();
+            let outcome = timeout(
+                G2_PER_SOURCE_DEADLINE,
+                provider.execute(&q, &r, max_results),
+            )
+            .await;
+            match outcome {
+                Ok(Ok(results)) => Some(results),
+                Ok(Err(e)) => {
+                    tracing::warn!(?label, error = %e, "g2 provider failed");
+                    None
+                }
+                Err(_elapsed) => {
+                    tracing::warn!(?label, "g2 provider exceeded per-source deadline");
+                    None
+                }
+            }
+        }));
+    }
+
+    let mut per_source: Vec<G2SourceResults> = Vec::with_capacity(tasks.len());
+    for task in tasks {
+        match task.await {
+            Ok(Some(results)) => per_source.push(results),
+            Ok(None) => {}
+            Err(join_err) => {
+                tracing::warn!(error = %join_err, "g2 provider task join failed");
+            }
+        }
+    }
+
+    fuse_g2_rrf(&per_source)
 }
 
 /// Build the JSON-RPC 2.0 response envelope for a successful
@@ -2144,8 +2286,8 @@ fn build_find_definition_fixture() -> (
 /// 8. The phase-1 stub marker `_meta.not_yet_implemented` is
 ///    **absent** — proving the handler escaped the stub path.
 #[cfg(test)]
-#[test]
-fn test_find_definition_tool() {
+#[tokio::test]
+async fn test_find_definition_tool() {
     let (server, _kg, _tmp, file_path_str, _evaluate_id, caller_qualified_name) =
         build_find_definition_fixture();
 
@@ -2159,7 +2301,7 @@ fn test_find_definition_tool() {
         }
     })
     .to_string();
-    let response = server.handle_line(&request);
+    let response = server.handle_line(&request).await;
 
     assert_eq!(
         response.get("jsonrpc").and_then(Value::as_str),
@@ -2239,8 +2381,8 @@ fn test_find_definition_tool() {
 /// a JSON-RPC error, because "symbol not found" is a successful
 /// lookup that returned zero rows.
 #[cfg(test)]
-#[test]
-fn test_find_definition_tool_unknown_symbol() {
+#[tokio::test]
+async fn test_find_definition_tool_unknown_symbol() {
     let (server, _kg, _tmp, _file_path, _id, _caller) = build_find_definition_fixture();
 
     let request = json!({
@@ -2253,7 +2395,7 @@ fn test_find_definition_tool_unknown_symbol() {
         }
     })
     .to_string();
-    let response = server.handle_line(&request);
+    let response = server.handle_line(&request).await;
 
     assert!(
         response.get("error").is_none(),
@@ -2278,8 +2420,8 @@ fn test_find_definition_tool_unknown_symbol() {
 /// `name` argument must return a JSON-RPC error envelope with
 /// `code == -32602` (Invalid params).
 #[cfg(test)]
-#[test]
-fn test_find_definition_tool_missing_name_param() {
+#[tokio::test]
+async fn test_find_definition_tool_missing_name_param() {
     let (server, _kg, _tmp, _file_path, _id, _caller) = build_find_definition_fixture();
 
     let request = json!({
@@ -2292,7 +2434,7 @@ fn test_find_definition_tool_missing_name_param() {
         }
     })
     .to_string();
-    let response = server.handle_line(&request);
+    let response = server.handle_line(&request).await;
 
     let error = response
         .get("error")
@@ -2402,9 +2544,9 @@ fn build_get_conventions_fixture() -> (
 // assertions for each — mirrors the `test_all_22_tools_registered`
 // shape that already carries the same allow.
 #[cfg(test)]
-#[test]
+#[tokio::test]
 #[allow(clippy::too_many_lines)]
-fn test_get_conventions_tool() {
+async fn test_get_conventions_tool() {
     let (server, _kg, _tmp) = build_get_conventions_fixture();
 
     // ── Unfiltered call ─────────────────────────────────────────
@@ -2418,7 +2560,7 @@ fn test_get_conventions_tool() {
         }
     })
     .to_string();
-    let response_all = server.handle_line(&request_all);
+    let response_all = server.handle_line(&request_all).await;
 
     assert_eq!(
         response_all.get("jsonrpc").and_then(Value::as_str),
@@ -2513,7 +2655,7 @@ fn test_get_conventions_tool() {
         }
     })
     .to_string();
-    let response_naming = server.handle_line(&request_naming);
+    let response_naming = server.handle_line(&request_naming).await;
 
     assert!(
         response_naming.get("error").is_none(),
@@ -2561,8 +2703,8 @@ fn test_get_conventions_tool() {
 /// human-readable "no conventions yet" text — the master-plan §3.2
 /// row-7 "empty list if none yet extracted" contract.
 #[cfg(test)]
-#[test]
-fn test_get_conventions_tool_empty() {
+#[tokio::test]
+async fn test_get_conventions_tool_empty() {
     use ucil_core::KnowledgeGraph;
 
     let tmp = tempfile::TempDir::new().expect("tempdir must be creatable");
@@ -2581,7 +2723,7 @@ fn test_get_conventions_tool_empty() {
         }
     })
     .to_string();
-    let response = server.handle_line(&request);
+    let response = server.handle_line(&request).await;
 
     assert!(
         response.get("error").is_none(),
@@ -2624,8 +2766,8 @@ fn test_get_conventions_tool_empty() {
 /// preserving invariant #9 from `ucil-build/phase-log/01-phase-1/
 /// CLAUDE.md` for the "no KG" deployment shape.
 #[cfg(test)]
-#[test]
-fn test_get_conventions_tool_no_kg_returns_stub() {
+#[tokio::test]
+async fn test_get_conventions_tool_no_kg_returns_stub() {
     let server = McpServer::new();
 
     let request = json!({
@@ -2638,7 +2780,7 @@ fn test_get_conventions_tool_no_kg_returns_stub() {
         }
     })
     .to_string();
-    let response = server.handle_line(&request);
+    let response = server.handle_line(&request).await;
 
     assert!(
         response.get("error").is_none(),
@@ -2665,8 +2807,8 @@ fn test_get_conventions_tool_no_kg_returns_stub() {
 /// is a non-string JSON value (e.g. number) must return a JSON-RPC
 /// error envelope with `code == -32602` (Invalid params).
 #[cfg(test)]
-#[test]
-fn test_get_conventions_tool_non_string_category() {
+#[tokio::test]
+async fn test_get_conventions_tool_non_string_category() {
     let (server, _kg, _tmp) = build_get_conventions_fixture();
 
     let request = json!({
@@ -2679,7 +2821,7 @@ fn test_get_conventions_tool_non_string_category() {
         }
     })
     .to_string();
-    let response = server.handle_line(&request);
+    let response = server.handle_line(&request).await;
 
     let error = response
         .get("error")
@@ -2832,7 +2974,7 @@ async fn test_search_code_basic() {
         }
     })
     .to_string();
-    let response = server.handle_line(&request);
+    let response = server.handle_line(&request).await;
 
     assert_eq!(
         response.get("jsonrpc").and_then(Value::as_str),
@@ -2942,7 +3084,7 @@ async fn test_search_code_tool_empty_query() {
         }
     })
     .to_string();
-    let response = server.handle_line(&request);
+    let response = server.handle_line(&request).await;
 
     let error = response
         .get("error")
@@ -2977,7 +3119,7 @@ async fn test_search_code_tool_no_kg_returns_stub() {
         }
     })
     .to_string();
-    let response = server.handle_line(&request);
+    let response = server.handle_line(&request).await;
 
     assert!(
         response.get("error").is_none(),
@@ -3017,7 +3159,7 @@ async fn test_search_code_tool_non_string_query() {
         }
     })
     .to_string();
-    let response = server.handle_line(&request);
+    let response = server.handle_line(&request).await;
 
     let error = response
         .get("error")
@@ -3054,7 +3196,7 @@ async fn test_search_code_tool_nonexistent_root() {
         }
     })
     .to_string();
-    let response = server.handle_line(&request);
+    let response = server.handle_line(&request).await;
 
     let error = response
         .get("error")
@@ -3094,7 +3236,7 @@ async fn test_search_code_tool_max_results_clamp() {
         }
     })
     .to_string();
-    let response = server.handle_line(&request);
+    let response = server.handle_line(&request).await;
 
     assert!(
         response.get("error").is_none(),
@@ -3153,7 +3295,7 @@ async fn test_search_code_tool_only_text_no_symbol() {
         }
     })
     .to_string();
-    let response = server.handle_line(&request);
+    let response = server.handle_line(&request).await;
 
     assert!(
         response.get("error").is_none(),
@@ -3436,8 +3578,8 @@ fn assert_understand_code_file_response(response: &Value, expected_target: &str)
 }
 
 #[cfg(test)]
-#[test]
-fn test_understand_code_tool() {
+#[tokio::test]
+async fn test_understand_code_tool() {
     let (server, _kg, _tmp, fixture_root, util_rs_canonical, _eval_qn, _caller_qn) =
         build_understand_code_fixture();
 
@@ -3456,7 +3598,7 @@ fn test_understand_code_tool() {
         }
     })
     .to_string();
-    let response = server.handle_line(&request);
+    let response = server.handle_line(&request).await;
 
     assert_eq!(
         response.get("jsonrpc").and_then(Value::as_str),
@@ -3481,8 +3623,8 @@ fn test_understand_code_tool() {
 /// the entity projection plus inbound/outbound edges.  The synthetic
 /// caller seeded in the fixture should appear in `inbound_edges`.
 #[cfg(test)]
-#[test]
-fn test_understand_code_tool_symbol_mode() {
+#[tokio::test]
+async fn test_understand_code_tool_symbol_mode() {
     let (server, _kg, _tmp, fixture_root, _util_rs, evaluate_qn, caller_qn) =
         build_understand_code_fixture();
 
@@ -3500,7 +3642,7 @@ fn test_understand_code_tool_symbol_mode() {
         }
     })
     .to_string();
-    let response = server.handle_line(&request);
+    let response = server.handle_line(&request).await;
 
     assert!(
         response.get("error").is_none(),
@@ -3571,8 +3713,8 @@ fn test_understand_code_tool_symbol_mode() {
 /// Auto-detect mode: when `kind` is omitted and the target resolves
 /// to a file under `root`, the dispatcher must pick file mode.
 #[cfg(test)]
-#[test]
-fn test_understand_code_tool_auto_detect_file() {
+#[tokio::test]
+async fn test_understand_code_tool_auto_detect_file() {
     let (server, _kg, _tmp, fixture_root, util_rs_canonical, _eval_qn, _caller_qn) =
         build_understand_code_fixture();
 
@@ -3589,7 +3731,7 @@ fn test_understand_code_tool_auto_detect_file() {
         }
     })
     .to_string();
-    let response = server.handle_line(&request);
+    let response = server.handle_line(&request).await;
 
     assert!(
         response.get("error").is_none(),
@@ -3606,8 +3748,8 @@ fn test_understand_code_tool_auto_detect_file() {
 
 /// Malformed args: missing `target` must yield JSON-RPC `-32602`.
 #[cfg(test)]
-#[test]
-fn test_understand_code_tool_missing_target() {
+#[tokio::test]
+async fn test_understand_code_tool_missing_target() {
     let (server, _kg, _tmp, fixture_root, _util_rs, _eval_qn, _caller_qn) =
         build_understand_code_fixture();
 
@@ -3621,7 +3763,7 @@ fn test_understand_code_tool_missing_target() {
         }
     })
     .to_string();
-    let response = server.handle_line(&request);
+    let response = server.handle_line(&request).await;
 
     let error = response
         .get("error")
@@ -3635,8 +3777,8 @@ fn test_understand_code_tool_missing_target() {
 
 /// Malformed args: empty-string `target` must yield `-32602`.
 #[cfg(test)]
-#[test]
-fn test_understand_code_tool_empty_target() {
+#[tokio::test]
+async fn test_understand_code_tool_empty_target() {
     let (server, _kg, _tmp, fixture_root, _util_rs, _eval_qn, _caller_qn) =
         build_understand_code_fixture();
 
@@ -3650,7 +3792,7 @@ fn test_understand_code_tool_empty_target() {
         }
     })
     .to_string();
-    let response = server.handle_line(&request);
+    let response = server.handle_line(&request).await;
 
     let error = response
         .get("error")
@@ -3665,8 +3807,8 @@ fn test_understand_code_tool_empty_target() {
 /// Malformed args: a `kind` string outside the
 /// `{"file","symbol","module"}` set must yield `-32602`.
 #[cfg(test)]
-#[test]
-fn test_understand_code_tool_invalid_kind() {
+#[tokio::test]
+async fn test_understand_code_tool_invalid_kind() {
     let (server, _kg, _tmp, fixture_root, _util_rs, _eval_qn, _caller_qn) =
         build_understand_code_fixture();
 
@@ -3684,7 +3826,7 @@ fn test_understand_code_tool_invalid_kind() {
         }
     })
     .to_string();
-    let response = server.handle_line(&request);
+    let response = server.handle_line(&request).await;
 
     let error = response
         .get("error")
@@ -3700,8 +3842,8 @@ fn test_understand_code_tool_invalid_kind() {
 /// envelope with `_meta.found == false` and `isError == false` — NOT
 /// a JSON-RPC error (WO-0036 `scope_in` bullet 7).
 #[cfg(test)]
-#[test]
-fn test_understand_code_tool_unknown_symbol() {
+#[tokio::test]
+async fn test_understand_code_tool_unknown_symbol() {
     let (server, _kg, _tmp, fixture_root, _util_rs, _eval_qn, _caller_qn) =
         build_understand_code_fixture();
 
@@ -3719,7 +3861,7 @@ fn test_understand_code_tool_unknown_symbol() {
         }
     })
     .to_string();
-    let response = server.handle_line(&request);
+    let response = server.handle_line(&request).await;
 
     assert!(
         response.get("error").is_none(),
@@ -3744,8 +3886,8 @@ fn test_understand_code_tool_unknown_symbol() {
 /// must fall through to the phase-1 stub — preserving phase-1
 /// invariant #9 for hosts that haven't wired up a KG yet.
 #[cfg(test)]
-#[test]
-fn test_understand_code_tool_no_kg_returns_stub() {
+#[tokio::test]
+async fn test_understand_code_tool_no_kg_returns_stub() {
     let server = McpServer::new();
 
     let request = json!({
@@ -3758,7 +3900,7 @@ fn test_understand_code_tool_no_kg_returns_stub() {
         }
     })
     .to_string();
-    let response = server.handle_line(&request);
+    let response = server.handle_line(&request).await;
 
     assert!(
         response.get("error").is_none(),
