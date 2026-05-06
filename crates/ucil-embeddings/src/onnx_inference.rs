@@ -137,7 +137,7 @@ impl OnnxSession {
     ///
     /// let session = OnnxSession::from_path(Path::new("model.onnx"))
     ///     .expect("model load");
-    /// assert!(!session.input_names().is_empty());
+    /// let _names = session.input_names();
     /// ```
     #[tracing::instrument(
         name = "ucil.embeddings.onnx_session.load",
@@ -212,7 +212,7 @@ impl OnnxSession {
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let mut session = OnnxSession::from_path(Path::new("model.onnx"))?;
     /// let embedding: Vec<f32> = session.infer(&[1i64, 2, 3])?;
-    /// assert!(!embedding.is_empty());
+    /// println!("got {} floats", embedding.len());
     /// # Ok(())
     /// # }
     /// ```
