@@ -167,6 +167,29 @@ protobuf = "=3.7.2"
 # emitted by the `scip-rust` indexer.
 scip = "0.7"
 
+# ONNX Runtime Rust bindings — back the `ucil-embeddings` crate's
+# embedding-inference layer (master-plan §18 Phase 2 Week 8 line 1786,
+# `P2-W8-F01`).  `ort` 2.x is the current line; as of 2026-05-06 it is
+# still in release-candidate (`2.0.0-rc.12`), so the version pin uses
+# the explicit RC selector — Cargo refuses `^2` against pre-1.0
+# pre-release semver.  The `download-binaries` feature pulls a
+# pre-built CPU-only ONNX Runtime shared library into the build cache
+# so `cargo test` does not require system-installed
+# `libonnxruntime.so` (DEC-0006 spirit); ort-sys also requires a TLS
+# feature to be selected when `download-binaries` is on, so we pair it
+# with `tls-rustls` (rustls + `ring` provider — pure-Rust, no system
+# OpenSSL).  `default-features = false` avoids the `cuda` /
+# `tensorrt` / `directml` execution providers (F03 will gate these
+# behind a feature flag).
+ort = { version = "=2.0.0-rc.12", default-features = false, features = ["std", "download-binaries", "tls-rustls"] }
+
+# n-dimensional arrays — used by `ucil-embeddings::onnx_inference` to
+# wrap token-ID slices into the 2-D `Array2<i64>` tensor shape that
+# ONNX Runtime expects (`[batch=1, seq=*]`).  `default-features =
+# false` avoids the `rayon` / `blas` transitive bloat; `std` is the
+# only feature we need for `from_shape_vec`.
+ndarray = { version = "0.16", default-features = false, features = ["std"] }
+
 [profile.dev]
 opt-level = 0
 
