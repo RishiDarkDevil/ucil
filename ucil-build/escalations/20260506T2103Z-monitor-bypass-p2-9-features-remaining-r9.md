@@ -3,7 +3,7 @@ ts: 2026-05-06T21:03:00Z
 phase: 2
 session: monitor
 trigger: stop-hook-blocks-on-mid-phase-gate-red
-resolved: false
+resolved: true
 blocks_loop: false
 severity: low
 auto_classify: bucket-A-admin
@@ -24,3 +24,15 @@ W7-F06 + W8-F01..F08.
 `blocks_loop: false`, `severity: low`. Triage applies bucket-A and
 closes on next pass. Each per-turn advisory of this shape only needs
 to survive a single Stop-hook invocation.
+
+## Resolution
+
+Bucket-A auto-resolve at triage pass 1 (UCIL_TRIAGE_PASS=1). The cited
+mid-phase state — P2 has 9 of 25 features remaining, 16 passing — is
+confirmed in HEAD `a8827b2` against `ucil-build/feature-list.json`
+(jq query: `{total: 25, passing: 16}`). The escalation's `close_when`
+condition ("9 P2 features still unfinished is the expected mid-phase
+state; triage may close on next pass") is satisfied: this is the first
+triage pass, the condition is benign, and the per-turn advisory only
+needed to survive a single Stop-hook invocation. No code, harness,
+ADR, or deny-list-file work required.
