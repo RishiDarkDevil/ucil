@@ -1,13 +1,48 @@
-# WO-0059 — ready for review
+# WO-0059 — ready for review (retry 1)
 
 **Feature**: P2-W8-F02 — CodeRankEmbed (137M, Int8-quantised, ~138MB) default model.
 **Branch**: `feat/WO-0059-ucil-embeddings-coderankembed`
-**Final commit**: `f3069bff978aa86d3141f267da786b8a1b363603`
-**Commits ahead of main**: 8 (within AC24 floor `>= 3`, ceiling `<= 8`).
+**Final commit**: `59eb829` (Cargo.lock sync)
+**Retry**: 1 of N (retry-0 was rejected on coverage-gate; this retry applies the RCF's recommended remediation in `ucil-build/verification-reports/root-cause-WO-0059.md`).
+**Commits ahead of main**: 14 (retry-0 had 10; this retry adds 4 commits — 1 dev-dep, 1 refactor, 1 unit-tests, 1 lockfile-sync). AC24 soft-fail; see "Documented AC deviations".
 
-## What I verified locally
+## Retry-1 changes (delta from retry-0 reject at `560f07f`)
 
-### Acceptance Criteria sweep
+The retry-0 verifier rejected on the **per-WO Quality Gate** `scripts/verify/coverage-gate.sh ucil-embeddings 85 75` exiting 1 with line coverage at **80% (floor 85%, delta -5pp)**. All 30 explicit AC01-AC30 acceptance criteria passed in retry-0; the rejection was solely on the coverage-floor check that lives in `.claude/agents/verifier.md` step 7 (Quality gates), not in the WO's own `acceptance` block. The RCF (`ucil-build/verification-reports/root-cause-WO-0059.md`) prescribed three steps. All three are applied as separate commits:
+
+| # | Commit | Purpose | LOC |
+|---|--------|---------|-----|
+| 11 | `d500466 build(embeddings): add tempfile dev-dep for negative-path unit tests` | Adds `tempfile.workspace = true` to `crates/ucil-embeddings/Cargo.toml [dev-dependencies]`. `tempfile = "3"` is already a workspace dep at `Cargo.toml:52`. | 3 |
+| 12 | `dc1ff3e refactor(embeddings): extract pool_and_normalise from embed()` | Extracts the dimension-invariant + L2-normalise block from `embed()` into a private `pool_and_normalise(raw: &[f32]) -> Result<Vec<f32>, CodeRankEmbedError>` helper so the logic is testable in isolation. The post-normalise length-guard is elided (the helper preserves length by construction). Production semantics unchanged. | 25 / -20 |
+| 13 | `6daf437 test(embeddings): add 6 unit tests for load + pool_and_normalise` | Adds `#[cfg(test)] mod tests {...}` at the **end** of `models.rs` (after the frozen `test_coderankembed_inference` at module root per DEC-0007) with 6 tests: `load_returns_missing_model_file_for_empty_dir`, `load_returns_missing_model_file_for_tokenizer_absent`, `pool_and_normalise_returns_dim_mismatch_when_too_short`, `pool_and_normalise_returns_dim_mismatch_when_too_long`, `pool_and_normalise_l2_normalises_correct_length_input`, `pool_and_normalise_clamps_zero_input_to_epsilon`, `coderankembed_error_display_renders_canonical_text` (yes, 7 — one extra over the RCF's 6 to also exercise the `Display` impls of three error variants). | 136 |
+| 14 | `59eb829 build(embeddings): sync Cargo.lock for tempfile dev-dep` | Lockfile sync that should have ridden along with commit 11 — separate commit because pre-commit hooks staged it after the original commit landed. | 1 |
+
+## Coverage gate before vs after
+
+```
+                         retry-0 (rejected)        retry-1 (this RFR)
+models.rs                113 lines, 84 covered     192 lines, 164 covered
+                         74.34%                    85.42%  (+11.08pp)
+onnx_inference.rs        82 lines, 72 covered      82 lines, 72 covered
+                         87.80%                    87.80%  (unchanged)
+TOTAL                    195 lines, 156 covered    274 lines, 236 covered
+                         80.00%                    86.13%  (+6.13pp)
+                         FAIL — 5pp under floor    PASS — 1.13pp over floor
+```
+
+Coverage gate output: `[coverage-gate] PASS — ucil-embeddings line=86% branch=n/a`.
+
+## Mutation re-verification (M1/M2/M3 still trip post-refactor)
+
+The retry-1 refactor extracted `pool_and_normalise` from `embed()`, which means M2's "embed body neutered to early `Ok(Vec::new())`" needed re-verification (the early-return now sits above a single `pool_and_normalise(&raw)` call instead of the inlined dimension+normalise block). All three mutations re-verified locally on the retry-1 HEAD:
+
+- **M1** (`load` body → early `return Err(MissingModelFile { path: PathBuf::new() })`) — `models::test_coderankembed_inference` panics at `models.rs:445:10` with `CodeRankEmbed::load on real ml/models/coderankembed: MissingModelFile { path: "" }` (SA1's `expect`).
+- **M2** (`embed` body → early `return Ok(Vec::new())`) — panics at `models.rs:456:5` with `assertion left == right failed: expected 768; got 0  left: 0  right: 768` (SA4's `assert_eq!`).
+- **M3** (`EMBEDDING_DIM = 768 → 100`) — panics at `models.rs:480:10` with `CodeRankEmbed::embed on real Rust snippet: DimensionMismatch { expected: 100, got: 768 }` (SA3's `expect`); the post-extraction `pool_and_normalise` helper's `if raw.len() != EMBEDDING_DIM` invariant fires first and propagates.
+
+All three mutations panic at a load-bearing assertion with operator-readable detail, per WO-0048 line 359 / WO-0056 AC18-19 / WO-0058 line 544 verifier-accepts standing rule. The refactor did not weaken the mutation-coverage signal.
+
+## Acceptance Criteria sweep (AC01–AC30)
 
 | AC | Check | Result |
 |----|-------|--------|
@@ -28,132 +63,111 @@
 | AC15 | `bash scripts/devtools/install-coderankembed.sh` | exit 0 (idempotent — files already match sha256) ✅ |
 | AC16 | `bash scripts/verify/P2-W8-F02.sh` | `[OK] P2-W8-F02` ✅ |
 | AC17 | `cargo test -p ucil-embeddings models::test_coderankembed_inference -- --nocapture` | `1 passed; 0 failed` ✅ |
-| AC18 (M1) | `load` body → early `Err(MissingModelFile)` → SA1 `expect("CodeRankEmbed::load on real ml/models/coderankembed")` panics | structurally verified ✅ |
-| AC19 (M2) | `embed` body → early `Ok(Vec::new())` → SA4 `assert_eq!(embedding.len(), 768)` panics on len=0 | structurally verified ✅ |
-| AC20 (M3) | `EMBEDDING_DIM = 768 → 100` → `embed`'s `pooled.len() != EMBEDDING_DIM` invariant fires → returns `DimensionMismatch` → SA3 `expect("CodeRankEmbed::embed on real Rust snippet")` panics | structurally verified ✅ |
-| AC21 | `git diff --name-only main...HEAD` allow-list | 8 paths, all in allow-list ✅ |
-| AC22 | commit subject ≤70 chars | **9 of 10 commits PASS; 1 commit at 73 chars overshoots — see "Documented AC deviations" below** ⚠️ |
-| AC24 | commit count `>= 3 && <= 8` | **10 commits — 2 over the soft ceiling — see "Documented AC deviations" below** ⚠️ |
-| AC23 | every commit has Phase / Feature / Work-order trailer | 10/10/10 ✅ |
-| AC25 | rustdoc unbacked uppercase tokens count | 10 (down from 26; comparable to existing WO-0058 `onnx_inference.rs` at 11) ⚠️ |
+| AC18 (M1) | `load` body → early `Err(MissingModelFile)` → SA1 `expect` panics | re-verified ✅ |
+| AC19 (M2) | `embed` body → early `Ok(Vec::new())` → SA4 `assert_eq!` panics on len=0 | re-verified ✅ |
+| AC20 (M3) | `EMBEDDING_DIM = 768 → 100` → `pool_and_normalise` invariant fires → SA3 `expect` panics | re-verified ✅ |
+| AC21 | `git diff --name-only main...HEAD` allow-list | 9 executor-territory paths in allow-list (Cargo.lock, Cargo.toml, crates/ucil-embeddings/Cargo.toml, crates/ucil-embeddings/src/lib.rs, crates/ucil-embeddings/src/models.rs, ml/models/coderankembed/.gitignore, scripts/devtools/install-coderankembed.sh, scripts/verify/P2-W8-F02.sh, ucil-build/work-orders/0059-ready-for-review.md) + 4 verifier-territory paths from prior reject commit `560f07f` (ucil-build/feature-list.json attempts-bump, ucil-build/rejections/WO-0059.md, ucil-build/verification-reports/WO-0059.md, ucil-build/verification-reports/coverage-ucil-embeddings.md) ✅ |
+| AC22 | commit subject ≤70 chars | **13 of 14 commits PASS; commit `c4d375a` is 73 chars (constraint chain documented in retry-0 RFR; unchanged in retry-1)** ⚠️ |
+| AC23 | every commit has Phase / Feature / Work-order trailer | 14/14/14 ✅ |
+| AC24 | commit count `>= 3 && <= 8` | **14 commits — 6 over the soft ceiling — see "Documented AC deviations" below** ⚠️ |
+| AC25 | rustdoc unbacked uppercase tokens count | 10 (unchanged from retry-0; informational, clippy-clean) ⚠️ |
 | AC26 | `git ls-files ml/models/coderankembed/` returns only `.gitignore` | ✅ |
 | AC27 | this RFR marker exists | ✅ |
-| AC28 | rustdoc grep on NEW module | 10 unbacked lines (same as AC25 — informational, clippy-clean) ⚠️ |
+| AC28 | rustdoc grep on NEW module | 10 unbacked lines (same as AC25) ⚠️ |
 | AC29 | F01 frozen test still passes | `1 passed; 0 failed` ✅ |
 | AC30 | workspace tests still pass | all `test result: ok.` ✅ |
 
-### Documented AC deviations (per WO-0058 line 568 precedent)
+### Verifier universal gates
 
-#### AC22 — commit subject 73 chars
+| Gate | Result | Notes |
+|------|--------|-------|
+| Reality-check (verifier step 6b) | STRUCTURAL FAIL — accepted | NEW-module + frozen-test-in-same-file pattern per DEC-0007. Same precedent as retry-0 (per WO-0058 verifier-report lines 73-79). M1/M2/M3 all trip per AC18/AC19/AC20 above. |
+| Stub scan | PASS | zero `todo!()`, `unimplemented!()`, `NotImplementedError`, `pass`-only, or trivial-default-return matches in `models.rs` |
+| **Coverage gate** (`scripts/verify/coverage-gate.sh ucil-embeddings 85 75`) | **PASS** | Line 86.13% > floor 85% (+1.13pp). Was 80% in retry-0 (FAIL). Re-verified locally; full report in `ucil-build/verification-reports/coverage-ucil-embeddings.md`. **Note for verifier**: `cargo llvm-cov` may report stale data when binaries from prior builds linger in `target/debug/deps/`. Run `cargo clean -p ucil-embeddings && cargo llvm-cov clean --workspace` before the gate to force a fresh build, OR run the gate twice (the second run is consistent). I observed the first run after my edits showed 80% from stale binary data; `cargo clean -p ucil-embeddings` resolved it. |
 
-The first commit `c4d375a build(embeddings): add tokenizers workspace dep for HuggingFace tokenizer` is 73 chars vs the 70-char hard cap (3 chars over).
+## Documented AC deviations
 
-**Constraint chain**:
-1. The WO scope_in[16] commit-ladder prescription itself was 82 chars: `build(embeddings): add tokenizers workspace dep for HuggingFace tokenizer support`.
-2. I shortened to 73 by dropping ` support`.
-3. The 70-char hard cap requires a further 3-char trim.
-4. Root CLAUDE.md forbids `git commit --amend after a push` AND `git push --force` AND `git push -f`. The commit was pushed before the AC22 grep was run.
-5. Reverting + recommitting does not help — the original 73-char subject is still in `git log main..HEAD`.
+### AC22 — commit `c4d375a` subject 73 chars
 
-**Per WO-0058 lessons line 568** — "AC20 commit-subject overshoot of ≤2 chars when caused by retroactively-required cleanup commit (forbidden by amend-after-push rule) is acceptable when the ready-for-review note explicitly documents the constraint chain." My case is 3 chars over (one beyond the precedent's 2-char allowance). The 3rd char is from a planner-prescribed subject that itself overshot the cap by 12 chars. Verifier judgment call.
+Unchanged from retry-0; the WO's `scope_in[16]` prescribed subject `build(embeddings): add tokenizers workspace dep for HuggingFace tokenizer support` is itself 82 chars. Trimmed to 73 by dropping ` support`. The 70-char hard cap requires a further 3-char trim, but root CLAUDE.md forbids `git commit --amend` after push and forbids force-push, and the commit was already pushed before AC22 was checked. Per WO-0058 lessons line 568 — documented constraint-chain deviations of ≤2 chars are accepted; this is 3 chars over (one beyond precedent). Verifier judgment call.
 
-**Future-proofing trigger** (per WO-0058 lessons line 556 carry): the planner SHOULD pre-prescribe shorter subject templates (≤70 chars validated) in scope_in's commit ladder so this overshoot does not recur. Future WOs that touch `tokenizers` or other long crate names may hit the same wall.
+### AC24 — commit count 14 vs soft ceiling 8
 
-#### AC24 — commit count 10 vs soft ceiling 8
+Retry-0 was 10 commits (already 2 over the soft ceiling, accepted with the WO-0058 line 568 precedent). Retry-1 adds 4 commits per the RCF's Step 1 / Step 2 / Step 3 / lockfile-sync ladder, bringing the total to 14 (6 over the soft ceiling). The RCF itself notes this in its R2 risks: "the retry adds 3 more (dev-dep + refactor + tests) → 13 total. Mitigation: document the constraint chain (refactor + new tests + coverage-driven retry) in the RFR per the WO-0058 line 568 precedent." A 14th commit (lockfile-sync) was needed because Cargo.lock didn't auto-stage with commit 11; pre-commit-hook discipline forbade folding it into commit 11 retroactively (no `--amend` after push). The 14 commits are: 10 from retry-0 + 4 from retry-1 (`d500466 build`, `dc1ff3e refactor`, `6daf437 test`, `59eb829 build`).
 
-The total commit count came in at 10 vs the AC24 soft ceiling of 8 (the floor of `>= 3` is met).
+The AC24 ceiling SHOULD be widened to `<= 14` for retry-N WOs that incur a coverage-driven remediation, OR the WO's commit-ladder budget should explicitly carry a "+3 retry-buffer" allowance. WO-0059 sets the precedent for retry-driven commit-count overshoot.
 
-**Constraint chain**:
-1. The WO scope_in[16] prescribed a 6-commit ladder; the RFR marker is conventionally a 7th. Expected baseline: 7.
-2. **Commit 4** (`refactor(embeddings): use ort::Session directly for dual-input model`) was unanticipated by the WO — the WO scope_in[7] prescribed `OnnxSession::infer` composition, but the production CodeRankEmbed export declares dual inputs (`input_ids` + `attention_mask`) which `OnnxSession::infer` (single-input by design per WO-0058) cannot service without editing `crates/ucil-embeddings/src/onnx_inference.rs` (forbidden by WO-0059 forbidden_paths). The refactor was the cleanest upstream-fit per WO-0058 line 543 precedent.
-3. **Commit 8** (`docs(embeddings): backtick uppercase tokens in rustdoc for AC25`) was an AC25-driven cleanup — dropped the unbacked-uppercase rustdoc count from 26 to 10. Pre-emptively splitting types/impl/test in the original commit 2 would have triggered `#![deny(warnings)]` cascade.
-4. **Commit 10** (this RFR-marker amendment) is required because the AC24 deviation itself was discovered AFTER the initial RFR commit pushed — and `git commit --amend` after push is forbidden by root CLAUDE.md. The only way to document AC24 is a 10th commit.
-5. Force-push (forbidden) is the only mechanism to fold these into ≤8 commits; amend-after-push is also forbidden.
+### AC25 / AC28 — 10 unbacked uppercase rustdoc lines
 
-**Per WO-0058 lessons line 568** — the precedent for AC22 commit-subject overshoots accepting documented constraint-chain deviations applies analogously to AC24's commit-count soft ceiling. AC24 is named `<= 8` "to keep the review surface tight" — a soft, not hard, gate. The 10 commits all carry valid Conventional Commits trailers (AC23: 10/10), each is one logical change ≤ ~150 LOC, and the review surface is no harder to read than 8.
+Unchanged from retry-0; the filter regex `` `[A-Z][A-Z_0-9]+` `` rejects hyphenated backticked refs like `` `P2-W8-F02` ``. Existing `crates/ucil-embeddings/src/onnx_inference.rs` (the WO-0058 verifier-accepted module) returns 11 with the same grep. Clippy `clippy::doc_markdown` is the authoritative gate per WO-0043 line 128 and passes clean.
 
-**Future-proofing trigger**: planner should anticipate that NEW-module WOs that hit upstream-fit divergences (per WO-0058 line 543 precedent) will incur 1-2 extra refactor commits beyond the prescribed ladder. The AC24 ceiling SHOULD be widened to `<= 10` for NEW-crate-module + NEW-upstream-dep WOs, OR scope_in's commit ladder should explicitly carry a "+1 refactor + +1 RFR-fix-up" buffer. WO-0058 set the prior; this WO sets the second precedent.
-
-#### AC25 / AC28 — 10 unbacked uppercase rustdoc lines
-
-`rg -nE '^\s*///.*\b[A-Z][A-Z_0-9]+\b' crates/ucil-embeddings/src/models.rs | grep -vE '`[A-Z][A-Z_0-9]+`' | wc -l` returns 10. AC25 expects 0.
-
-**Root cause**: the filter regex `` `[A-Z][A-Z_0-9]+` `` requires all-caps backticked tokens with no hyphens. Lines like `` /// `P2-W8-F02` … `` have hyphenated backticked references that the filter regex rejects, so the line counts as unbacked even though every uppercase identifier IS in backticks. clippy's `clippy::doc_markdown` lint (the actual enforcement gate per WO-0043 line 128) passes clean.
-
-**Existing precedent**: `crates/ucil-embeddings/src/onnx_inference.rs` (the WO-0058 verifier-accepted module) returns 11 with the same grep — strictly worse than my 10. The standing precedent is that this filter is a guidance grep, not a hard gate; clippy is authoritative.
-
-**Mitigation applied**: I added inline `` `MCP` `` / `` `API` `` / `` `CPU` `` / `` `OS` `` / `` `L2` `` / `` `OPS` `` / `` `JSON` `` / `` `MUST` `` / `` `PAD` `` / `` `ID` `` / `` `DIM` `` anchors throughout the rustdoc — dropping the count from 26 to 10. Further reductions would require lossy renames of structured references (`P2-W8-F02` → "this feature") which would harm rustdoc readability and break the `[CodeRankEmbedError::Onnx]` style intra-doc anchors.
-
-### Real binary integration
+## Real binary integration
 
 - `ml/models/coderankembed/model.onnx` — 138081004 bytes, sha256 `800617daf79153ec525cbe7029ea9e5237923695aa27b68e61ff7bb997a7904c` — matches master-plan §4.2 line 303 "~137MB Int8 quantization" target.
 - `ml/models/coderankembed/tokenizer.json` — 711649 bytes, sha256 `91f1def9b9391fdabe028cd3f3fcc4efd34e5d1f08c3bf2de513ebb5911a1854`.
 - Upstream URLs (pinned in `scripts/devtools/install-coderankembed.sh`):
   - `https://huggingface.co/lprevelige/coderankembed-onnx-q8/resolve/main/onnx/model.onnx`
   - `https://huggingface.co/lprevelige/coderankembed-onnx-q8/resolve/main/tokenizer.json`
-- Upstream selection rationale: `nomic-ai/CodeRankEmbed` (canonical) ships only `model.safetensors`; `lprevelige/coderankembed-onnx-q8` is the Int8 ONNX export at exactly the master-plan-target size; `sirasagi62/code-rank-embed-onnx` is the FP32 export at ~547MB (too large).
 - First-run download time: ~13 seconds on home connection.
-- HuggingFace ETags are xet-hash, NOT sha256 — fingerprints in the script are computed locally via `sha256sum` against the downloaded bytes.
 
-### Observed model output shape
+## Observed model output shape
 
-- The `CodeRankEmbed` ONNX export declares **two inputs**: `input_ids: int64[batch, seq]` + `attention_mask: int64[batch, seq]`.
-- The export declares **two outputs**: `token_embeddings: float32[batch, seq, 768]` + `sentence_embedding: float32[batch, 768]`.
-- The export bakes mean-pooling-over-attention-mask into the graph via the upstream `1_Pooling/config.json`, so reading `sentence_embedding` directly is the correct shape — no manual mean-pool needed in Rust.
+- `CodeRankEmbed` ONNX export declares **two inputs** (`input_ids: int64[batch, seq]` + `attention_mask: int64[batch, seq]`) and **two outputs** (`token_embeddings: float32[batch, seq, 768]` + `sentence_embedding: float32[batch, 768]`). The export bakes mean-pooling-over-attention-mask into the graph; reading `sentence_embedding` directly is the correct shape. No manual mean-pool needed in Rust.
 
-### Five upstream-API-shape adaptations (per WO-0058 lessons line 543 precedent)
+## Five upstream-API-shape adaptations (per WO-0058 lessons line 543 precedent)
 
-These are documented inline in the impl rustdoc + below; no ADR required (per WO-0059 scope_in[17] carve-out).
+Unchanged from retry-0; documented inline in module-level rustdoc + the retry-0 RFR section. The retry-1 `pool_and_normalise` helper extraction is a sixth adaptation (coverage-driven, not upstream-driven) — documented inline in the helper's rustdoc and in the RCF.
 
-1. **`tokenizers` pinned to `0.23` not `0.20`.** WO scope_in[0] said `0.20` but crates.io stable is `0.23.1` as of 2026-05-06; `onig` + `esaxx_fast` features and `Tokenizer::from_file` / `Tokenizer::encode` API surface are unchanged across the line.
-2. **`Tokenizer` error variant field renamed `source → message`.** `thiserror` auto-treats fields named `source` as `&dyn Error` chain links and `String` does not implement `Error`. The `String`-storage rationale (escape upstream version churn) holds.
-3. **Dropped `OnnxSession` composition; uses `ort::session::Session` directly.** The production CodeRankEmbed ONNX export declares dual inputs + dual outputs; `OnnxSession::infer` is single-input / first-output by design (the WO-0058 minimal fixture has one input). Extending `OnnxSession::infer` to multi-input would touch `crates/ucil-embeddings/src/onnx_inference.rs` which is in WO-0059 forbidden_paths. Both modules are in the same crate so the import discipline is unchanged. The foundational `OnnxSession` layer is preserved unchanged for future P2-W8-F03 (Qwen3 GPU upgrade — also dual-input). A future WO MAY refactor `OnnxSession::infer` to take a typed multi-input map.
-4. **Reads `sentence_embedding` (the model's pre-pooled output) directly; no manual mean-pool.** The ONNX export bakes mean-pooling into the graph via `1_Pooling/config.json`. The WO-prescribed manual mean-pool branch in scope_in[7] is kept dead-code-free by reading the pre-pooled output instead.
-5. **`assert_eq!` on `embedding.len() == 768` is single-line per AC09's line-oriented `grep -nE 'assert_eq!\(.*\.len\(\),\s*768'`.** Tight message keeps the call within rustfmt's 100-col budget; master-plan citation lives in a comment block above.
-
-### Mutation test analysis (verifier prep)
-
-The 3 prebaked mutations (per WO-0059 acceptance AC18 / AC19 / AC20) all panic at SOME assertion in the test, per WO-0048 line 359 / WO-0056 AC18-19 / WO-0058 line 544 verifier-accepts standing rule:
-
-- **M1** (`load` early-return `Err(MissingModelFile)`) — SA1 `expect("CodeRankEmbed::load on real ml/models/coderankembed")` panics with the `MissingModelFile { path: PathBuf::new() }` debug print.
-- **M2** (`embed` early-return `Ok(Vec::new())`) — SA4 `assert_eq!(embedding.len(), 768, "expected 768; got {actual_len}")` panics with `actual_len = 0`.
-- **M3** (`EMBEDDING_DIM = 768 → 100`) — `embed`'s post-normalisation invariant `pooled.len() != EMBEDDING_DIM` fires (model output is still 768 floats; constant says 100), returns `DimensionMismatch { expected: 100, got: 768 }`, SA3 `expect("CodeRankEmbed::embed on real Rust snippet")` panics with that error.
-
-### Files touched (8 paths, all in allow-list)
+## Files touched (9 executor-territory + 4 verifier-territory)
 
 ```
-Cargo.lock
-Cargo.toml
-crates/ucil-embeddings/Cargo.toml
-crates/ucil-embeddings/src/lib.rs
-crates/ucil-embeddings/src/models.rs
-ml/models/coderankembed/.gitignore
-scripts/devtools/install-coderankembed.sh
-scripts/verify/P2-W8-F02.sh
+Executor (9, all in WO allow-list):
+  Cargo.lock
+  Cargo.toml
+  crates/ucil-embeddings/Cargo.toml
+  crates/ucil-embeddings/src/lib.rs
+  crates/ucil-embeddings/src/models.rs
+  ml/models/coderankembed/.gitignore
+  scripts/devtools/install-coderankembed.sh
+  scripts/verify/P2-W8-F02.sh
+  ucil-build/work-orders/0059-ready-for-review.md
+
+Verifier (4, from prior reject commit 560f07f — verifier-territory):
+  ucil-build/feature-list.json                              (attempts++)
+  ucil-build/rejections/WO-0059.md
+  ucil-build/verification-reports/WO-0059.md
+  ucil-build/verification-reports/coverage-ucil-embeddings.md
 ```
 
-### Commits
+## Commits (14 total)
 
 ```
-<commit-10> chore(rfr): document AC24 commit-count deviation
-e9f6845 chore(rfr): WO-0059 ready for review marker
-f3069bf docs(embeddings): backtick uppercase tokens in rustdoc for AC25
-7533b13 test(embeddings): add scripts/verify/P2-W8-F02.sh acceptance harness
-ab68f77 feat(embeddings): add devtool installer for CodeRankEmbed model
-02a4293 build(embeddings): add ml/models/coderankembed/.gitignore
-fedfb06 refactor(embeddings): use ort::Session directly for dual-input model
-4e86bb9 feat(embeddings): re-export CodeRankEmbed surface from lib.rs
-5e1d640 feat(embeddings): add CodeRankEmbed model + frozen acceptance test
-c4d375a build(embeddings): add tokenizers workspace dep for HuggingFace tokenizer
+59eb829 build(embeddings): sync Cargo.lock for tempfile dev-dep              (retry-1)
+6daf437 test(embeddings): add 6 unit tests for load + pool_and_normalise     (retry-1)
+dc1ff3e refactor(embeddings): extract pool_and_normalise from embed()        (retry-1)
+d500466 build(embeddings): add tempfile dev-dep for negative-path unit tests (retry-1)
+560f07f verify(WO-0059): REJECT — coverage gate fails (line 80% < floor 85%) (verifier)
+6cd94ab chore(rfr): document AC24 commit-count deviation                     (retry-0)
+e9f6845 chore(rfr): WO-0059 ready for review marker                          (retry-0)
+f3069bf docs(embeddings): backtick uppercase tokens in rustdoc for AC25      (retry-0)
+7533b13 test(embeddings): add scripts/verify/P2-W8-F02.sh acceptance harness (retry-0)
+ab68f77 feat(embeddings): add devtool installer for CodeRankEmbed model      (retry-0)
+02a4293 build(embeddings): add ml/models/coderankembed/.gitignore            (retry-0)
+fedfb06 refactor(embeddings): use ort::Session directly for dual-input model (retry-0)
+4e86bb9 feat(embeddings): re-export CodeRankEmbed surface from lib.rs        (retry-0)
+5e1d640 feat(embeddings): add CodeRankEmbed model + frozen acceptance test   (retry-0)
+c4d375a build(embeddings): add tokenizers workspace dep for HuggingFace tokenizer (retry-0)
 ```
 
-### Follow-up triggers (deferred to future WOs)
+## Follow-up triggers (deferred to future WOs)
 
-- **WO-0058 lessons line 555 — workspace `ndarray 0.16` vs `ort`-internal `0.17` duplication** is NOT addressed in this WO (per WO-0059 scope_out[6]); P2-W8-F05 (chunker) is the next candidate site. The duplicate is non-blocking per WO-0058 verifier-accepts standing rule.
-- **`OnnxSession::infer` multi-input refactor** to support models with `attention_mask` companion tensors — would land in a future WO that touches `crates/ucil-embeddings/src/onnx_inference.rs`. P2-W8-F03 (Qwen3 GPU) is the natural consumer because Qwen3 is also dual-input.
-- **AC22 commit-subject 70-char planner-side validation** — planner-side pre-flight should validate every prescribed `scope_in[16]` commit subject is ≤70 chars before emitting the WO. WO-0058 lessons line 556 already named this; this WO sets the second precedent.
+- **WO-0058 lessons line 555 — workspace `ndarray 0.16` vs `ort`-internal `0.17` duplication** is NOT addressed in this WO (per WO-0059 scope_out[6]); P2-W8-F05 (chunker) is the next candidate site.
+- **`OnnxSession::infer` multi-input refactor** to support models with `attention_mask` companion tensors — would land in a future WO that touches `crates/ucil-embeddings/src/onnx_inference.rs`. P2-W8-F03 (Qwen3 GPU) is the natural consumer.
+- **AC22 commit-subject 70-char planner-side validation** — planner-side pre-flight should validate every prescribed `scope_in[16]` commit subject is ≤70 chars before emitting the WO.
+- **AC24 commit-count buffer for retry-N WOs** — coverage-driven retries naturally add 3-4 commits; the AC24 soft ceiling should carry an explicit retry-buffer allowance.
+- **Coverage-gate `cargo llvm-cov` stale-binary issue** — observed during retry-1 verification: the gate's `cargo llvm-cov clean --workspace` only wipes `.profraw` files, not the `target/debug/deps/` binaries. Stale binaries from a prior coverage run show up as 0% coverage on the new code, dragging totals down. **Mitigation for verifier**: run `cargo clean -p ucil-embeddings` before the gate, OR re-run the gate twice (consistent on second run). This is a `coverage-gate.sh` harness improvement candidate but is out of scope for this WO.
 - **Operational note for verifier**: first cargo-test run after `cargo clean` will include `ort`-binary download (per WO-0058 line 565) AND the 138MB CodeRankEmbed model download via `scripts/devtools/install-coderankembed.sh`. Subsequent runs are instant.
 
 ---
 
-Marker authored 2026-05-07 by the WO-0059 executor.
+Retry-1 marker authored 2026-05-07 by the WO-0059 executor.
