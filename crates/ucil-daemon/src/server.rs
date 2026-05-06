@@ -3105,7 +3105,9 @@ impl crate::g2_search::G2SourceProvider for TestG2SourceProvider {
     }
 }
 
-/// Build the canned G2SourceFactory used by `test_search_code_fused`.
+/// Build the canned [`G2SourceFactory`] used by
+/// `test_search_code_fused`.
+///
 /// Returns three providers in `[Probe, Ripgrep, Lancedb]` order with
 /// the WO-0063 acceptance-criteria-prescribed canned hit sets:
 ///
@@ -3171,10 +3173,12 @@ fn build_test_g2_factory() -> std::sync::Arc<crate::g2_search::G2SourceFactory> 
     }))
 }
 
-/// Frozen acceptance selector for feature `P2-W7-F06` per
-/// `feature-list.json` entry `-p ucil-daemon server::test_search_code_
-/// fused`.  Per `DEC-0007` lives at MODULE ROOT — NOT wrapped inside
-/// `mod tests {}` — so the `cargo test` selector resolves directly.
+/// Frozen acceptance selector for feature `P2-W7-F06`.
+///
+/// Per `feature-list.json` entry `-p ucil-daemon
+/// server::test_search_code_fused`.  Per `DEC-0007` this lives at
+/// MODULE ROOT — NOT wrapped inside `mod tests {}` — so the
+/// `cargo test` selector resolves directly.
 ///
 /// Exercises the full `tools/call` dispatch for `search_code` against:
 ///
@@ -3199,6 +3203,11 @@ fn build_test_g2_factory() -> std::sync::Arc<crate::g2_search::G2SourceFactory> 
 ///    (Probe×2.0 wins on weight per WO-0056 line 525).
 /// 6. `per_source_ranks` provenance preserved: `[(Probe, 1),
 ///    (Ripgrep, 1)]` (multiset; order-insensitive).
+///
+/// # Panics
+///
+/// Panics on any failed sub-assertion — the panic message is
+/// operator-actionable (quotes the JSON content on failure).
 #[cfg(test)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::too_many_lines)]
@@ -3353,12 +3362,20 @@ pub async fn test_search_code_fused() {
     );
 }
 
-/// Negative path for `P2-W7-F06`: when no `G2SourceFactory` is attached
-/// (i.e. `McpServer::new()` or `McpServer::with_knowledge_graph(kg)`
-/// without a subsequent `.with_g2_sources(factory)` call), the
-/// `_meta.g2_fused` field MUST be absent while every legacy `_meta`
-/// field stays byte-identical per `DEC-0015` D1.  Proves the
-/// `Option<Arc<G2SourceFactory>>::None` path is the legacy-shape path.
+/// Negative path for `P2-W7-F06`: legacy preservation when the
+/// `G2SourceFactory` is absent.
+///
+/// When no factory is attached (i.e. [`McpServer::new()`] or
+/// [`McpServer::with_knowledge_graph`] without a subsequent
+/// `.with_g2_sources(factory)` call), the `_meta.g2_fused` field MUST
+/// be absent while every legacy `_meta` field stays byte-identical
+/// per `DEC-0015` D1.  Proves the `Option<Arc<G2SourceFactory>>::None`
+/// path is the legacy-shape path.
+///
+/// # Panics
+///
+/// Panics on any failed sub-assertion — the panic message quotes the
+/// response JSON content on failure.
 #[cfg(test)]
 #[tokio::test]
 pub async fn test_search_code_fused_no_factory() {
