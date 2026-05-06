@@ -19,12 +19,25 @@
 //! (`LanceDB` chunk indexer), `P2-W8-F05` (chunker that produces the
 //! `&str` snippet stream), and `P2-W8-F08` (`find_similar` MCP tool)
 //! all compose over this primitive.
+//!
+//! [`EmbeddingChunker`] (master-plan §12.2 line 1339, `P2-W8-F05`)
+//! is the real-tokenizer chunker downstream of
+//! [`ucil_treesitter::Chunker`].  It parses a source file via
+//! tree-sitter, emits AST-aware boundary chunks, then re-tokenizes
+//! each chunk with the real `HuggingFace` `BPE` tokenizer and
+//! enforces the master-plan-frozen [`MAX_CHUNK_TOKENS`] cap.
+//! Oversize chunks collapse to a signature-only fallback per the
+//! master-plan §12.2 line 1339 contract.  Consumer wiring is
+//! deferred to `P2-W8-F04` (`LanceDB` indexer) and `P2-W8-F08`
+//! (`find_similar` `MCP` tool).
 
 #![deny(warnings)]
 #![warn(clippy::all, clippy::pedantic, clippy::nursery)]
 #![deny(rustdoc::broken_intra_doc_links)]
 
+pub mod chunker;
 pub mod models;
 pub mod onnx_inference;
+pub use chunker::{EmbeddingChunk, EmbeddingChunker, EmbeddingChunkerError, MAX_CHUNK_TOKENS};
 pub use models::{CodeRankEmbed, CodeRankEmbedError, EMBEDDING_DIM};
 pub use onnx_inference::{OnnxSession, OnnxSessionError};
