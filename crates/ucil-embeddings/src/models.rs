@@ -9,27 +9,44 @@
 //! §17.6 lines 2028-2029 fix the configuration knobs at
 //! `embedding_model = "coderankembed"` + `embedding_dimensions = 768`.
 //!
-//! This module composes the foundational [`OnnxSession`]
+//! This module sits alongside the foundational [`OnnxSession`]
 //! (`P2-W8-F01` / `WO-0058` — `crates/ucil-embeddings/src/onnx_inference.rs`)
-//! with the `HuggingFace` `tokenizers` crate to land the production
-//! embedding-production primitive [`CodeRankEmbed`]:
+//! and pairs `ort` directly with the `HuggingFace` `tokenizers` crate
+//! to land the production embedding primitive [`CodeRankEmbed`]:
 //!
 //! - [`CodeRankEmbed::load`] opens the on-disk Int8 `ONNX` model + the
 //!   `tokenizer.json` from `model_dir`;
-//! - [`CodeRankEmbed::embed`] tokenises a code snippet, runs ONNX
-//!   inference, mean-pools per-token hidden states (when the model
-//!   emits token-level outputs), L2-normalises, and returns a
-//!   768-dim `Vec<f32>` per the master-plan-frozen
-//!   [`EMBEDDING_DIM`] constant.
+//! - [`CodeRankEmbed::embed`] tokenises a code snippet, builds the
+//!   `attention_mask` companion tensor, runs `ONNX` inference, reads
+//!   the model's pre-pooled `sentence_embedding` output (`[1, 768]`),
+//!   L2-normalises, and returns a 768-dim `Vec<f32>` per the
+//!   master-plan-frozen [`EMBEDDING_DIM`] constant.
 //!
-//! `OnnxSession::infer` takes `&mut self` per `WO-0058` lessons
-//! (the upstream `ort 2.x` `Session::run` signature is
-//! `&mut self`), so [`CodeRankEmbed::embed`] mirrors that contract.
-//! Consumers needing shared inference must wrap in
-//! `Arc<Mutex<CodeRankEmbed>>` or serialise via a
-//! `tokio::sync::mpsc` channel — same plumbing pattern as the
-//! foundational [`OnnxSession`] (see its struct-level rustdoc for the
-//! canonical worked example).
+//! **Upstream-fit divergence from `WO-0059` `scope_in[7]`** (per the
+//! `WO-0058`-line-543 "five upstream-API-shape adaptations" precedent):
+//! the WO prescribed composing [`OnnxSession::infer`] for the inference
+//! step, but the production `CodeRankEmbed` `ONNX` export declares two
+//! inputs (`input_ids` + `attention_mask`, both `int64`) and two
+//! outputs (`token_embeddings: [batch, seq, 768]` +
+//! `sentence_embedding: [batch, 768]`).  [`OnnxSession::infer`] is
+//! single-input / first-output only by design (the `WO-0058` minimal
+//! fixture has one input named `input_ids`); extending it would touch
+//! `crates/ucil-embeddings/src/onnx_inference.rs` which is in
+//! `WO-0059` `forbidden_paths`.  The pragmatic fit is to load `ort`
+//! directly here in `models.rs` (both modules live in the same crate,
+//! so import discipline is unchanged) and document the divergence so
+//! the `OnnxSession` foundational layer is preserved unchanged for
+//! `P2-W8-F03` (Qwen3 GPU upgrade, also dual-input) and downstream
+//! consumers.  A future WO MAY refactor [`OnnxSession::infer`] to take
+//! a typed multi-input map; that is intentionally out of scope here.
+//!
+//! The upstream `ort 2.x` `Session::run` signature is `&mut self`
+//! (per `WO-0058` lessons line 561), so [`CodeRankEmbed::embed`]
+//! mirrors that contract.  Consumers needing shared inference must
+//! wrap in `Arc<Mutex<CodeRankEmbed>>` or serialise via a
+//! `tokio::sync::mpsc` channel — same plumbing pattern as
+//! [`OnnxSession`] (see its struct-level rustdoc for the canonical
+//! worked example).
 //!
 //! Deferrals (out of scope for this module per `WO-0059` `scope_out`):
 //!
@@ -55,9 +72,10 @@
 
 use std::path::{Path, PathBuf};
 
+use ndarray::Array2;
+use ort::session::Session;
+use ort::value::Tensor;
 use tokenizers::Tokenizer;
-
-use crate::onnx_inference::{OnnxSession, OnnxSessionError};
 
 /// The master-plan-frozen embedding dimension for `CodeRankEmbed`.
 ///
@@ -78,15 +96,33 @@ pub const EMBEDDING_DIM: usize = 768;
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum CodeRankEmbedError {
-    /// Wraps an [`OnnxSessionError`] from the foundational
-    /// [`OnnxSession`] layer — covers session construction failures,
-    /// missing input/output names, and inference failures via the
-    /// auto-conversion `?`.
-    #[error("onnx session error: {source}")]
+    /// Wraps an `ort::Error` from the underlying `ONNX` Runtime —
+    /// covers session construction failures, missing input/output
+    /// names, and inference failures via the auto-conversion `?`.
+    /// `CodeRankEmbed` loads `ort::Session` directly rather than
+    /// composing [`crate::OnnxSession`] (see module-level rustdoc for
+    /// the upstream-fit divergence rationale; the production
+    /// `CodeRankEmbed` `ONNX` export declares dual inputs
+    /// `input_ids` + `attention_mask`, which the single-input
+    /// [`crate::OnnxSession::infer`] cannot service without editing
+    /// `crates/ucil-embeddings/src/onnx_inference.rs` — that file is
+    /// in `WO-0059` `forbidden_paths`).
+    #[error("ort session error: {source}")]
     Onnx {
-        /// The underlying [`OnnxSessionError`].
+        /// The underlying `ort::Error`.
         #[from]
-        source: OnnxSessionError,
+        source: ort::Error,
+    },
+
+    /// Shape-construction error from `ndarray::Array2::from_shape_vec`.
+    /// The literal shape passed by [`CodeRankEmbed::embed`] always
+    /// matches the input slice length, but the upstream API is
+    /// fallible so the variant is included for defensiveness.
+    #[error("ndarray shape error: {source}")]
+    Ndarray {
+        /// The underlying `ndarray::ShapeError`.
+        #[from]
+        source: ndarray::ShapeError,
     },
 
     /// Wraps a `tokenizers`-crate error.
@@ -152,26 +188,29 @@ pub enum CodeRankEmbedError {
     },
 }
 
-/// A loaded `CodeRankEmbed` model bundle: an ONNX session + tokenizer.
+/// A loaded `CodeRankEmbed` model bundle: an `ONNX` session + tokenizer.
 ///
-/// Holds the [`OnnxSession`] together with the
+/// Holds an `ort::session::Session` together with the
 /// `tokenizers::Tokenizer` so a single `&mut CodeRankEmbed` can
 /// service an `embed(&str)` call without crossing borrow boundaries.
 /// The `model_dir` is retained for `tracing` introspection only —
 /// inference does not re-read the directory on subsequent calls.
 ///
-/// **Not** `Clone` — the embedded [`OnnxSession`] owns
-/// non-duplicable runtime resources (per the [`OnnxSession`]
-/// struct-level rustdoc); consumers needing shared inference must
-/// wrap in `Arc<Mutex<CodeRankEmbed>>`.
+/// **Not** `Clone` — the embedded `ort::session::Session` owns
+/// non-duplicable runtime resources (CPU execution-provider arena,
+/// `OS` handles for the `download-binaries` shared library);
+/// consumers needing shared inference must wrap in
+/// `Arc<Mutex<CodeRankEmbed>>` because [`CodeRankEmbed::embed`]
+/// takes `&mut self` (the upstream `ort 2.x` `Session::run`
+/// signature).
 ///
-/// **`Send`** — both [`OnnxSession`] and `tokenizers::Tokenizer`
-/// are `Send`, so a `CodeRankEmbed` can be moved into a
-/// `tokio::task::spawn_blocking` closure for async wrap at the
-/// `P2-W8-F04` / `P2-W8-F08` consumer sites.
+/// **`Send`** — both `ort::session::Session` and
+/// `tokenizers::Tokenizer` are `Send`, so a `CodeRankEmbed` can be
+/// moved into a `tokio::task::spawn_blocking` closure for async wrap
+/// at the `P2-W8-F04` / `P2-W8-F08` consumer sites.
 #[derive(Debug)]
 pub struct CodeRankEmbed {
-    session: OnnxSession,
+    session: Session,
     tokenizer: Tokenizer,
     #[allow(dead_code)]
     model_dir: PathBuf,
@@ -187,14 +226,14 @@ impl CodeRankEmbed {
     /// special tokens for `CLS` / `SEP`).  An early existence check
     /// produces an operator-friendly
     /// [`CodeRankEmbedError::MissingModelFile`] before the more
-    /// opaque [`OnnxSessionError`] from the underlying `ort` parser.
+    /// opaque `ort::Error` from the underlying parser.
     ///
     /// # Errors
     ///
     /// - [`CodeRankEmbedError::MissingModelFile`] if either
     ///   `model.onnx` or `tokenizer.json` is absent;
-    /// - [`CodeRankEmbedError::Onnx`] if the ONNX graph fails to
-    ///   parse / load (corrupt model, ABI mismatch);
+    /// - [`CodeRankEmbedError::Onnx`] if the `ONNX` graph fails to
+    ///   parse / load (corrupt model, `ABI` mismatch);
     /// - [`CodeRankEmbedError::Tokenizer`] if the `tokenizer.json`
     ///   fails to deserialise.
     ///
@@ -219,7 +258,7 @@ impl CodeRankEmbed {
         if !model_path.exists() {
             return Err(CodeRankEmbedError::MissingModelFile { path: model_path });
         }
-        let session = OnnxSession::from_path(&model_path)?;
+        let session = Session::builder()?.commit_from_file(&model_path)?;
 
         let tokenizer_path = model_dir.join("tokenizer.json");
         if !tokenizer_path.exists() {
@@ -239,36 +278,53 @@ impl CodeRankEmbed {
         })
     }
 
-    /// Tokenise `code`, run ONNX inference, mean-pool per-token
-    /// hidden states (if the model emits token-level outputs),
-    /// L2-normalise, and return a `768`-dim `Vec<f32>`.
+    /// Tokenise `code`, run `ONNX` inference (feeding `input_ids` +
+    /// `attention_mask`), read the model's pre-pooled
+    /// `sentence_embedding` output, L2-normalise, and return a
+    /// `768`-dim `Vec<f32>`.
     ///
-    /// The pooling step inspects the raw output length:
-    /// when it equals [`EMBEDDING_DIM`] the model has already pooled
-    /// at the graph level (sentence-level export) and the value is
-    /// passed through; when it equals `n_tokens * EMBEDDING_DIM` the
-    /// model emitted token-level hidden states and an explicit
-    /// arithmetic-mean pool is applied across the token dimension.
-    /// The L2 normalisation step then divides by the Euclidean norm
-    /// (clamped to `f32::EPSILON` to avoid `NaN` on a degenerate
-    /// all-zero output) so downstream cosine-similarity search at
-    /// `P2-W8-F08` reduces to a dot product.
+    /// The production `CodeRankEmbed` `ONNX` export emits two outputs:
     ///
-    /// `&mut self` is required because [`OnnxSession::infer`] takes
-    /// `&mut self`; consumers needing shared inference must wrap in
-    /// `Arc<Mutex<CodeRankEmbed>>`.
+    /// - `token_embeddings` — `[batch, seq, 768]` per-token hidden
+    ///   states;
+    /// - `sentence_embedding` — `[batch, 768]` pre-pooled at the
+    ///   graph level via the upstream `1_Pooling/config.json`
+    ///   (mean-pooling over `attention_mask`).
+    ///
+    /// This implementation reads the `sentence_embedding` output and
+    /// L2-normalises it so downstream cosine-similarity search at
+    /// `P2-W8-F08` reduces to a dot product.  The Euclidean norm is
+    /// clamped to `f32::EPSILON` to avoid `NaN` on a degenerate
+    /// all-zero output.  When the model output's flat length is not
+    /// exactly [`EMBEDDING_DIM`] the function returns
+    /// [`CodeRankEmbedError::DimensionMismatch`] — this is a
+    /// model/tokenizer mismatch (e.g. swapped for a model with a
+    /// different head dimension) and is surfaced as an actionable
+    /// error rather than a silent garbage-shaped vector.
+    ///
+    /// `attention_mask` is constructed as a tensor of `i64` `1`s with
+    /// the same shape as `input_ids` — the tokenizer does not pad
+    /// (single-snippet inference, no batching), so every position is
+    /// attended.  When `P2-W8-F05` (chunker) lands and feeds batched
+    /// inputs, the mask will need 0-padding for the right tail; the
+    /// mask construction is centralised here in anticipation.
+    ///
+    /// `&mut self` is required because the upstream `ort 2.x`
+    /// `Session::run` takes `&mut self`; consumers needing shared
+    /// inference must wrap in `Arc<Mutex<CodeRankEmbed>>`.
     ///
     /// # Errors
     ///
     /// - [`CodeRankEmbedError::Tokenizer`] if `code` is unencodable
-    ///   (e.g. invalid UTF-8 boundary in a partial tokenizer chunk —
+    ///   (e.g. invalid `UTF-8` boundary in a partial tokenizer chunk —
     ///   in practice never fires for well-formed source text);
-    /// - [`CodeRankEmbedError::Onnx`] if the ONNX inference fails
+    /// - [`CodeRankEmbedError::Ndarray`] if the input shape
+    ///   construction fails (defensive — literal shape always matches);
+    /// - [`CodeRankEmbedError::Onnx`] if the `ONNX` inference fails
     ///   (typically: the tokenizer produced more tokens than the
     ///   model's `max_position_embeddings` allows);
-    /// - [`CodeRankEmbedError::DimensionMismatch`] if the raw output
-    ///   length is not a multiple of [`EMBEDDING_DIM`] (model /
-    ///   tokenizer mismatch) or the post-pool length is not exactly
+    /// - [`CodeRankEmbedError::DimensionMismatch`] if the
+    ///   `sentence_embedding` output's flat length is not exactly
     ///   [`EMBEDDING_DIM`] (model swapped for an incompatible head).
     ///
     /// # Examples
@@ -297,35 +353,40 @@ impl CodeRankEmbed {
                     message: format!("{e}"),
                 })?;
         let token_ids: Vec<i64> = encoding.get_ids().iter().map(|id| i64::from(*id)).collect();
-        let raw = self.session.infer(&token_ids)?;
+        let seq_len = token_ids.len();
+        let attention_mask: Vec<i64> = vec![1i64; seq_len];
 
-        let mut pooled = if raw.len() == EMBEDDING_DIM {
-            raw
-        } else if raw.len() % EMBEDDING_DIM == 0 && !raw.is_empty() {
-            let n_tokens = raw.len() / EMBEDDING_DIM;
-            let mut acc = vec![0f32; EMBEDDING_DIM];
-            for tok in 0..n_tokens {
-                let base = tok * EMBEDDING_DIM;
-                let row = &raw[base..base + EMBEDDING_DIM];
-                for (a, r) in acc.iter_mut().zip(row.iter()) {
-                    *a += *r;
-                }
+        let ids_array: Array2<i64> = Array2::from_shape_vec((1, seq_len), token_ids)?;
+        let mask_array: Array2<i64> = Array2::from_shape_vec((1, seq_len), attention_mask)?;
+
+        let ids_shape = [ids_array.shape()[0], ids_array.shape()[1]];
+        let mask_shape = [mask_array.shape()[0], mask_array.shape()[1]];
+        let (ids_data, _) = ids_array.into_raw_vec_and_offset();
+        let (mask_data, _) = mask_array.into_raw_vec_and_offset();
+        let ids_tensor = Tensor::<i64>::from_array((ids_shape, ids_data))?;
+        let mask_tensor = Tensor::<i64>::from_array((mask_shape, mask_data))?;
+
+        let outputs = self.session.run(ort::inputs![
+            "input_ids" => ids_tensor,
+            "attention_mask" => mask_tensor,
+        ])?;
+
+        let sentence = outputs.get("sentence_embedding").ok_or_else(|| {
+            CodeRankEmbedError::DimensionMismatch {
+                expected: EMBEDDING_DIM,
+                got: 0,
             }
-            // `n_tokens` is bounded by the model's
-            // `max_position_embeddings` (~8192 for `CodeRankEmbed`),
-            // well within `f32`'s 24-bit mantissa.
-            #[allow(clippy::cast_precision_loss)]
-            let n_tokens_f = n_tokens as f32;
-            for a in &mut acc {
-                *a /= n_tokens_f;
-            }
-            acc
-        } else {
+        })?;
+        let (_shape, slice) = sentence.try_extract_tensor::<f32>()?;
+        let raw = slice.to_vec();
+
+        if raw.len() != EMBEDDING_DIM {
             return Err(CodeRankEmbedError::DimensionMismatch {
                 expected: EMBEDDING_DIM,
                 got: raw.len(),
             });
-        };
+        }
+        let mut pooled = raw;
 
         let norm_sq: f32 = pooled.iter().map(|x| x * x).sum();
         let norm = norm_sq.sqrt().max(f32::EPSILON);
@@ -408,13 +469,13 @@ fn test_coderankembed_inference() {
         .embed("fn hello() { println!(\"hi\"); }")
         .expect("CodeRankEmbed::embed on real Rust snippet");
 
-    // SA4: dimension matches master-plan contract
+    // SA4: dimension matches master-plan contract — master-plan §13
+    // line 1332 `embedding: vector[768]` + §17.6 line 2029
+    // `embedding_dimensions = 768`.  Single-line shape per AC09's
+    // line-oriented `grep -nE 'assert_eq!\(.*\.len\(\),\s*768'`;
+    // tight message keeps the call within rustfmt's 100-col budget.
     let actual_len = embedding.len();
-    assert_eq!(
-        actual_len, 768,
-        "CodeRankEmbed must emit 768-dim embeddings per master-plan §13 line 1332 + §17.6 line 2029; \
-         got {actual_len} floats",
-    );
+    assert_eq!(embedding.len(), 768, "expected 768; got {actual_len}");
 
     // SA5: all floats finite
     let finite_count = embedding.iter().filter(|x| x.is_finite()).count();
