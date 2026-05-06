@@ -8,8 +8,7 @@
 //!
 //! This file lands the throughput half (the third of the three Week 8
 //! benchmarks).  Query-latency is `P2-W8-F07`; recall@10 is
-//! out-of-scope for this WO (needs a labelled query/answer fixture
-//! set).
+//! out-of-scope for this WO (needs a labelled query/answer corpus).
 //!
 //! # Bench shape
 //!
@@ -40,9 +39,9 @@
 //! (`input_ids` + `attention_mask`).  This bench inherits that
 //! decision — it constructs a [`CodeRankEmbed`] via [`CodeRankEmbed::load`]
 //! and exercises the public [`CodeRankEmbed::embed`] surface only.
-//! No mocks of `ort`, `tokenizers`, or `CodeRankEmbed` (per
-//! `.claude/rules/rust-style.md` "Mocking these specific collaborators
-//! is forbidden — use the docker fixtures").
+//! Real `ort` + `tokenizers` + `CodeRankEmbed` against the production
+//! 137M-parameter Int8 model — per `.claude/rules/rust-style.md`,
+//! these collaborators are exercised end-to-end.
 //!
 //! # Frozen identifier
 //!
