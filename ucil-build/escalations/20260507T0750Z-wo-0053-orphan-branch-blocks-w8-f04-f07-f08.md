@@ -131,4 +131,4 @@ main:crates/ucil-daemon/src/storage.rs`.
   to expect when merging the orphan branch).
 - Phase-log lessons WO-0062 line 744 (orphan-branch carryover note).
 
-resolved: false
+resolved: true

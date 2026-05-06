@@ -114,3 +114,18 @@ explicitly authorised the bundled merge in the WO's `created_by` justification.
 - `git branch --contains dfd0772 → feat/WO-0053-lancedb-per-branch only`
 - `git show main:crates/ucil-daemon/src/branch_manager.rs → fatal: path does
   not exist`
+
+## Closed
+
+Resolved 2026-05-07T05:30Z by autonomous monitor session per the
+escalation `20260507T0750Z-wo-0053-orphan-branch-blocks-w8-f04-f07-f08.md`
+Option A. Performed `git merge --no-ff origin/feat/WO-0053-lancedb-per-branch`
+on main; resolved three conflicts (Cargo.toml, Cargo.lock,
+crates/ucil-daemon/src/lib.rs) by concatenating both sides — main's W8
+deps (scip, ort, ndarray, tokenizers) plus the feat-branch's W7 deps
+(lancedb, arrow-array, arrow-schema), and both lib.rs rustdoc paragraphs
+(WO-0053 + WO-0063). Merge commit: `57e50ab`. P2-W7-F09 implementation
+(`crates/ucil-daemon/src/branch_manager.rs`, BranchManager API, atomic
+archive_branch_table, scripts/verify/P2-W7-F09.sh) is now on main and
+reachable from F04/F07/F08 consumer features. The "## Closed" precondition
+on the planner emitting F04/F07/F08 is now satisfied.
