@@ -1468,10 +1468,10 @@
       "dependencies": [
         "P0-W1-F01"
       ],
-      "passes": false,
-      "last_verified_ts": null,
-      "last_verified_by": null,
-      "last_verified_commit": null,
+      "passes": true,
+      "last_verified_ts": "2026-05-06T17:57:31Z",
+      "last_verified_by": "verifier-2c4716ac-ce0b-4a4f-8f3c-99d8866d58e7",
+      "last_verified_commit": "e25648ead0ba96ef0320d65a96c2ae3edcbd4b11",
       "attempts": 0,
       "blocked_reason": null
     },
