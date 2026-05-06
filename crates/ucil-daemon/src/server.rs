@@ -3065,6 +3065,346 @@ async fn test_search_code_basic() {
     );
 }
 
+// ── Module-level G2-fused acceptance test ───────────────────────────────────
+//
+// Frozen selectors per `feature-list.json:P2-W7-F06.acceptance_tests[0]
+// .selector = "-p ucil-daemon server::test_search_code_fused"`.  Per
+// `DEC-0007` the test lives at MODULE ROOT (NOT inside a `mod tests`
+// block) so the nextest selector resolves directly.
+
+/// `TestG2SourceProvider` — a UCIL-internal trait substitute used by
+/// the frozen `test_search_code_fused` acceptance test.  Per `DEC-0008`
+/// §4 / WO-0048 lessons line 363 this is NOT a critical-dep
+/// substitute: [`G2SourceProvider`] is a UCIL-owned seam, and the
+/// acceptance test exercises the [`run_g2_fan_out`] /
+/// [`fuse_g2_rrf`] integration logic against canned per-source
+/// inputs to prove the handler wires the fusion math correctly.
+#[cfg(test)]
+struct TestG2SourceProvider {
+    source: ucil_core::G2Source,
+    canned_hits: Vec<ucil_core::G2Hit>,
+}
+
+#[cfg(test)]
+#[async_trait::async_trait]
+impl crate::g2_search::G2SourceProvider for TestG2SourceProvider {
+    fn source(&self) -> ucil_core::G2Source {
+        self.source
+    }
+
+    async fn execute(
+        &self,
+        _query: &str,
+        _root: &Path,
+        _max_results: usize,
+    ) -> Result<ucil_core::G2SourceResults, crate::g2_search::G2SearchError> {
+        Ok(ucil_core::G2SourceResults {
+            source: self.source,
+            hits: self.canned_hits.clone(),
+        })
+    }
+}
+
+/// Build the canned G2SourceFactory used by `test_search_code_fused`.
+/// Returns three providers in `[Probe, Ripgrep, Lancedb]` order with
+/// the WO-0063 acceptance-criteria-prescribed canned hit sets:
+///
+/// * Probe — `[(util.rs, 10, 20, "fn foo() // probe"),
+///            (util.rs, 30, 40, "fn baz() // probe")]`
+/// * Ripgrep — `[(util.rs, 10, 20, "fn foo() // ripgrep"),
+///              (other.rs, 5, 5, "// other ripgrep")]`
+/// * Lancedb — `[]` (per `DEC-0015` D3 default-empty path)
+#[cfg(test)]
+fn build_test_g2_factory() -> std::sync::Arc<crate::g2_search::G2SourceFactory> {
+    use ucil_core::{G2Hit, G2Source};
+
+    let probe_hits = vec![
+        G2Hit {
+            file_path: PathBuf::from("util.rs"),
+            start_line: 10,
+            end_line: 20,
+            snippet: "fn foo() // probe".to_owned(),
+            score: 0.95,
+        },
+        G2Hit {
+            file_path: PathBuf::from("util.rs"),
+            start_line: 30,
+            end_line: 40,
+            snippet: "fn baz() // probe".to_owned(),
+            score: 0.80,
+        },
+    ];
+    let ripgrep_hits = vec![
+        G2Hit {
+            file_path: PathBuf::from("util.rs"),
+            start_line: 10,
+            end_line: 20,
+            snippet: "fn foo() // ripgrep".to_owned(),
+            score: 0.85,
+        },
+        G2Hit {
+            file_path: PathBuf::from("other.rs"),
+            start_line: 5,
+            end_line: 5,
+            snippet: "// other ripgrep".to_owned(),
+            score: 0.60,
+        },
+    ];
+
+    std::sync::Arc::new(crate::g2_search::G2SourceFactory::from_builder(move || {
+        let probe_clone = probe_hits.clone();
+        let ripgrep_clone = ripgrep_hits.clone();
+        vec![
+            Box::new(TestG2SourceProvider {
+                source: G2Source::Probe,
+                canned_hits: probe_clone,
+            }),
+            Box::new(TestG2SourceProvider {
+                source: G2Source::Ripgrep,
+                canned_hits: ripgrep_clone,
+            }),
+            Box::new(TestG2SourceProvider {
+                source: G2Source::Lancedb,
+                canned_hits: Vec::new(),
+            }),
+        ]
+    }))
+}
+
+/// Frozen acceptance selector for feature `P2-W7-F06` per
+/// `feature-list.json` entry `-p ucil-daemon server::test_search_code_
+/// fused`.  Per `DEC-0007` lives at MODULE ROOT — NOT wrapped inside
+/// `mod tests {}` — so the `cargo test` selector resolves directly.
+///
+/// Exercises the full `tools/call` dispatch for `search_code` against:
+///
+/// * A real `KnowledgeGraph::open` + `upsert_entity` on a temp `SQLite`
+///   file (the same setup `test_search_code_basic` uses).
+/// * A real in-process `text_search` walker pass on the same temp
+///   project.
+/// * A canned `G2SourceFactory` whose three providers are
+///   [`TestG2SourceProvider`] impls returning the WO-0063
+///   acceptance-criteria-prescribed canned hit sets per source.
+///
+/// The handler runs the legacy `P1-W5-F09` KG+ripgrep merge AND the
+/// new G2 fan-out + RRF fusion in the same call; the test asserts:
+///
+/// 1. JSON-RPC envelope is well-formed.
+/// 2. Every legacy `_meta` field from `P1-W5-F09` is preserved
+///    byte-shape (per `DEC-0015` D1 — additive evolution).
+/// 3. `_meta.g2_fused.hits` is a JSON array of length 3.
+/// 4. RRF ranking applied: `(util.rs, 10, 20)` is `hits[0]` with
+///    `contributing_sources == [Probe, Ripgrep]`.
+/// 5. Snippet selection: `hits[0].snippet == "fn foo() // probe"`
+///    (Probe×2.0 wins on weight per WO-0056 line 525).
+/// 6. `per_source_ranks` provenance preserved: `[(Probe, 1),
+///    (Ripgrep, 1)]` (multiset; order-insensitive).
+#[cfg(test)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::too_many_lines)]
+pub async fn test_search_code_fused() {
+    let (_legacy_server, kg, _kg_tmp, _project_tmp, project_root, _util_abs) =
+        build_search_code_fixture();
+    let factory = build_test_g2_factory();
+    let server = McpServer::with_knowledge_graph(Arc::clone(&kg)).with_g2_sources(factory);
+
+    let request = json!({
+        "jsonrpc": JSONRPC_VERSION,
+        "id": 301,
+        "method": "tools/call",
+        "params": {
+            "name": "search_code",
+            "arguments": {
+                "query": "banana_split",
+                "root": project_root,
+                "max_results": 50
+            }
+        }
+    })
+    .to_string();
+    let response = server.handle_line(&request).await;
+
+    // ── Sub-assertion 1: envelope well-formed ──────────────────────
+    assert_eq!(
+        response.get("jsonrpc").and_then(Value::as_str),
+        Some(JSONRPC_VERSION),
+        "(1) response must carry jsonrpc == \"2.0\": {response}"
+    );
+    assert_eq!(
+        response.get("id").and_then(Value::as_i64),
+        Some(301),
+        "(1) response id must echo 301: {response}"
+    );
+    assert!(
+        response.get("error").is_none(),
+        "(1) response must not carry an error envelope: {response}"
+    );
+    assert_eq!(
+        response.pointer("/result/isError").and_then(Value::as_bool),
+        Some(false),
+        "(1) result.isError must be false on the happy path: {response}"
+    );
+
+    let meta = response
+        .pointer("/result/_meta")
+        .expect("(1) response must carry result._meta");
+
+    // ── Sub-assertion 2: legacy fields preserved ───────────────────
+    assert_eq!(
+        meta.get("tool").and_then(Value::as_str),
+        Some("search_code"),
+        "(2) _meta.tool must be \"search_code\": {response}"
+    );
+    assert_eq!(
+        meta.get("source").and_then(Value::as_str),
+        Some("tree-sitter+ripgrep"),
+        "(2) _meta.source must be \"tree-sitter+ripgrep\": {response}"
+    );
+    assert!(
+        meta.get("symbol_match_count")
+            .and_then(Value::as_i64)
+            .is_some(),
+        "(2) _meta.symbol_match_count must be a JSON number: {response}"
+    );
+    assert!(
+        meta.get("text_match_count")
+            .and_then(Value::as_i64)
+            .is_some(),
+        "(2) _meta.text_match_count must be a JSON number: {response}"
+    );
+    assert!(
+        meta.get("results").and_then(Value::as_array).is_some(),
+        "(2) _meta.results must be a JSON array: {response}"
+    );
+
+    // ── Sub-assertion 3: g2_fused present ──────────────────────────
+    let fused = meta
+        .get("g2_fused")
+        .expect("(3) _meta.g2_fused must be present when factory is attached");
+    let fused_hits = fused
+        .get("hits")
+        .and_then(Value::as_array)
+        .expect("(3) _meta.g2_fused.hits must be a JSON array");
+    assert_eq!(
+        fused_hits.len(),
+        3,
+        "(3) _meta.g2_fused.hits must have 3 entries (Probe×2 + Ripgrep×2 \
+         merge to 3 unique fused hits — (util.rs, 10, 20) Probe+Ripgrep, \
+         (util.rs, 30, 40) Probe-only, (other.rs, 5, 5) Ripgrep-only); \
+         got {} entries: {fused:?}",
+        fused_hits.len(),
+    );
+
+    // ── Sub-assertion 4: RRF ranking applied ───────────────────────
+    let top = &fused_hits[0];
+    assert_eq!(
+        top.get("file_path").and_then(Value::as_str),
+        Some("util.rs"),
+        "(4) hits[0].file_path must be \"util.rs\"; got {top:?}"
+    );
+    assert_eq!(
+        top.get("start_line").and_then(Value::as_u64),
+        Some(10),
+        "(4) hits[0].start_line must be 10; got {top:?}"
+    );
+    let contributing = top
+        .get("contributing_sources")
+        .and_then(Value::as_array)
+        .expect("(4) hits[0].contributing_sources must be a JSON array");
+    let contrib_strs: Vec<&str> = contributing.iter().filter_map(Value::as_str).collect();
+    assert_eq!(
+        contrib_strs,
+        vec!["Probe", "Ripgrep"],
+        "(4) hits[0].contributing_sources must be [\"Probe\", \"Ripgrep\"] \
+         (descending rrf_weight per WO-0056 lines 286-296); got {contrib_strs:?} \
+         — full hits[0]={top:?}"
+    );
+
+    // ── Sub-assertion 5: snippet selection ────────────────────────
+    assert_eq!(
+        top.get("snippet").and_then(Value::as_str),
+        Some("fn foo() // probe"),
+        "(5) hits[0].snippet must be \"fn foo() // probe\" (Probe×2.0 \
+         wins on weight per WO-0056 line 525); got {top:?}"
+    );
+
+    // ── Sub-assertion 6: per_source_ranks captured ────────────────
+    let per_source_ranks = top
+        .get("per_source_ranks")
+        .and_then(Value::as_array)
+        .expect("(6) hits[0].per_source_ranks must be a JSON array");
+    let mut rank_pairs: Vec<(String, u64)> = per_source_ranks
+        .iter()
+        .filter_map(|v| {
+            let arr = v.as_array()?;
+            let src = arr.first()?.as_str()?.to_owned();
+            let rank = arr.get(1)?.as_u64()?;
+            Some((src, rank))
+        })
+        .collect();
+    rank_pairs.sort();
+    let mut expected = vec![("Probe".to_owned(), 1_u64), ("Ripgrep".to_owned(), 1_u64)];
+    expected.sort();
+    assert_eq!(
+        rank_pairs, expected,
+        "(6) hits[0].per_source_ranks must contain {{(Probe, 1), \
+         (Ripgrep, 1)}} as a multiset; got {rank_pairs:?} — full \
+         hits[0]={top:?}"
+    );
+}
+
+/// Negative path for `P2-W7-F06`: when no `G2SourceFactory` is attached
+/// (i.e. `McpServer::new()` or `McpServer::with_knowledge_graph(kg)`
+/// without a subsequent `.with_g2_sources(factory)` call), the
+/// `_meta.g2_fused` field MUST be absent while every legacy `_meta`
+/// field stays byte-identical per `DEC-0015` D1.  Proves the
+/// `Option<Arc<G2SourceFactory>>::None` path is the legacy-shape path.
+#[cfg(test)]
+#[tokio::test]
+pub async fn test_search_code_fused_no_factory() {
+    let (server, _kg, _kg_tmp, _project_tmp, project_root, _util_abs) = build_search_code_fixture();
+
+    let request = json!({
+        "jsonrpc": JSONRPC_VERSION,
+        "id": 302,
+        "method": "tools/call",
+        "params": {
+            "name": "search_code",
+            "arguments": {
+                "query": "banana_split",
+                "root": project_root,
+                "max_results": 50
+            }
+        }
+    })
+    .to_string();
+    let response = server.handle_line(&request).await;
+
+    let meta = response
+        .pointer("/result/_meta")
+        .expect("response must carry result._meta");
+    assert!(
+        meta.get("g2_fused").is_none(),
+        "_meta.g2_fused must be ABSENT when no G2SourceFactory is \
+         attached (the Option::None path is the legacy-shape path per \
+         DEC-0015 D1); got {response}"
+    );
+    assert_eq!(
+        meta.get("tool").and_then(Value::as_str),
+        Some("search_code"),
+        "legacy _meta.tool must be preserved: {response}"
+    );
+    assert_eq!(
+        meta.get("source").and_then(Value::as_str),
+        Some("tree-sitter+ripgrep"),
+        "legacy _meta.source must be preserved: {response}"
+    );
+    assert!(
+        meta.get("results").and_then(Value::as_array).is_some(),
+        "legacy _meta.results array must be preserved: {response}"
+    );
+}
+
 /// Negative path: `arguments.query` is an empty string — the handler
 /// must return a JSON-RPC error envelope with `code == -32602` (Invalid
 /// params), per WO-0035 `scope_in` bullet 6.  Empty queries would match

@@ -51,6 +51,7 @@
 //! * WO-0056 — the canonical RRF math via [`ucil_core::fuse_g2_rrf`].
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use thiserror::Error;
@@ -492,32 +493,66 @@ impl G2SourceProvider for LancedbProvider {
 
 // ── Factory ──────────────────────────────────────────────────────────────────
 
+/// Type alias for the builder closure stored inside [`G2SourceFactory`].
+type BuilderFn =
+    dyn Fn() -> Vec<Box<dyn G2SourceProvider + Send + Sync + 'static>> + Send + Sync + 'static;
+
 /// Builds the three Phase-2 G2 providers in `[Probe, Ripgrep, Lancedb]`
 /// order on every call.
 ///
-/// Holds two `PathBuf`s and an `npx`-cold-cache timeout — cheap to
-/// `Clone` so the [`crate::McpServer`] holding an `Arc<Self>` stays
-/// `Clone` per WO-0049 lessons.
-#[derive(Debug, Clone)]
+/// Wraps a builder closure inside an `Arc` so the factory is cheap to
+/// `Clone` — the [`crate::McpServer`] holding an `Arc<Self>` stays
+/// `Clone` per WO-0049 lessons line 12.  The closure abstraction also
+/// gives `#[cfg(test)]` callers a clean substitution seam via
+/// [`Self::from_builder`] without touching the production codepath.
+#[derive(Clone)]
 pub struct G2SourceFactory {
-    probe_manifest_path: PathBuf,
-    vectors_dir: PathBuf,
-    probe_timeout_ms: u64,
+    builder: Arc<BuilderFn>,
+}
+
+impl std::fmt::Debug for G2SourceFactory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("G2SourceFactory")
+            .field(
+                "builder",
+                &"<Arc<dyn Fn() -> Vec<Box<dyn G2SourceProvider>>>>",
+            )
+            .finish()
+    }
 }
 
 impl G2SourceFactory {
-    /// Construct a new factory.  `probe_timeout_ms` is the per-call
-    /// budget threaded through to [`ProbeProvider::new`].
+    /// Construct a new factory backed by the production
+    /// `[Probe, Ripgrep, Lancedb]` provider trio.  `probe_timeout_ms`
+    /// is the per-call budget threaded through to [`ProbeProvider::new`].
     #[must_use]
-    pub const fn new(
-        probe_manifest_path: PathBuf,
-        vectors_dir: PathBuf,
-        probe_timeout_ms: u64,
-    ) -> Self {
+    pub fn new(probe_manifest_path: PathBuf, vectors_dir: PathBuf, probe_timeout_ms: u64) -> Self {
         Self {
-            probe_manifest_path,
-            vectors_dir,
-            probe_timeout_ms,
+            builder: Arc::new(move || {
+                vec![
+                    Box::new(ProbeProvider::new(
+                        probe_manifest_path.clone(),
+                        probe_timeout_ms,
+                    )),
+                    Box::new(RipgrepProvider::new()),
+                    Box::new(LancedbProvider::new(vectors_dir.clone())),
+                ]
+            }),
+        }
+    }
+
+    /// Construct a factory whose `build()` is fully delegated to a
+    /// caller-supplied closure.  Crate-private substitution seam used
+    /// by the frozen acceptance test in `server.rs` to inject
+    /// `TestG2SourceProvider` impls — per `DEC-0008` §4 these are
+    /// UCIL-owned trait substitutes, NOT critical-dep substitutes.
+    #[must_use]
+    pub fn from_builder<F>(builder: F) -> Self
+    where
+        F: Fn() -> Vec<Box<dyn G2SourceProvider + Send + Sync + 'static>> + Send + Sync + 'static,
+    {
+        Self {
+            builder: Arc::new(builder),
         }
     }
 
@@ -527,14 +562,7 @@ impl G2SourceFactory {
     /// `handle_search_code` invocation.
     #[must_use]
     pub fn build(&self) -> Vec<Box<dyn G2SourceProvider + Send + Sync + 'static>> {
-        vec![
-            Box::new(ProbeProvider::new(
-                self.probe_manifest_path.clone(),
-                self.probe_timeout_ms,
-            )),
-            Box::new(RipgrepProvider::new()),
-            Box::new(LancedbProvider::new(self.vectors_dir.clone())),
-        ]
+        (self.builder)()
     }
 }
 
