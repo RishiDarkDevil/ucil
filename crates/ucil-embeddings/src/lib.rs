@@ -36,8 +36,10 @@
 #![deny(rustdoc::broken_intra_doc_links)]
 
 pub mod chunker;
+pub mod config;
 pub mod models;
 pub mod onnx_inference;
 pub use chunker::{EmbeddingChunk, EmbeddingChunker, EmbeddingChunkerError, MAX_CHUNK_TOKENS};
+pub use config::{ConfigError, EmbeddingBackend, VectorStoreConfig};
 pub use models::{CodeRankEmbed, CodeRankEmbedError, EMBEDDING_DIM};
 pub use onnx_inference::{OnnxSession, OnnxSessionError};
