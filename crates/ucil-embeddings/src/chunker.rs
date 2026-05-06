@@ -424,8 +424,23 @@ impl EmbeddingChunker {
         let mut signature = first_non_blank_lines(&ast_chunk.content, SIGNATURE_LINE_BUDGET);
         let mut signature_count = encode_token_count(&self.tokenizer, &signature)?;
         if signature_count > MAX_CHUNK_TOKENS {
-            signature = truncate_to_byte_budget(&signature, SIGNATURE_BYTE_BUDGET);
-            signature_count = encode_token_count(&self.tokenizer, &signature)?;
+            // Iterative byte-budget shrink — start at
+            // [`SIGNATURE_BYTE_BUDGET`] (the `4`-bytes-per-token
+            // heuristic) and halve until the real-tokenizer count
+            // satisfies the cap.  Adversarial inputs (e.g. a
+            // 5000-byte single-line content under a tokenizer with a
+            // tight token-per-byte ratio) require iteration because
+            // the `4`-bytes-per-token heuristic is an upper bound,
+            // not a guarantee.
+            let mut budget = SIGNATURE_BYTE_BUDGET;
+            loop {
+                signature = truncate_to_byte_budget(&signature, budget);
+                signature_count = encode_token_count(&self.tokenizer, &signature)?;
+                if signature_count <= MAX_CHUNK_TOKENS || budget == 0 {
+                    break;
+                }
+                budget /= 2;
+            }
         }
         Ok(EmbeddingChunk {
             file_path: ast_chunk.file_path.clone(),
@@ -629,5 +644,277 @@ fn test_embedding_chunker_real_fixture() {
             window[0],
             window[1]
         );
+    }
+}
+
+// ── Unit tests ─────────────────────────────────────────────────────────────
+//
+// Per `WO-0059` lessons line 601 (preserve module-root frozen-selector
+// + add coverage-driving negative-path tests), the unit tests below
+// live inside `#[cfg(test)] mod tests {}` while the frozen acceptance
+// test stays at module root.  These tests pin every
+// `EmbeddingChunkerError` variant to a concrete reachability path so
+// the coverage gate (`bash scripts/verify/coverage-gate.sh
+// ucil-embeddings 85 75`) stays ≥85% line floor on this module per
+// `WO-0059` lessons line 606 (coverage-floor pre-flight).
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::io::Write;
+
+    use tempfile::NamedTempFile;
+
+    /// Construct a synthetic `ucil_treesitter::Chunk` literal for the
+    /// `retokenize_chunk` / `collapse_to_signature` unit tests.
+    /// Lives in `mod tests {}` because nothing else in the file
+    /// constructs a `TsChunk` directly — `chunk()` defers to
+    /// `ucil_treesitter::Chunker`.
+    fn synthetic_ts_chunk(content: &str, start: u32, end: u32) -> TsChunk {
+        TsChunk {
+            id: format!("synth.rs:{start}:{end}"),
+            file_path: PathBuf::from("synth.rs"),
+            language: Language::Rust,
+            start_line: start,
+            end_line: end,
+            content: content.to_owned(),
+            symbol_name: Some("synthetic".to_owned()),
+            symbol_kind: None,
+            // Byte-estimate carry-through; real chunker never reads
+            // this field (it re-tokenizes).
+            token_count: u32::try_from(content.len().div_ceil(4).max(1)).unwrap_or(u32::MAX),
+        }
+    }
+
+    #[test]
+    fn from_tokenizer_path_returns_missing_tokenizer_file_for_absent_path() {
+        let absent = PathBuf::from("/definitely/not/a/real/tokenizer-WO-0060.json");
+        let result = EmbeddingChunker::from_tokenizer_path(&absent);
+        match result {
+            Err(EmbeddingChunkerError::MissingTokenizerFile { path }) => {
+                assert_eq!(
+                    path, absent,
+                    "MissingTokenizerFile path must round-trip; got {path:?}"
+                );
+            }
+            other => panic!("expected MissingTokenizerFile for absent path; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn from_tokenizer_path_returns_tokenizer_for_invalid_json() {
+        // 21 bytes of garbage in a tempfile — the file exists, so the
+        // existence check passes, but `Tokenizer::from_file`
+        // deserialise fails.
+        let mut tmp = NamedTempFile::new().expect("tempfile must create");
+        tmp.write_all(b"{not valid json garb")
+            .expect("write must succeed");
+        tmp.flush().expect("flush must succeed");
+        let path = tmp.path().to_path_buf();
+        let result = EmbeddingChunker::from_tokenizer_path(&path);
+        match result {
+            Err(EmbeddingChunkerError::Tokenizer { message }) => {
+                assert!(
+                    !message.is_empty(),
+                    "Tokenizer error message must be non-empty; got {message:?}"
+                );
+            }
+            other => panic!("expected Tokenizer error for invalid json; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn retokenize_chunk_collapses_oversize_to_signature() {
+        // 1000 whitespace-separated words → 1000 synthetic tokens > 512.
+        let mut filler = String::new();
+        for i in 0..1000 {
+            if i > 0 {
+                filler.push(' ');
+            }
+            filler.push_str("word");
+        }
+        // Wrap in a fn signature so the first non-blank line is the
+        // declaration.  The signature heuristic keeps the first 3
+        // non-blank lines, so the body's filler does NOT survive.
+        let content = format!("fn huge() -> i32 {{\n    let _ = \"{filler}\";\n    0\n}}");
+        let ast_chunk = synthetic_ts_chunk(&content, 1, 4);
+
+        let chunker = EmbeddingChunker::from_tokenizer(build_synthetic_tokenizer());
+        let result = chunker
+            .retokenize_chunk(&ast_chunk)
+            .expect("retokenize_chunk must succeed");
+
+        assert!(
+            result.token_count <= MAX_CHUNK_TOKENS,
+            "oversize chunk must collapse below cap; got token_count={} for content {:?}",
+            result.token_count,
+            result.content
+        );
+        assert!(
+            result.content.starts_with("fn huge"),
+            "signature-only fallback must start with `fn huge`; got {:?}",
+            result.content
+        );
+        assert!(
+            !result.content.contains(&filler),
+            "signature-only fallback must NOT contain the 1000-word filler; got len={}",
+            result.content.len()
+        );
+        assert_eq!(
+            result.start_line, ast_chunk.start_line,
+            "metadata must round-trip (start_line)"
+        );
+        assert_eq!(
+            result.end_line, ast_chunk.end_line,
+            "metadata must round-trip (end_line)"
+        );
+    }
+
+    #[test]
+    fn collapse_to_signature_handles_single_line_oversize_content() {
+        // 5000 whitespace-separated single-character tokens on one
+        // line — exercises the byte-budget hard-truncation safety-net.
+        let single_line: String = (0..5000)
+            .map(|_| 'x')
+            .map(|c| format!("{c}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        // No newlines — `first_non_blank_lines` returns the whole
+        // line, then signature_count > MAX_CHUNK_TOKENS triggers
+        // hard-truncation to SIGNATURE_BYTE_BUDGET bytes.
+        let ast_chunk = synthetic_ts_chunk(&single_line, 1, 1);
+
+        let chunker = EmbeddingChunker::from_tokenizer(build_synthetic_tokenizer());
+        let result = chunker
+            .collapse_to_signature(&ast_chunk)
+            .expect("collapse_to_signature must succeed");
+
+        assert!(
+            result.token_count <= MAX_CHUNK_TOKENS,
+            "single-line oversize content must hard-truncate below cap; got token_count={}",
+            result.token_count
+        );
+        assert!(
+            result.content.len() <= SIGNATURE_BYTE_BUDGET,
+            "single-line content must respect byte budget {} bytes; got len={}",
+            SIGNATURE_BYTE_BUDGET,
+            result.content.len()
+        );
+    }
+
+    #[test]
+    fn embedding_chunk_round_trips_metadata() {
+        let chunk = EmbeddingChunk {
+            file_path: PathBuf::from("foo.rs"),
+            start_line: 12,
+            end_line: 34,
+            content: "fn foo() {}".to_owned(),
+            token_count: 4,
+        };
+        let cloned = chunk.clone();
+        assert_eq!(chunk, cloned, "Clone + PartialEq must round-trip");
+        assert_eq!(chunk.file_path, PathBuf::from("foo.rs"));
+        assert_eq!(chunk.start_line, 12);
+        assert_eq!(chunk.end_line, 34);
+        assert_eq!(chunk.content, "fn foo() {}");
+        assert_eq!(chunk.token_count, 4);
+        // Smoke-test Debug — should not panic.
+        let dbg = format!("{chunk:?}");
+        assert!(
+            dbg.contains("foo.rs"),
+            "Debug must include file_path; got {dbg:?}"
+        );
+    }
+
+    #[test]
+    fn first_non_blank_lines_returns_only_non_blank_within_budget() {
+        let content = "\n\n  \nfirst\n\nsecond\n  \nthird\nfourth\n";
+        let out = first_non_blank_lines(content, 3);
+        assert_eq!(out, "first\nsecond\nthird");
+    }
+
+    #[test]
+    fn first_non_blank_lines_falls_back_to_original_for_all_blank_input() {
+        let content = "\n  \n\t\n";
+        let out = first_non_blank_lines(content, 3);
+        assert_eq!(
+            out, content,
+            "all-blank input must fall back to original; got {out:?}"
+        );
+    }
+
+    #[test]
+    fn truncate_to_byte_budget_returns_unchanged_when_under_budget() {
+        let content = "hello";
+        let out = truncate_to_byte_budget(content, 100);
+        assert_eq!(out, content);
+    }
+
+    #[test]
+    fn truncate_to_byte_budget_snaps_to_char_boundary() {
+        // Multi-byte char "é" (2 bytes) followed by ASCII.
+        let content = "aé".repeat(10); // 10 * 3 bytes = 30 bytes
+        let out = truncate_to_byte_budget(&content, 5);
+        // The cut at byte 5 lands mid-codepoint; truncate should snap
+        // back to byte 4 (boundary after second "aé").
+        assert!(
+            out.len() <= 5,
+            "truncated len must be <= budget 5; got {}",
+            out.len()
+        );
+        // Result must still be valid UTF-8 (implicit if it was a `&str`).
+        assert!(
+            out.chars().count() <= 4,
+            "truncated char count must be <= 4; got {}",
+            out.chars().count()
+        );
+    }
+
+    #[test]
+    fn encode_token_count_returns_word_count_for_synthetic_tokenizer() {
+        let tokenizer = build_synthetic_tokenizer();
+        let count = encode_token_count(&tokenizer, "hello world from chunker test")
+            .expect("encode must succeed");
+        assert_eq!(
+            count, 5,
+            "synthetic tokenizer must count 5 whitespace words; got {count}"
+        );
+    }
+
+    #[test]
+    fn chunk_returns_empty_vec_for_empty_source() {
+        // Empty source produces zero AST chunks; the embedding chunker
+        // returns an empty vec (the upstream `ucil_treesitter::Chunker`
+        // also returns empty for empty source per the `chunker_empty_source_returns_empty_vec`
+        // unit test in `crates/ucil-treesitter/src/chunker.rs`).
+        let mut chunker = EmbeddingChunker::from_tokenizer(build_synthetic_tokenizer());
+        let chunks = chunker
+            .chunk(Path::new("empty.rs"), "", Language::Rust)
+            .expect("chunk over empty source must succeed");
+        assert!(
+            chunks.is_empty(),
+            "empty source must yield empty Vec; got {chunks:?}"
+        );
+    }
+
+    #[test]
+    fn chunk_propagates_treesitter_chunk_error_via_from_impls() {
+        // Sanity: confirm the From-conversion paths compile and route
+        // correctly.  Constructed directly from a `ChunkError`
+        // variant — exercises the `#[from]` arm on
+        // `EmbeddingChunkerError::Chunk`.
+        let upstream = ucil_treesitter::ChunkError::InvalidLineRange { start: 5, end: 3 };
+        let wrapped: EmbeddingChunkerError = upstream.into();
+        match wrapped {
+            EmbeddingChunkerError::Chunk { source } => {
+                let msg = format!("{source}");
+                assert!(
+                    msg.contains("invalid line range"),
+                    "Chunk variant must carry the upstream error message; got {msg:?}"
+                );
+            }
+            other => panic!("expected Chunk variant; got {other:?}"),
+        }
     }
 }
