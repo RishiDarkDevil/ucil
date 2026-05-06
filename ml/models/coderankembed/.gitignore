@@ -1,0 +1,13 @@
+# CodeRankEmbed model artefacts (P2-W8-F02 / WO-0059) — downloaded by
+# `scripts/devtools/install-coderankembed.sh`, NOT committed.  The
+# combined model + tokenizer is ~138 MB; checking it in would balloon
+# the repository checkout for every developer + CI runner.
+#
+# Master-plan §4.2 line 303 fixes the ~137 MB Int8-quantised expectation;
+# upstream HuggingFace mirror + sha256 fingerprints live in the
+# installer header.  Per WO-0059 scope_out[10]:
+# `git ls-files ml/models/coderankembed/` MUST return only `.gitignore`
+# post-WO.
+
+model.onnx
+tokenizer.json

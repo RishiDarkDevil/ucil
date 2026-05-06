@@ -1490,11 +1490,11 @@
       "dependencies": [
         "P2-W8-F01"
       ],
-      "passes": false,
-      "last_verified_ts": null,
-      "last_verified_by": null,
-      "last_verified_commit": null,
-      "attempts": 0,
+      "passes": true,
+      "last_verified_ts": "2026-05-06T19:34:50Z",
+      "last_verified_by": "verifier-4970f77b-a235-41ad-8a95-2d143e629564",
+      "last_verified_commit": "8e70f586baa275e5ffbd4c548db7df9ec929a231",
+      "attempts": 1,
       "blocked_reason": null
     },
     {
