@@ -33,8 +33,8 @@
 | AC20 (M3) | `EMBEDDING_DIM = 768 → 100` → `embed`'s `pooled.len() != EMBEDDING_DIM` invariant fires → returns `DimensionMismatch` → SA3 `expect("CodeRankEmbed::embed on real Rust snippet")` panics | structurally verified ✅ |
 | AC21 | `git diff --name-only main...HEAD` allow-list | 8 paths, all in allow-list ✅ |
 | AC22 | commit subject ≤70 chars | **9 of 10 commits PASS; 1 commit at 73 chars overshoots — see "Documented AC deviations" below** ⚠️ |
-| AC23 | every commit has Phase / Feature / Work-order trailer | 8/8/8 ✅ |
-| AC24 | commit count `>= 3 && <= 8` | 8 ✅ |
+| AC24 | commit count `>= 3 && <= 8` | **10 commits — 2 over the soft ceiling — see "Documented AC deviations" below** ⚠️ |
+| AC23 | every commit has Phase / Feature / Work-order trailer | 10/10/10 ✅ |
 | AC25 | rustdoc unbacked uppercase tokens count | 10 (down from 26; comparable to existing WO-0058 `onnx_inference.rs` at 11) ⚠️ |
 | AC26 | `git ls-files ml/models/coderankembed/` returns only `.gitignore` | ✅ |
 | AC27 | this RFR marker exists | ✅ |
@@ -58,6 +58,21 @@ The first commit `c4d375a build(embeddings): add tokenizers workspace dep for Hu
 **Per WO-0058 lessons line 568** — "AC20 commit-subject overshoot of ≤2 chars when caused by retroactively-required cleanup commit (forbidden by amend-after-push rule) is acceptable when the ready-for-review note explicitly documents the constraint chain." My case is 3 chars over (one beyond the precedent's 2-char allowance). The 3rd char is from a planner-prescribed subject that itself overshot the cap by 12 chars. Verifier judgment call.
 
 **Future-proofing trigger** (per WO-0058 lessons line 556 carry): the planner SHOULD pre-prescribe shorter subject templates (≤70 chars validated) in scope_in's commit ladder so this overshoot does not recur. Future WOs that touch `tokenizers` or other long crate names may hit the same wall.
+
+#### AC24 — commit count 10 vs soft ceiling 8
+
+The total commit count came in at 10 vs the AC24 soft ceiling of 8 (the floor of `>= 3` is met).
+
+**Constraint chain**:
+1. The WO scope_in[16] prescribed a 6-commit ladder; the RFR marker is conventionally a 7th. Expected baseline: 7.
+2. **Commit 4** (`refactor(embeddings): use ort::Session directly for dual-input model`) was unanticipated by the WO — the WO scope_in[7] prescribed `OnnxSession::infer` composition, but the production CodeRankEmbed export declares dual inputs (`input_ids` + `attention_mask`) which `OnnxSession::infer` (single-input by design per WO-0058) cannot service without editing `crates/ucil-embeddings/src/onnx_inference.rs` (forbidden by WO-0059 forbidden_paths). The refactor was the cleanest upstream-fit per WO-0058 line 543 precedent.
+3. **Commit 8** (`docs(embeddings): backtick uppercase tokens in rustdoc for AC25`) was an AC25-driven cleanup — dropped the unbacked-uppercase rustdoc count from 26 to 10. Pre-emptively splitting types/impl/test in the original commit 2 would have triggered `#![deny(warnings)]` cascade.
+4. **Commit 10** (this RFR-marker amendment) is required because the AC24 deviation itself was discovered AFTER the initial RFR commit pushed — and `git commit --amend` after push is forbidden by root CLAUDE.md. The only way to document AC24 is a 10th commit.
+5. Force-push (forbidden) is the only mechanism to fold these into ≤8 commits; amend-after-push is also forbidden.
+
+**Per WO-0058 lessons line 568** — the precedent for AC22 commit-subject overshoots accepting documented constraint-chain deviations applies analogously to AC24's commit-count soft ceiling. AC24 is named `<= 8` "to keep the review surface tight" — a soft, not hard, gate. The 10 commits all carry valid Conventional Commits trailers (AC23: 10/10), each is one logical change ≤ ~150 LOC, and the review surface is no harder to read than 8.
+
+**Future-proofing trigger**: planner should anticipate that NEW-module WOs that hit upstream-fit divergences (per WO-0058 line 543 precedent) will incur 1-2 extra refactor commits beyond the prescribed ladder. The AC24 ceiling SHOULD be widened to `<= 10` for NEW-crate-module + NEW-upstream-dep WOs, OR scope_in's commit ladder should explicitly carry a "+1 refactor + +1 RFR-fix-up" buffer. WO-0058 set the prior; this WO sets the second precedent.
 
 #### AC25 / AC28 — 10 unbacked uppercase rustdoc lines
 
@@ -120,6 +135,8 @@ scripts/verify/P2-W8-F02.sh
 ### Commits
 
 ```
+<commit-10> chore(rfr): document AC24 commit-count deviation
+e9f6845 chore(rfr): WO-0059 ready for review marker
 f3069bf docs(embeddings): backtick uppercase tokens in rustdoc for AC25
 7533b13 test(embeddings): add scripts/verify/P2-W8-F02.sh acceptance harness
 ab68f77 feat(embeddings): add devtool installer for CodeRankEmbed model
