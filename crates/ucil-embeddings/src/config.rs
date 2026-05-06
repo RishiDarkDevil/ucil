@@ -264,3 +264,133 @@ pub fn from_toml_str(toml_str: &str) -> Result<VectorStoreConfig, ConfigError> {
     Ok(doc.vector_store)
 }
 
+#[cfg(test)]
+mod config_tests {
+    use super::{from_toml_str, ConfigError, EmbeddingBackend, VectorStoreConfig};
+
+    #[test]
+    fn test_from_toml_str_returns_default_for_empty_input() {
+        let cfg = from_toml_str("").expect("empty TOML parses to defaults");
+        assert_eq!(
+            cfg,
+            VectorStoreConfig::default(),
+            "empty TOML must yield the master-plan-frozen defaults; got {cfg:?}",
+        );
+    }
+
+    #[test]
+    fn test_from_toml_str_parses_explicit_qwen3() {
+        let toml_str =
+            "[vector_store]\nembedding_model = \"qwen3-embedding\"\nembedding_dimensions = 1024\n";
+        let cfg = from_toml_str(toml_str).expect("explicit qwen3 TOML parses");
+        assert_eq!(
+            cfg.embedding_model, "qwen3-embedding",
+            "embedding_model override preserved; got {:?}",
+            cfg.embedding_model,
+        );
+        assert_eq!(
+            cfg.embedding_dimensions, 1024,
+            "embedding_dimensions override preserved; got {}",
+            cfg.embedding_dimensions,
+        );
+        // Non-overridden fields keep the master-plan defaults
+        assert_eq!(cfg.backend, "lancedb", "default backend preserved");
+        assert_eq!(
+            cfg.chunk_max_tokens, 512,
+            "default chunk_max_tokens preserved"
+        );
+        assert!(
+            !cfg.reindex_on_startup,
+            "default reindex_on_startup preserved"
+        );
+    }
+
+    #[test]
+    fn test_from_toml_str_returns_toml_error_for_malformed_input() {
+        let bad = "[vector_store\n";
+        match from_toml_str(bad) {
+            Err(ConfigError::Toml { source: _ }) => {}
+            other => panic!("expected Err(ConfigError::Toml) for malformed TOML; got {other:?}",),
+        }
+    }
+
+    #[test]
+    fn test_from_config_str_returns_unknown_for_invalid_model() {
+        match EmbeddingBackend::from_config_str("foo") {
+            Err(ConfigError::UnknownEmbeddingModel { name }) => {
+                assert_eq!(
+                    name, "foo",
+                    "UnknownEmbeddingModel preserves the supplied string; got {name:?}",
+                );
+            }
+            other => {
+                panic!("expected Err(UnknownEmbeddingModel {{ name: \"foo\" }}); got {other:?}",)
+            }
+        }
+    }
+
+    #[test]
+    fn test_config_error_display_renders_canonical_text() {
+        let e = ConfigError::UnknownEmbeddingModel { name: "foo".into() };
+        let s = format!("{e}");
+        assert!(
+            s.contains("unknown embedding model"),
+            "UnknownEmbeddingModel Display must contain canonical text; got {s:?}",
+        );
+
+        let e = ConfigError::UnknownBackend {
+            name: "exotic-store".into(),
+        };
+        let s = format!("{e}");
+        assert!(
+            s.contains("unknown vector-store backend"),
+            "UnknownBackend Display must contain canonical text; got {s:?}",
+        );
+
+        let e = ConfigError::Validation {
+            reason: "dim out of band".into(),
+        };
+        let s = format!("{e}");
+        assert!(
+            s.contains("validation error"),
+            "Validation Display must contain canonical text; got {s:?}",
+        );
+    }
+
+    #[test]
+    fn test_default_vector_store_config_matches_master_plan_spec() {
+        let cfg = VectorStoreConfig::default();
+        assert_eq!(
+            cfg.backend, "lancedb",
+            "master-plan §17.6 line 2027 backend"
+        );
+        assert_eq!(
+            cfg.embedding_model, "coderankembed",
+            "master-plan §17.6 line 2028 embedding_model",
+        );
+        assert_eq!(
+            cfg.embedding_dimensions, 768,
+            "master-plan §17.6 line 2029 embedding_dimensions",
+        );
+        assert_eq!(
+            cfg.chunk_max_tokens, 512,
+            "master-plan §17.6 line 2030 chunk_max_tokens",
+        );
+        assert!(
+            !cfg.reindex_on_startup,
+            "master-plan §17.6 line 2030 reindex_on_startup",
+        );
+    }
+
+    #[test]
+    fn test_embedding_backend_from_config_str_round_trip() {
+        assert_eq!(
+            EmbeddingBackend::from_config_str("coderankembed").expect("CodeRankEmbed parses"),
+            EmbeddingBackend::CodeRankEmbed,
+        );
+        assert_eq!(
+            EmbeddingBackend::from_config_str("qwen3-embedding").expect("Qwen3 parses"),
+            EmbeddingBackend::Qwen3,
+        );
+    }
+}
