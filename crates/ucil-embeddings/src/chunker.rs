@@ -358,6 +358,13 @@ impl EmbeddingChunker {
         for ast_chunk in &ast_chunks {
             out.push(self.retokenize_chunk(ast_chunk)?);
         }
+        // Source-order ordering: `ucil_treesitter::Chunker` returns
+        // chunks in tree-sitter query-match order, which interleaves
+        // class definitions and their nested method symbols.
+        // Re-sort by `start_line` so the embedding-input stream is
+        // deterministic and source-monotonic — required by the
+        // `LanceDB` indexer (`P2-W8-F04`) for stable chunk ids.
+        out.sort_by_key(|c| c.start_line);
         tracing::debug!(count = out.len(), "emitted embedding chunks");
         Ok(out)
     }
@@ -487,4 +494,140 @@ fn truncate_to_byte_budget(content: &str, byte_budget: usize) -> String {
         cut -= 1;
     }
     content[..cut].to_owned()
+}
+
+// ── Module-root frozen acceptance test ─────────────────────────────────────
+//
+// Per `DEC-0007` (frozen-selector module-root placement), the
+// acceptance test for `P2-W8-F05` lives at module root — NOT inside
+// `mod tests {}` — so the frozen selector
+// `chunker::test_embedding_chunker_real_fixture` resolves directly
+// against the rustc test binary.  The frozen
+// `feature-list.json:P2-W8-F05.acceptance_tests[0].selector` is
+// `-p ucil-embeddings chunker::`.
+
+/// Build a synthetic `HuggingFace` tokenizer for the frozen
+/// acceptance test + the `mod tests {}` unit tests.
+///
+/// The tokenizer is constructed via the real `tokenizers` crate API
+/// (NOT a mock per `DEC-0008`): a `WordLevel` model with a single
+/// vocab entry (`<unk>` → `0`) plus a `WhitespaceSplit` pre-tokenizer.
+/// Because every word maps to the `UNK` id, the encoded id stream's
+/// length equals the number of whitespace-separated tokens — i.e.
+/// `encoding.get_ids().len() == content.split_whitespace().count()`.
+/// This deterministic property powers the AC09 sub-assertion
+/// (`token_count` uses real tokenizer, not byte estimate).
+#[cfg(test)]
+fn build_synthetic_tokenizer() -> Tokenizer {
+    // Construct via JSON deserialisation — avoids depending on the
+    // private `ahash::AHashMap` type that `WordLevelBuilder::vocab`
+    // takes; the synthesised JSON mirrors the `tokenizer.json`
+    // schema produced by `HuggingFace` `transformers` exports.
+    let tokenizer_json = r#"{
+        "version": "1.0",
+        "truncation": null,
+        "padding": null,
+        "added_tokens": [],
+        "normalizer": null,
+        "pre_tokenizer": {"type": "WhitespaceSplit"},
+        "post_processor": null,
+        "decoder": null,
+        "model": {
+            "type": "WordLevel",
+            "vocab": {"<unk>": 0},
+            "unk_token": "<unk>"
+        }
+    }"#;
+    tokenizer_json
+        .parse::<Tokenizer>()
+        .expect("synthetic tokenizer must parse")
+}
+
+/// Frozen acceptance test for `P2-W8-F05` per
+/// `feature-list.json:P2-W8-F05.acceptance_tests[0]`.
+///
+/// Asserts (in order):
+///
+/// 1. `chunks` is non-empty after running over `tests/data/sample.rs`;
+/// 2. every chunk's `token_count <= MAX_CHUNK_TOKENS`;
+/// 3. `chunks[0].token_count` matches the synthetic tokenizer's
+///    whitespace-word count over `chunks[0].content` (NOT the byte
+///    estimate from `ucil_treesitter::Chunk::token_count`);
+/// 4. metadata round-trips correctly (`file_path`, `start_line`,
+///    `end_line`, non-empty `content`);
+/// 5. chunks are returned in source order (`start_line` ascending).
+#[cfg(test)]
+#[test]
+fn test_embedding_chunker_real_fixture() {
+    let tokenizer = build_synthetic_tokenizer();
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let fixture_path = manifest_dir.join("tests").join("data").join("sample.rs");
+    let source = std::fs::read_to_string(&fixture_path)
+        .expect("sample.rs fixture must be present at tests/data/sample.rs");
+
+    let mut chunker = EmbeddingChunker::from_tokenizer(tokenizer);
+    let chunks = chunker
+        .chunk(&fixture_path, &source, Language::Rust)
+        .expect("chunk over sample.rs must succeed");
+
+    // (SA1) Chunk count is positive.
+    assert!(
+        !chunks.is_empty(),
+        "sample.rs must produce at least one chunk; got {chunks:?}"
+    );
+
+    // (SA2) Every chunk respects the cap.
+    for chunk in &chunks {
+        assert!(
+            chunk.token_count <= MAX_CHUNK_TOKENS,
+            "chunk {chunk:?} violates token cap (token_count={}, MAX_CHUNK_TOKENS={MAX_CHUNK_TOKENS})",
+            chunk.token_count
+        );
+    }
+
+    // (SA3) Token count uses the REAL synthetic tokenizer, NOT the
+    // byte estimate.  The synthetic tokenizer counts
+    // whitespace-separated tokens; the byte estimate would be
+    // `max(1, ⌈len/4⌉)` which materially differs for typical Rust
+    // source.
+    let first = &chunks[0];
+    let expected = u32::try_from(first.content.split_whitespace().count())
+        .expect("whitespace-word count must fit in u32");
+    assert_eq!(
+        first.token_count, expected,
+        "token_count must reflect real tokenizer (whitespace word count); got {} expected {} for content {:?}",
+        first.token_count, expected, first.content
+    );
+
+    // (SA4) Metadata preserved.
+    assert_eq!(
+        first.file_path, fixture_path,
+        "file_path metadata must round-trip; got {:?}",
+        first.file_path
+    );
+    assert!(
+        first.start_line >= 1,
+        "start_line must be >= 1; got {} in {first:?}",
+        first.start_line
+    );
+    assert!(
+        first.end_line >= first.start_line,
+        "end_line must be >= start_line; got start={} end={} in {first:?}",
+        first.start_line,
+        first.end_line
+    );
+    assert!(
+        !first.content.is_empty(),
+        "content must be non-empty; got empty content in {first:?}"
+    );
+
+    // (SA5) Source-order ordering.
+    for window in chunks.windows(2) {
+        assert!(
+            window[0].start_line <= window[1].start_line,
+            "chunks must be in source order; got {:?} then {:?}",
+            window[0],
+            window[1]
+        );
+    }
 }
