@@ -8,6 +8,8 @@ repository.workspace = true
 description = "UCIL embedding inference: ONNX Runtime integration, chunking, model management"
 
 [dependencies]
+ndarray.workspace = true
+ort.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
