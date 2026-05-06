@@ -45,6 +45,16 @@ opentelemetry-stdout = { version = "0.27", features = ["trace"] }
 # CLI argument parsing
 clap = { version = "4", features = ["derive"] }
 
+# Statistical benchmarking harness — backs the throughput benchmark for
+# `CodeRankEmbed::embed` (master-plan §4.2 line 303 "50-150 emb/sec on
+# CPU" + §18 Phase 2 Week 8 line 1789 "Benchmark: embedding throughput,
+# query latency, recall@10"; `P2-W8-F06` / `WO-0061`).  The
+# `cargo_bench_support` feature is required for `cargo bench`
+# integration; `plotters` is the default plot backend.  `default-features
+# = false` keeps the dep tree minimal — drops the `rayon` feature which
+# adds tokio-incompatible thread-pool churn in async test contexts.
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support", "plotters"] }
+
 # TOML serialization for ucil.toml
 toml = "0.8"
 
