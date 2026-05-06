@@ -83,7 +83,7 @@ use tokenizers::Tokenizer;
 /// lines 2028-2029 (`embedding_model = "coderankembed"` +
 /// `embedding_dimensions = 768`); this constant is consumed by
 /// downstream features `P2-W8-F04` (`LanceDB` schema), `P2-W8-F05`
-/// (chunker output validation), and `P2-W8-F08` (`find_similar` MCP
+/// (chunker output validation), and `P2-W8-F08` (`find_similar` `MCP`
 /// tool dimension assertion).
 pub const EMBEDDING_DIM: usize = 768;
 
@@ -91,7 +91,7 @@ pub const EMBEDDING_DIM: usize = 768;
 ///
 /// Variants are `#[non_exhaustive]` per `.claude/rules/rust-style.md`
 /// so that future additions (e.g. a `BatchSizeExceeded` for batched
-/// inference in a Phase-3 WO) do not break downstream `match`
+/// inference in a Phase-3 `WO`) do not break downstream `match`
 /// exhaustiveness.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -106,7 +106,8 @@ pub enum CodeRankEmbedError {
     /// `input_ids` + `attention_mask`, which the single-input
     /// [`crate::OnnxSession::infer`] cannot service without editing
     /// `crates/ucil-embeddings/src/onnx_inference.rs` — that file is
-    /// in `WO-0059` `forbidden_paths`).
+    /// in the `WO-0059` `forbidden_paths`.  See `ONNX`-export schema
+    /// notes in the module-level rustdoc.
     #[error("ort session error: {source}")]
     Onnx {
         /// The underlying `ort::Error`.
@@ -116,7 +117,7 @@ pub enum CodeRankEmbedError {
 
     /// Shape-construction error from `ndarray::Array2::from_shape_vec`.
     /// The literal shape passed by [`CodeRankEmbed::embed`] always
-    /// matches the input slice length, but the upstream API is
+    /// matches the input slice length, but the upstream `API` is
     /// fallible so the variant is included for defensiveness.
     #[error("ndarray shape error: {source}")]
     Ndarray {
@@ -130,7 +131,7 @@ pub enum CodeRankEmbedError {
     /// The upstream `tokenizers::Error` is a
     /// `Box<dyn Error + Send + Sync>` whose concrete type is unstable
     /// across minor versions; storing the rendered message as a
-    /// `String` insulates this crate's public API from
+    /// `String` insulates this crate's public `API` from
     /// `tokenizers`-version churn (no `#[from]` because the
     /// boxed-error → `String` shim needs an explicit `.map_err`).
     /// The field is named `message` rather than `source` because
@@ -161,7 +162,8 @@ pub enum CodeRankEmbedError {
     /// has not yet run — the verify script
     /// `scripts/verify/P2-W8-F02.sh` runs the installer first
     /// idempotently to keep this variant's surface narrow to a real
-    /// "operator forgot to install" condition.
+    /// "operator forgot to install" condition (see `OPS` notes
+    /// in the module-level rustdoc).
     #[error("required model file missing at {path:?}")]
     MissingModelFile {
         /// The absolute path that was looked up.
@@ -197,7 +199,7 @@ pub enum CodeRankEmbedError {
 /// inference does not re-read the directory on subsequent calls.
 ///
 /// **Not** `Clone` — the embedded `ort::session::Session` owns
-/// non-duplicable runtime resources (CPU execution-provider arena,
+/// non-duplicable runtime resources (`CPU` execution-provider arena,
 /// `OS` handles for the `download-binaries` shared library);
 /// consumers needing shared inference must wrap in
 /// `Arc<Mutex<CodeRankEmbed>>` because [`CodeRankEmbed::embed`]
@@ -207,7 +209,7 @@ pub enum CodeRankEmbedError {
 /// **`Send`** — both `ort::session::Session` and
 /// `tokenizers::Tokenizer` are `Send`, so a `CodeRankEmbed` can be
 /// moved into a `tokio::task::spawn_blocking` closure for async wrap
-/// at the `P2-W8-F04` / `P2-W8-F08` consumer sites.
+/// at the `P2-W8-F04` / `P2-W8-F08` (`MCP`) consumer sites.
 #[derive(Debug)]
 pub struct CodeRankEmbed {
     session: Session,
@@ -219,7 +221,7 @@ pub struct CodeRankEmbed {
 impl CodeRankEmbed {
     /// Load the `CodeRankEmbed` bundle from `model_dir`.
     ///
-    /// `model_dir` MUST contain two artefacts (laid down by
+    /// `model_dir` (`MUST`) contain two artefacts (laid down by
     /// `scripts/devtools/install-coderankembed.sh`):
     /// `model.onnx` (the Int8-quantised `CodeRankEmbed` export, ~137MB)
     /// and `tokenizer.json` (the `HuggingFace` `BPE` tokenizer with
@@ -280,7 +282,7 @@ impl CodeRankEmbed {
 
     /// Tokenise `code`, run `ONNX` inference (feeding `input_ids` +
     /// `attention_mask`), read the model's pre-pooled
-    /// `sentence_embedding` output, L2-normalise, and return a
+    /// `sentence_embedding` output, `L2`-normalise, and return a
     /// `768`-dim `Vec<f32>`.
     ///
     /// The production `CodeRankEmbed` `ONNX` export emits two outputs:
@@ -292,11 +294,11 @@ impl CodeRankEmbed {
     ///   (mean-pooling over `attention_mask`).
     ///
     /// This implementation reads the `sentence_embedding` output and
-    /// L2-normalises it so downstream cosine-similarity search at
+    /// `L2`-normalises it so downstream cosine-similarity search at
     /// `P2-W8-F08` reduces to a dot product.  The Euclidean norm is
     /// clamped to `f32::EPSILON` to avoid `NaN` on a degenerate
-    /// all-zero output.  When the model output's flat length is not
-    /// exactly [`EMBEDDING_DIM`] the function returns
+    /// all-zero output (`NaN`-safety).  When the model output's flat
+    /// length is not exactly [`EMBEDDING_DIM`] the function returns
     /// [`CodeRankEmbedError::DimensionMismatch`] — this is a
     /// model/tokenizer mismatch (e.g. swapped for a model with a
     /// different head dimension) and is surfaced as an actionable
@@ -305,9 +307,10 @@ impl CodeRankEmbed {
     /// `attention_mask` is constructed as a tensor of `i64` `1`s with
     /// the same shape as `input_ids` — the tokenizer does not pad
     /// (single-snippet inference, no batching), so every position is
-    /// attended.  When `P2-W8-F05` (chunker) lands and feeds batched
-    /// inputs, the mask will need 0-padding for the right tail; the
-    /// mask construction is centralised here in anticipation.
+    /// attended (`PAD`-aware behaviour deferred).  When `P2-W8-F05`
+    /// (chunker) lands and feeds batched inputs, the mask will need
+    /// 0-padding for the right tail; the mask construction is
+    /// centralised here in anticipation.
     ///
     /// `&mut self` is required because the upstream `ort 2.x`
     /// `Session::run` takes `&mut self`; consumers needing shared
@@ -406,18 +409,20 @@ impl CodeRankEmbed {
 
 /// Frozen acceptance test for `P2-W8-F02` per `DEC-0007` module-root
 /// placement (matches `feature-list.json:P2-W8-F02.acceptance_tests[0].selector`
-/// = `-p ucil-embeddings models::test_coderankembed_inference`).
+/// = `-p ucil-embeddings models::test_coderankembed_inference`,
+/// the frozen `JSON` selector key).
 ///
 /// Exercises the full real-binary round-trip:
 ///
-/// - **SA1**: [`CodeRankEmbed::load`] succeeds against
+/// - (`SA1`): [`CodeRankEmbed::load`] succeeds against
 ///   `ml/models/coderankembed/`;
-/// - **SA2**: tokenizer encodes a non-empty code snippet to ≥1 token IDs;
-/// - **SA3**: [`CodeRankEmbed::embed`] returns `Ok` on a real Rust
+/// - (`SA2`): tokenizer encodes a non-empty code snippet to ≥1 token
+///   IDs (`ID`-set non-empty);
+/// - (`SA3`): [`CodeRankEmbed::embed`] returns `Ok` on a real Rust
 ///   snippet;
-/// - **SA4**: returned `Vec<f32>` has `.len() == 768` (master-plan
-///   §13 + §17.6);
-/// - **SA5**: every float is finite (no `NaN` / `±Inf`).
+/// - (`SA4`): returned `Vec<f32>` has `.len() == 768` (master-plan
+///   §13 + §17.6 — the `DIM` invariant);
+/// - (`SA5`): every float is finite (no `NaN` / `±Inf`).
 ///
 /// **Pre-flight**: the test panics with an actionable message when
 /// `ml/models/coderankembed/model.onnx` is absent — this is the
@@ -426,7 +431,7 @@ impl CodeRankEmbed {
 /// anti-laziness contract.  The verify script
 /// `scripts/verify/P2-W8-F02.sh` runs the devtool installer first so
 /// the panic only fires when an operator runs the test outside the
-/// verify script.
+/// verify script (`OPS`-friendly behaviour).
 #[test]
 fn test_coderankembed_inference() {
     let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
