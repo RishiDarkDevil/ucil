@@ -1098,3 +1098,127 @@ mod tests {
         );
     }
 }
+
+/// Negative-path + variant-coverage tests for `P2-W8-F03`
+/// (`WO-0062`).
+///
+/// The frozen acceptance test [`test_qwen3_config_gate`] stays at
+/// module root per `DEC-0007`; these supplementary tests live at
+/// `models::qwen3_tests::*` and do not collide with the frozen
+/// substring selector `models::test_qwen3_config_gate`.
+///
+/// Per `WO-0060` lessons line 643, every reachable variant of
+/// [`Qwen3EmbeddingError`] is exercised at least once so the
+/// coverage gate at `AC24` is satisfied.
+#[cfg(test)]
+mod qwen3_tests {
+    use std::path::PathBuf;
+
+    use super::{
+        detect_gpu_execution_provider, validate_matryoshka_dimension, Qwen3Embedding,
+        Qwen3EmbeddingError, MAX_MATRYOSHKA_DIM, MIN_MATRYOSHKA_DIM,
+    };
+
+    #[test]
+    fn test_dimension_out_of_range_value_zero() {
+        match validate_matryoshka_dimension(0) {
+            Err(Qwen3EmbeddingError::DimensionOutOfRange { value, min, max }) => {
+                assert_eq!(value, 0, "DimensionOutOfRange must report supplied value");
+                assert_eq!(
+                    min, MIN_MATRYOSHKA_DIM,
+                    "DimensionOutOfRange.min must equal MIN_MATRYOSHKA_DIM (32)",
+                );
+                assert_eq!(
+                    max, MAX_MATRYOSHKA_DIM,
+                    "DimensionOutOfRange.max must equal MAX_MATRYOSHKA_DIM (7168)",
+                );
+            }
+            other => panic!("expected Err(DimensionOutOfRange) for d=0; got {other:?}",),
+        }
+    }
+
+    #[test]
+    fn test_dimension_out_of_range_max_value() {
+        match validate_matryoshka_dimension(usize::MAX) {
+            Err(Qwen3EmbeddingError::DimensionOutOfRange { value, .. }) => {
+                assert_eq!(
+                    value,
+                    usize::MAX,
+                    "DimensionOutOfRange must report supplied value (usize::MAX)",
+                );
+            }
+            other => panic!("expected Err(DimensionOutOfRange) for d=usize::MAX; got {other:?}",),
+        }
+    }
+
+    #[test]
+    fn test_qwen3_error_display_renders_no_gpu() {
+        let e = Qwen3EmbeddingError::NoGpuDetected {
+            reason: "test".into(),
+        };
+        let s = format!("{e}");
+        assert!(
+            s.contains("no GPU execution provider"),
+            "NoGpuDetected Display must contain canonical text; got {s:?}",
+        );
+    }
+
+    #[test]
+    fn test_qwen3_error_display_renders_dimension_out_of_range() {
+        let e = Qwen3EmbeddingError::DimensionOutOfRange {
+            value: 8000,
+            min: MIN_MATRYOSHKA_DIM,
+            max: MAX_MATRYOSHKA_DIM,
+        };
+        let s = format!("{e}");
+        assert!(
+            s.contains("Matryoshka dimension"),
+            "DimensionOutOfRange Display must mention `Matryoshka dimension`; got {s:?}",
+        );
+        assert!(
+            s.contains("out of range"),
+            "DimensionOutOfRange Display must mention `out of range`; got {s:?}",
+        );
+    }
+
+    #[test]
+    fn test_qwen3_error_display_renders_missing_model_file() {
+        let e = Qwen3EmbeddingError::MissingModelFile {
+            path: PathBuf::from("/nonexistent/qwen3/model.onnx"),
+        };
+        let s = format!("{e}");
+        assert!(
+            s.contains("model file missing"),
+            "MissingModelFile Display must mention `model file missing`; got {s:?}",
+        );
+    }
+
+    #[test]
+    fn test_gpu_detection_returns_no_gpu_on_default_workspace() {
+        match detect_gpu_execution_provider() {
+            Err(Qwen3EmbeddingError::NoGpuDetected { .. }) => {}
+            other => panic!(
+                "expected Err(NoGpuDetected) under default workspace ort features; got {other:?}",
+            ),
+        }
+    }
+
+    #[test]
+    fn test_qwen3_load_returns_dim_out_of_range_before_gpu_check() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        match Qwen3Embedding::load(tmp.path(), 16) {
+            Err(Qwen3EmbeddingError::DimensionOutOfRange { value, .. }) => {
+                assert_eq!(
+                    value, 16,
+                    "DimensionOutOfRange must report supplied value (16); got {value}",
+                );
+            }
+            Err(Qwen3EmbeddingError::NoGpuDetected { .. }) => {
+                panic!(
+                    "load must validate dim FIRST; got NoGpuDetected (load-bearing check ordering: dim → gpu)",
+                );
+            }
+            other => panic!("expected Err(DimensionOutOfRange) for d=16; got {other:?}",),
+        }
+    }
+}
