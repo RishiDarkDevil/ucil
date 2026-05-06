@@ -197,4 +197,4 @@ empty `feature_ids` (P2-W7-F06 is already flipped) and a single
 - `ucil-build/work-orders/0063-search-code-g2-fused-refresh.json` — work-order
 - `feat/WO-0063-search-code-g2-fused-refresh @ a12e97f` — feature-branch HEAD with all required artefacts
 
-resolved: false
+resolved: true
