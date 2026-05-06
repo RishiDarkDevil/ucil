@@ -214,6 +214,38 @@ ndarray = { version = "0.16", default-features = false, features = ["std"] }
 # `progressbar` / `indicatif` transitive bloat.
 tokenizers = { version = "0.23", default-features = false, features = ["onig", "esaxx_fast"] }
 
+# LanceDB vector store — backs the per-branch `vectors/` connection root
+# (master-plan §11.2 line 1074) and the `code_chunks` table whose schema
+# is fixed by master-plan §12.2 lines 1321-1346.  The `default-features =
+# false` is critical — full features pull in Python bindings, GPU search
+# backends, and a multi-GB compile graph; ucil-daemon only needs the async
+# Rust client.  Used by `ucil-daemon::branch_manager` (Phase 2 Week 7,
+# `P2-W7-F09`, WO-0053).
+#
+# Pinned to the 0.16.x line per WO-0053 scope_in[0] ("If the executor
+# finds the version unavailable, pick the closest stable ≥ 0.4 ABI-stable
+# lineage").  Two upstream constraints made 0.10 (the WO's first-pick
+# version) and 0.20+ unbuildable on rustc 1.94 stable: (a) 0.10's
+# transitive `arrow-arith` 52.2 collides on `Datelike::quarter()` with
+# `chrono` 0.4.44+, and (b) lance 0.29 (pulled by lancedb 0.20+) trips
+# rustc's default `recursion_limit = 128` during layout computation of
+# an async block in `lance/src/index.rs:591` (`optimize_indices`).  0.16
+# pulls lance 0.23 + datafusion 44 + arrow 53 — a tier where rustc
+# layout-computation does NOT recurse over the threshold and chrono +
+# arrow-arith resolve cleanly, while preserving the
+# `Connection::{connect,create_empty_table,table_names}.execute().await`
+# API surface the WO depends on.
+lancedb = { version = "0.16", default-features = false }
+# Arrow schema construction for the `code_chunks` table — 12-field schema
+# with a `FixedSizeList<Float32, 768>` embedding column per master-plan
+# §12.2.  `arrow-array` exposes `RecordBatch` for future row inserts
+# (P2-W8-F04 background indexing); `arrow-schema` exposes `Schema`,
+# `Field`, `DataType`.  Pinned to the `53` line that lancedb 0.16
+# transitively depends on so the whole arrow stack resolves to a single
+# ABI tier.
+arrow-array = "53"
+arrow-schema = "53"
+
 [profile.dev]
 opt-level = 0
 

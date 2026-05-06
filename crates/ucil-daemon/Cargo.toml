@@ -20,6 +20,15 @@ path = "tests/support/mock_mcp_plugin.rs"
 
 [dependencies]
 anyhow.workspace = true
+# Arrow schema + array types back the `code_chunks` LanceDB table schema
+# (master-plan §12.2 lines 1321-1346) used by `branch_manager` for the
+# per-branch vector store lifecycle (Phase 2 Week 7, P2-W7-F09, WO-0053).
+arrow-array.workspace = true
+arrow-schema.workspace = true
+# LanceDB async Rust client — opens the per-branch `vectors/` connection
+# root (master-plan §11.2 line 1074) used by `branch_manager` for table
+# lifecycle (P2-W7-F09).
+lancedb.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true

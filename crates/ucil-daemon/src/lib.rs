@@ -80,6 +80,28 @@
 //! fusion path is deferred to P2-W7-F05 (`find_references`); F02 ships
 //! the fusion algorithm only.
 //!
+//! WO-0053 for `P2-W7-F09` lands the
+//! [`branch_manager`] module owning the per-branch `LanceDB`
+//! vector-store lifecycle described by master-plan §6.4 line 144
+//! ("Branch index manager: Creates, updates, prunes, and archives
+//! per-branch code indexes. Delta indexing from parent branches for
+//! fast creation"), §11.2 line 1074 (per-branch `vectors/` directory)
+//! and §12.2 lines 1321-1346 (the 12-field `code_chunks` table
+//! schema).  [`branch_manager::BranchManager`] exposes
+//! [`branch_manager::BranchManager::create_branch_table`] (with
+//! optional `parent` for filesystem-level delta-clone of an
+//! already-indexed branch),
+//! [`branch_manager::BranchManager::archive_branch_table`] (atomic
+//! rename to `<base>/branches/.archive/<sanitised>-<unix_ts_micros>/`),
+//! and [`branch_manager::BranchManager::branch_vectors_dir`] +
+//! [`branch_manager::BranchManager::archive_root`] /
+//! [`branch_manager::BranchManager::branches_root`] for path
+//! arithmetic.  Production wiring of `BranchManager` into the daemon's
+//! startup / branch-detection / session paths is deferred to
+//! `P2-W8-F04` (`LanceDB` background chunk indexing per master-plan §18
+//! Phase 2 Week 8 line 1788); F09 ships the standalone API + the unit
+//! test verifying its lifecycle semantics.
+//!
 //! WO-0063 for `P2-W7-F06` lights up
 //! [`server::McpServer::with_g2_sources`] and the G2-fused half of the
 //! `search_code` MCP tool (master-plan §3.2 row 4 / §5.2 G2 fan-out):
@@ -108,6 +130,7 @@
 #![warn(clippy::all, clippy::pedantic, clippy::nursery)]
 #![deny(rustdoc::broken_intra_doc_links)]
 
+pub mod branch_manager;
 pub mod executor;
 pub mod g2_search;
 pub mod lifecycle;
@@ -132,6 +155,8 @@ pub mod watcher;
 #[rustfmt::skip]
 #[cfg(test)] mod test_support;
 
+#[rustfmt::skip]
+pub use branch_manager::{BranchManager, BranchManagerError, BranchTableInfo, code_chunks_schema, ARCHIVE_DIR_NAME};
 #[rustfmt::skip]
 pub use executor::{enrich_find_definition, execute_g1, fuse_g1, Caller, EnrichedFindDefinition, ExecutorError, G1Conflict, G1FusedEntry, G1FusedLocation, G1FusedOutcome, G1FusionEntry, G1Outcome, G1Query, G1Source, G1ToolKind, G1ToolOutput, G1ToolStatus, HoverDoc, HoverFetchError, HoverSource, IngestPipeline, SerenaHoverClient, G1_MASTER_DEADLINE, G1_PER_SOURCE_DEADLINE, SOURCE_TOOL, TREE_SITTER_VALID_FROM};
 #[rustfmt::skip]
