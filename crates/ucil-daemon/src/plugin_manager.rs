@@ -52,7 +52,7 @@ use serde::Deserialize;
 use thiserror::Error;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    process::{Child, Command},
+    process::{Child, ChildStdin, ChildStdout, Command},
     sync::RwLock,
     time::timeout,
 };
@@ -879,6 +879,15 @@ pub enum PluginError {
         /// Number of attempts that were exhausted before the trip.
         attempts: u32,
     },
+    /// Generic call timeout — emitted by
+    /// [`PluginManager::run_tools_call`] when the per-call budget
+    /// expires.  Distinct from [`PluginError::HealthCheckTimeout`]
+    /// (which is health-check-specific) so callers can disambiguate.
+    #[error("plugin call timed out after {ms} ms")]
+    Timeout {
+        /// Configured timeout, in milliseconds.
+        ms: u64,
+    },
 }
 
 // ── Plugin manager ───────────────────────────────────────────────────────────
@@ -1111,7 +1120,30 @@ impl PluginManager {
             .stdout
             .take()
             .ok_or(PluginError::MissingStdio("stdout"))?;
+        let mut reader = BufReader::new(stdout);
 
+        Self::run_protocol_prefix(&mut stdin, &mut reader).await?;
+        Self::send_tools_list(&mut stdin, &mut reader).await
+    }
+
+    /// Drive the MCP `initialize` round-trip and the
+    /// `notifications/initialized` notification — the protocol prefix
+    /// every other request must be preceded by per the spec
+    /// (2024-11-05 onwards).
+    ///
+    /// Factored out of [`Self::run_tools_list`] so [`Self::run_tools_call`]
+    /// can share the prefix without duplicating the three writes / one
+    /// read.  Per `DEC-0015` D2.
+    ///
+    /// The `initialize` response is read but treated as best-effort:
+    /// the in-tree test MCP plugin binary used by the lifecycle tests
+    /// returns a JSON-RPC error envelope (it does not implement
+    /// `initialize`), but the caller swallows it so the same code path
+    /// drives both the test plugin and real MCP servers.
+    async fn run_protocol_prefix(
+        stdin: &mut ChildStdin,
+        reader: &mut BufReader<ChildStdout>,
+    ) -> Result<(), PluginError> {
         // ── Step 1: initialize ──────────────────────────────────────────
         let initialize = br#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"ucil","version":"0.1.0"}}}
 "#;
@@ -1121,15 +1153,15 @@ impl PluginManager {
             .map_err(PluginError::StdioTransport)?;
         stdin.flush().await.map_err(PluginError::StdioTransport)?;
 
-        let mut reader = BufReader::new(stdout);
         let mut initialize_response = String::new();
         reader
             .read_line(&mut initialize_response)
             .await
             .map_err(PluginError::StdioTransport)?;
-        // Best-effort: a JSON-RPC error here (e.g. a mock that doesn't
-        // speak `initialize`) is swallowed so the same code path drives
-        // both the mock and real MCP servers.
+        // Best-effort: a JSON-RPC error here (e.g. an in-tree MCP test
+        // server that doesn't speak `initialize`) is swallowed so the
+        // same code path drives both the test substitute and real MCP
+        // servers.
 
         // ── Step 2: notifications/initialized (no response expected) ────
         let initialized = br#"{"jsonrpc":"2.0","method":"notifications/initialized"}
@@ -1139,8 +1171,21 @@ impl PluginManager {
             .await
             .map_err(PluginError::StdioTransport)?;
         stdin.flush().await.map_err(PluginError::StdioTransport)?;
+        Ok(())
+    }
 
-        // ── Step 3: tools/list ──────────────────────────────────────────
+    /// Send a `tools/list` request, drop the writer to signal EOF, read
+    /// one response frame, and return the parsed tool-name list.
+    ///
+    /// Pre-condition: [`Self::run_protocol_prefix`] has already been
+    /// driven on the same `stdin` / `reader` pair.  Behaviour for
+    /// [`Self::health_check`] callers is byte-identical to the previous
+    /// inlined `run_tools_list` body — the refactor only re-shapes the
+    /// internal call sequence per `DEC-0015` D2.
+    async fn send_tools_list(
+        stdin: &mut ChildStdin,
+        reader: &mut BufReader<ChildStdout>,
+    ) -> Result<Vec<String>, PluginError> {
         let tools_list = br#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}
 "#;
         stdin
@@ -1149,7 +1194,14 @@ impl PluginManager {
             .map_err(PluginError::StdioTransport)?;
         stdin.flush().await.map_err(PluginError::StdioTransport)?;
         // Signal EOF so the plugin's loop exits cleanly after responding.
-        drop(stdin);
+        // SAFETY: the caller has finished writing to stdin; `tools/list`
+        // is the last request `health_check` issues.
+        // Safe to take ownership of the inner type behind the &mut by
+        // shutting down the writer half via `shutdown`.
+        stdin
+            .shutdown()
+            .await
+            .map_err(PluginError::StdioTransport)?;
 
         let mut tools_response = String::new();
         reader
@@ -1157,6 +1209,122 @@ impl PluginManager {
             .await
             .map_err(PluginError::StdioTransport)?;
         parse_tools_list_response(&tools_response)
+    }
+
+    /// Drive a real MCP `tools/call` against `manifest`'s plugin and
+    /// return the JSON-RPC `result` value verbatim.
+    ///
+    /// Per `DEC-0015` D2, this is the single chokepoint UCIL uses to
+    /// invoke any tool on any registered plugin.  The three current
+    /// callers are:
+    ///
+    /// 1. [`crate::g2_search::ProbeProvider::execute`] (this WO,
+    ///    P2-W7-F06) — calls Probe's `search_code` for the G2 fan-out.
+    /// 2. Future P2-W8-F08 (`find_similar`) — calls the same Probe
+    ///    plugin or a vector plugin with structured arguments.
+    /// 3. Future Phase-3 host adapters that proxy `tools/call` from
+    ///    Codex / Cursor / Cline through the daemon.
+    ///
+    /// # Wire sequence
+    ///
+    /// 1. [`Self::spawn`] launches the plugin via the manifest's
+    ///    `[transport]` table.
+    /// 2. [`Self::run_protocol_prefix`] sends `initialize` and
+    ///    `notifications/initialized`.
+    /// 3. A single `tools/call` request is written with id `3` and the
+    ///    caller-supplied `tool_name` + `arguments`.
+    /// 4. One response frame is read; its top-level JSON is parsed; the
+    ///    `result` field is returned.  A JSON-RPC error envelope
+    ///    (`response.error`) is converted to
+    ///    [`PluginError::ProtocolError`].
+    /// 5. The whole sequence is wrapped in
+    ///    [`tokio::time::timeout`] with `timeout_ms`; on `Elapsed` the
+    ///    method returns [`PluginError::Timeout`].
+    /// 6. Whatever the outcome, the spawned child is killed and reaped
+    ///    so the helper does not leak processes.
+    ///
+    /// # Errors
+    ///
+    /// * [`PluginError::Spawn`] / [`PluginError::MissingStdio`] /
+    ///   [`PluginError::StdioTransport`] — transport failures.
+    /// * [`PluginError::Timeout`] — the budget expired.
+    /// * [`PluginError::ProtocolError`] — malformed JSON or a
+    ///   JSON-RPC error envelope.
+    pub async fn run_tools_call(
+        manifest: &PluginManifest,
+        tool_name: &str,
+        arguments: &serde_json::Value,
+        timeout_ms: u64,
+    ) -> Result<serde_json::Value, PluginError> {
+        let budget = Duration::from_millis(timeout_ms);
+        let mut child = Self::spawn(manifest)?;
+        let result = timeout(
+            budget,
+            Self::drive_tools_call(&mut child, tool_name, arguments),
+        )
+        .await;
+
+        // Always reap the child — don't let it linger.
+        let _ = child.start_kill();
+        let _ = child.wait().await;
+
+        match result {
+            Ok(inner) => inner,
+            Err(_elapsed) => Err(PluginError::Timeout { ms: timeout_ms }),
+        }
+    }
+
+    /// Helper for [`Self::run_tools_call`] — runs the protocol prefix,
+    /// sends `tools/call`, parses the reply.  Extracted so the outer
+    /// [`tokio::time::timeout`] wrapper covers both the prefix and the
+    /// call without duplicating the timeout across the three `.await`
+    /// points.
+    async fn drive_tools_call(
+        child: &mut Child,
+        tool_name: &str,
+        arguments: &serde_json::Value,
+    ) -> Result<serde_json::Value, PluginError> {
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or(PluginError::MissingStdio("stdin"))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or(PluginError::MissingStdio("stdout"))?;
+        let mut reader = BufReader::new(stdout);
+
+        Self::run_protocol_prefix(&mut stdin, &mut reader).await?;
+
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {
+                "name": tool_name,
+                "arguments": arguments,
+            },
+        });
+        let mut serialized = serde_json::to_vec(&request)
+            .map_err(|e| PluginError::ProtocolError(format!("encode tools/call: {e}")))?;
+        serialized.push(b'\n');
+        stdin
+            .write_all(&serialized)
+            .await
+            .map_err(PluginError::StdioTransport)?;
+        stdin.flush().await.map_err(PluginError::StdioTransport)?;
+        // Signal EOF so the plugin's loop exits cleanly after responding.
+        stdin
+            .shutdown()
+            .await
+            .map_err(PluginError::StdioTransport)?;
+
+        let mut response_line = String::new();
+        reader
+            .read_line(&mut response_line)
+            .await
+            .map_err(PluginError::StdioTransport)?;
+        parse_tools_call_response(&response_line)
     }
 
     // ── HOT/COLD lifecycle façade ────────────────────────────────────────────
@@ -1514,6 +1682,44 @@ fn parse_tools_list_response(frame: &str) -> Result<Vec<String>, PluginError> {
         names.push(name.to_owned());
     }
     Ok(names)
+}
+
+/// Parse a single JSON-RPC 2.0 `tools/call` response frame and return
+/// the unparsed `result` field.
+///
+/// The caller (typically a [`crate::g2_search::G2SourceProvider`] impl)
+/// owns the response schema for its specific tool — Probe's
+/// `search_code` ships markdown-in-`result.content`, future tools may
+/// ship structured JSON.  Returning the verbatim `result` value keeps
+/// the parser engine-agnostic per `DEC-0015` D2.
+///
+/// On a JSON-RPC error envelope (`response.error.code` present) returns
+/// [`PluginError::ProtocolError`] containing the upstream error code +
+/// message.
+fn parse_tools_call_response(frame: &str) -> Result<serde_json::Value, PluginError> {
+    if frame.trim().is_empty() {
+        return Err(PluginError::ProtocolError(
+            "plugin closed its stdout without sending a tools/call response frame".to_owned(),
+        ));
+    }
+    let value: serde_json::Value = serde_json::from_str(frame.trim())
+        .map_err(|e| PluginError::ProtocolError(format!("invalid JSON: {e}")))?;
+
+    if let Some(err) = value.get("error") {
+        let code = err.get("code").and_then(serde_json::Value::as_i64);
+        let message = err
+            .get("message")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("(no message)");
+        return Err(PluginError::ProtocolError(format!(
+            "tools/call returned JSON-RPC error: code={}, message={}",
+            code.map_or_else(|| "?".to_owned(), |c| c.to_string()),
+            message,
+        )));
+    }
+    value.get("result").cloned().ok_or_else(|| {
+        PluginError::ProtocolError("tools/call response missing `result` field".to_owned())
+    })
 }
 
 // ── Module-level acceptance test ─────────────────────────────────────────────
