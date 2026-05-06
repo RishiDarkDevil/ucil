@@ -11,6 +11,7 @@ description = "UCIL embedding inference: ONNX Runtime integration, chunking, mod
 ndarray.workspace = true
 ort.workspace = true
 thiserror.workspace = true
+tokenizers.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 ucil-core = { path = "../ucil-core" }

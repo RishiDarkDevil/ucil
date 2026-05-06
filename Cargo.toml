@@ -190,6 +190,20 @@ ort = { version = "=2.0.0-rc.12", default-features = false, features = ["std", "
 # only feature we need for `from_shape_vec`.
 ndarray = { version = "0.16", default-features = false, features = ["std"] }
 
+# HuggingFace `tokenizers` Rust crate — back the `CodeRankEmbed`
+# tokenization layer (master-plan §18 Phase 2 Week 8 line 1787,
+# `P2-W8-F02`).  Loads the upstream `tokenizer.json` produced by the
+# HuggingFace `transformers` toolchain and exposes encode/decode without
+# Python interop.  WO-0059 scope_in[0] prescribes `tokenizers = "0.20"`
+# but the crates.io stable line as of 2026-05-06 is `0.23.1`; per the
+# WO's "pick the closest semver if upstream has churned" carve-out, the
+# `0.23` line is the natural pick — `onig` + `esaxx_fast` features are
+# unchanged from `0.20`, the `Tokenizer::from_file` /
+# `Tokenizer::encode` API surface this WO exercises is stable across
+# `0.20`–`0.23`.  `default-features = false` drops the
+# `progressbar` / `indicatif` transitive bloat.
+tokenizers = { version = "0.23", default-features = false, features = ["onig", "esaxx_fast"] }
+
 [profile.dev]
 opt-level = 0
 
