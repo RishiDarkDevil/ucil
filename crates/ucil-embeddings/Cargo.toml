@@ -18,4 +18,14 @@ ucil-core = { path = "../ucil-core" }
 ucil-treesitter = { path = "../ucil-treesitter" }
 
 [dev-dependencies]
+criterion.workspace = true
 tempfile.workspace = true
+
+# `harness = false` tells cargo to use criterion's `main()` (declared in
+# `benches/throughput.rs` via `criterion_main!`), NOT Rust's default
+# `#[test]` harness.  Required for `cargo bench --bench throughput` to
+# pick up the criterion entry-point.  Master-plan §4.2 line 303 +
+# §18 Phase 2 Week 8 line 1789 (`P2-W8-F06` / `WO-0061`).
+[[bench]]
+name = "throughput"
+harness = false
