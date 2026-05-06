@@ -383,28 +383,33 @@ impl CodeRankEmbed {
         let (_shape, slice) = sentence.try_extract_tensor::<f32>()?;
         let raw = slice.to_vec();
 
-        if raw.len() != EMBEDDING_DIM {
-            return Err(CodeRankEmbedError::DimensionMismatch {
-                expected: EMBEDDING_DIM,
-                got: raw.len(),
-            });
-        }
-        let mut pooled = raw;
-
-        let norm_sq: f32 = pooled.iter().map(|x| x * x).sum();
-        let norm = norm_sq.sqrt().max(f32::EPSILON);
-        for p in &mut pooled {
-            *p /= norm;
-        }
-
-        if pooled.len() != EMBEDDING_DIM {
-            return Err(CodeRankEmbedError::DimensionMismatch {
-                expected: EMBEDDING_DIM,
-                got: pooled.len(),
-            });
-        }
-        Ok(pooled)
+        pool_and_normalise(&raw)
     }
+}
+
+/// Validate the raw `sentence_embedding` slice and `L2`-normalise.
+///
+/// Extracted from [`CodeRankEmbed::embed`] in the `WO-0059` retry-1
+/// coverage-driven refactor so the dimension-invariant + normalisation
+/// logic is testable in isolation (the seven `CodeRankEmbedError`
+/// variants would otherwise demand a real-model fixture per branch).
+/// Production semantics are unchanged; the post-normalise length guard
+/// is elided because the helper preserves length by construction (a
+/// `for p in &mut pooled` loop cannot grow or shrink the `Vec`).
+fn pool_and_normalise(raw: &[f32]) -> Result<Vec<f32>, CodeRankEmbedError> {
+    if raw.len() != EMBEDDING_DIM {
+        return Err(CodeRankEmbedError::DimensionMismatch {
+            expected: EMBEDDING_DIM,
+            got: raw.len(),
+        });
+    }
+    let mut pooled = raw.to_vec();
+    let norm_sq: f32 = pooled.iter().map(|x| x * x).sum();
+    let norm = norm_sq.sqrt().max(f32::EPSILON);
+    for p in &mut pooled {
+        *p /= norm;
+    }
+    Ok(pooled)
 }
 
 /// Frozen acceptance test for `P2-W8-F02` per `DEC-0007` module-root
