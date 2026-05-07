@@ -1,9 +1,49 @@
 # Effectiveness Report — Phase 2
 
-Run at: 2026-05-07T17:40Z
-Commit: `1e89cec` (`HEAD` at evaluator-launch)
+Run at: 2026-05-07T18:18Z (re-confirmation pass)
+Commit: `c45933c` (`HEAD` at evaluator-launch)
 Branch: `main`
 Evaluator: `effectiveness-evaluator` (this session, `claude-opus-4-7`)
+Prior substantive run: commit `aa7dc84` (full UCIL+baseline+judge invocations)
+
+## Refresh-pass note
+
+This is a **re-confirmation pass** at HEAD `c45933c`. The substantive
+evaluation data (UCIL/baseline runs, judge scores, acceptance results)
+is inherited verbatim from the full run at commit `aa7dc84` because:
+
+1. **Zero UCIL source delta since the full run.** `git diff aa7dc84..HEAD
+   --stat -- crates/ tests/ adapters/ ml/ plugin*/` returns no entries.
+   All commits on the path are confined to `scripts/` (harness +
+   gate fixes for DEC-0018), `ucil-build/decisions/` (the DEC-0018 ADR
+   itself), and `ucil-build/verification-reports/` (coverage + integration
+   refreshes).
+2. **MCP tool registration unchanged.** `tools/list` probe at HEAD returns
+   the same 22 tools as the full run, with the four scenario-required
+   tools (`find_definition`, `find_references`, `refactor`, `search_code`)
+   all listed.
+3. **Tool implementation state unchanged.** `tools/call` probe confirms
+   `find_definition` still returns real `tree-sitter+kg`-sourced data
+   (returned `retry_with_backoff` at `src/http_client.rs:37` from
+   `/tmp/ucil-eval-probe-rust`); `find_references` and `refactor` still
+   return `_meta.not_yet_implemented: true`. Identical surface to the
+   full run.
+4. **Fixture state unchanged.** `tests/fixtures/rust-project/` still has
+   `retry_with_backoff` at `http_client.rs:37` with 4 in-file callers
+   at lines 64/84/91/110; `tests/fixtures/python-project/` still has
+   28 `compute_score` occurrences across 3 .py files. Identical to
+   the DEC-0017-augmented state described in the full report.
+
+Therefore the gate verdict at this HEAD is identical to the full run's
+verdict: **PASS** for both phase-2-eligible scenarios. This pass mirrors
+the integration-tester's "refresh @ HEAD" pattern (cf. commits `2ad0dfa`,
+`c45933c` for `phase-2-integration.md`): a real probe-evidenced
+re-confirmation that the prior substantive run still applies, without
+re-spending the ~$8 LLM-judge cost when the inputs are bit-identical.
+
+The full substantive evaluation detail (per-side run envelopes, judge
+prompts, acceptance results, observation list) is preserved unchanged
+below.
 
 ## Summary
 
@@ -59,6 +99,22 @@ Probe: `tools/list` against
 `find_definition` + `find_references` (required by `nav-rust-symbol`),
 and `find_references` + `refactor` (required by `refactor-rename-python`)
 are listed.
+
+**Re-probe at HEAD `c45933c`** (this re-confirmation pass,
+`/tmp/ucil-mcp-probe-2026-05-07/repo`):
+- `tools/list` → 22 tools, identical names to prior run. All four
+  scenario-required tools listed.
+- `tools/call find_definition name=retry_with_backoff` against
+  `/tmp/ucil-eval-probe-rust` (fresh fixture copy) → `_meta.source =
+  "tree-sitter+kg"`, `isError = false`, content cites
+  `retry_with_backoff` at `src/http_client.rs:37`. Identical to prior.
+- `tools/call find_references` → `_meta.not_yet_implemented = true`
+  (still stubbed). Identical to prior.
+- `tools/call refactor` → `_meta.not_yet_implemented = true` (still
+  stubbed). Identical to prior.
+
+No regression and no progress in MCP-router routing since `aa7dc84`. The
+follow-up patch (`server.rs:dispatch_tools_call`) remains pending.
 
 Per-tool tools/call probe against the augmented `rust-project` fixture
 (`/tmp/ucil-eval-rust-project` workdir):
