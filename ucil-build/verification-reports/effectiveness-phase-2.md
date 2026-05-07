@@ -1,7 +1,7 @@
 # Effectiveness Report — Phase 2
 
-Run at: 2026-05-07T16:37Z
-Commit: `d3c3c03707a46b73b2fcb43c6d85ba4fb608ec55`
+Run at: 2026-05-07T17:23Z
+Commit: `1414586476678ca46564548c3ba35807c49e4907`
 Branch: `main`
 Evaluator: `effectiveness-evaluator` (fresh session, `claude-opus-4-7`)
 
@@ -10,354 +10,413 @@ Evaluator: `effectiveness-evaluator` (fresh session, `claude-opus-4-7`)
 | metric | value |
 |---|---|
 | Scenarios discovered for phase 2 | 2 |
-| Scenarios run | 1 |
+| Scenarios run | 2 |
 | Scenarios skipped (`tool_not_ready`) | 0 |
-| Scenarios skipped (`scenario_defect`) | 1 |
-| Scenarios PASS | 0 |
+| Scenarios skipped (`scenario_defect`) | 0 |
+| Scenarios PASS | 1 |
 | Scenarios WIN | 0 |
 | Scenarios FAIL | 1 |
 
-**Gate verdict: FAIL (per strict contract reading).** Of the two
-phase-2-eligible scenarios, `refactor-rename-python` was skipped with
-`skipped_scenario_defect` (its task asserts the existence of a
-`compute_score` function that the `python-project` fixture does not
-contain — see escalation
-`20260507T1629Z-effectiveness-refactor-rename-python-fixture-missing-symbol.md`).
-The remaining scenario `nav-rust-symbol` was executed end-to-end. Both
-UCIL and baseline produced substantively-correct answers ("no qualifying
-HTTP-retry-with-exponential-backoff functions exist", matching ground
-truth). LLM judges scored UCIL **5 / 5 / 5 / 4** and baseline **5 / 5 / 5
-/ 5** across `correctness / caller_completeness / precision / formatting`.
-Weighted means: UCIL **4.9231**, baseline **5.0000**, **Δ weighted =
-−0.0769** (UCIL ≈ baseline within judge noise).
+**Gate verdict: FAIL.** This is the first phase-2 effectiveness run after
+ADR DEC-0017 augmented the rust-project + python-project fixtures with
+the symbols both scenarios assert. Both scenarios are now substantively
+runnable end-to-end (no scenario_defect skips). The two outcomes:
 
-**Why the surviving scenario FAILs:**
-1. Acceptance check #3 (`cites at least one .rs:LINE`) was RED on the
-   **UCIL** side (PASS on baseline this run). Per
-   `.claude/agents/effectiveness-evaluator.md` §6 ("FAIL: acceptance_checks
-   red on UCIL run"), this is a per-scenario FAIL.
-2. The UCIL judge gave `formatting = 4` while baseline got `formatting =
-   5` (Δ = −1.0, exceeds the 0.5 tolerance window). Per the same §6
-   ("OR UCIL underperforms baseline by > 0.5 on any criterion"), this is
-   a second independent FAIL trigger.
+- **`nav-rust-symbol`** → **PASS**. UCIL and baseline both correctly
+  identified `rust_project::http_client::retry_with_backoff` (defined at
+  `src/http_client.rs:37`) and `rust_project::http_client::fetch_startup_banner`
+  (defined at `src/http_client.rs:62`), enumerated all real callers, and
+  emitted the H2-per-function + bulleted-caller structure. UCIL judge
+  scored **5/5/5/5** across `correctness/caller_completeness/precision/formatting`;
+  baseline scored **5/4/5/5** (UCIL caught the rustdoc-doctest caller at
+  line 26 that baseline omitted). Weighted-mean Δ = **+0.3077** (UCIL
+  5.0000 vs baseline 4.6923), so UCIL non-trivially outperforms baseline
+  on a substantive criterion (caller_completeness +1.0); not far enough
+  for WIN (Δ < 1.0) but a clean PASS.
+- **`refactor-rename-python`** → **FAIL**. UCIL's safety score
+  (1/5) underperforms baseline's safety (5/5) by 4.0 — far beyond the
+  ±0.5 noise window. Both sides rendered the rename correctly
+  (`compute_score` → `compute_relevance_score`) and both pytest suites
+  pass (159/159). The differentiator is that UCIL made two *drive-by*
+  edits unrelated to the rename — adding `pythonpath = ["src"]` to
+  `pyproject.toml`, and renaming five `l`/`r` ambiguous one-letter
+  variables to `lhs`/`rhs` in operator handlers in `evaluator.py` to
+  silence the pre-existing `ruff E741` errors. UCIL satisfied all four
+  acceptance checks (4/4 PASS); baseline produced a cleaner refactor
+  (3 files modified, no drive-by edits) but failed acceptance check #3
+  (`ruff clean`) because the pre-existing E741 errors at
+  `evaluator.py:1099,1133,1156,1178,1203` remain. The rubric `safety`
+  criterion (weight 1.0) explicitly penalises drive-by edits — UCIL
+  earned a 1 there, baseline earned a 5.
 
-Both fail-triggers are **driven by a single root cause**: the truthful
-answer to this task on this fixture ("no qualifying functions") naturally
-contains no `.rs:LINE` tokens. UCIL chose to enumerate negative-search
-keywords without citing fixture file:line tokens; baseline incidentally
-emitted `src/parser.rs:617,621,738` and `src/eval_ctx.rs:49`,
-`src/util.rs:10` tokens as "incidental substring hits inside unrelated
-identifiers" (the word "surface"). Whether either side emits a `.rs:LINE`
-token in evidence prose is **stochastic LLM narrative style**, not a
-substantive UCIL regression.
-
-This is the **fourth recorded instance** of the
-scenario-fixture-alignment flake described in escalation
-`20260507T0357Z-effectiveness-nav-rust-symbol-rs-line-flake.md`. The
-historical pattern (one PASS/PASS, one FAIL/FAIL, two FAIL/PASS) confirms
-the flake is bidirectional. The substantive UCIL behaviour is
-indistinguishable from baseline on this null-ground-truth scenario.
+A new escalation
+(`20260507T1723Z-effectiveness-refactor-rename-python-fixture-pre-existing-ruff-errors.md`)
+documents the structural tension: the scenario task demands
+`ruff check . == 0` but the original fixture (`8379a06`) has 5
+pre-existing E741 errors orthogonal to the rename. No agent can satisfy
+both `ruff clean` AND `no drive-by edits` without modifying upstream
+fixtures or relaxing the acceptance check.
 
 ## Tool-availability probe
 
 `tools/list` against `ucil-daemon mcp --stdio --repo /tmp/ucil-mcp-probe/repo`
-reported all 22 §3.2 tools registered. The two tools required by
-`nav-rust-symbol` (`find_definition`, `find_references`) are both
-registered.
+reported all 22 §3.2 tools registered (probe succeeded with exit 0). The
+required-tools sets for both phase-2-eligible scenarios are present:
 
-| tool | listed? | tools/call returns real data? |
-|---|---|---|
-| `find_definition` | yes | yes — `_meta.source = "tree-sitter+kg"`, `found=true`, real `file_path`/`start_line`/`qualified_name` |
-| `find_references` | yes | **no** — handler returns `_meta.not_yet_implemented: true` |
-| `refactor` | yes | **no** — handler returns `_meta.not_yet_implemented: true` |
-| `search_code` | yes | yes — `_meta.count`, `results[]` populated |
+| scenario | requires_tools | listed? | tools/call returns real data? |
+|---|---|---|---|
+| `nav-rust-symbol` | `find_definition` | yes | yes — `_meta.callers`, `_meta.found=true`, real `file_path`/`start_line`/`qualified_name` |
+| `nav-rust-symbol` | `find_references` | yes | **no** — handler returns `_meta.not_yet_implemented: true` |
+| `refactor-rename-python` | `find_references` | yes | **no** — handler returns `_meta.not_yet_implemented: true` |
+| `refactor-rename-python` | `refactor` | yes | **no** — handler returns `_meta.not_yet_implemented: true` |
 
-Note on `find_references`: `feature-list.json` records `P2-W7-F05` as
-`passes=true` (verified by `verifier-d249db74-...`), but the MCP-layer
-routing in `crates/ucil-daemon/src/server.rs:700-758` still falls through
-to the Phase-1 stub for `find_references` and `refactor`. The fusion-layer
-implementation exists (per `executor.rs:497`, `:792`, `:965`, `:1177`,
-`:1222`, `:2109`, `:2383` references), but a follow-up WO is needed to
-swap the stub dispatch in `dispatch_tools_call` for the real fusion path.
-This does **not** change the eligibility for this scenario per
-§"Tool-availability checks" ("operational" = registered + responsive),
-matching the precedent from the phase-1 report.
+Per `.claude/agents/effectiveness-evaluator.md` §"Tool-availability checks"
+("operational" = registered + responsive), both scenarios are eligible.
+UCIL agents fall back to Edit/Read/Grep when the stub envelopes return
+`not_yet_implemented`; this matches the precedent set by the prior
+phase-1 and phase-2 reports. The same tool-routing follow-up identified
+in commit `76045c6`'s report still applies: routing
+`find_references` / `refactor` from `dispatch_tools_call` to the
+fusion-layer impls remains pending.
 
 ## Scenarios
 
-| scenario | requires_tools | tools_real | UCIL pass? | UCIL score | Baseline score | Δ weighted | verdict |
-|---|---|---|---|---|---|---|---|
-| `nav-rust-symbol` | `find_definition`, `find_references` | `find_definition` (real); `find_references` (stub — `_meta.not_yet_implemented: true`) | acceptance partial: 2 of 3 checks PASS, `cites file:line` FAIL on UCIL (PASS on baseline) | 4.9231 | 5.0000 | −0.0769 | **FAIL** |
-| `refactor-rename-python` | `find_references`, `refactor` | n/a — scenario skipped before tool-call | n/a | n/a | n/a | n/a | **`skipped_scenario_defect`** |
+| scenario | UCIL acceptance | UCIL score (weighted) | Baseline score (weighted) | Δ weighted | verdict |
+|---|---|---|---|---|---|
+| `nav-rust-symbol` | 3/3 PASS | **5.0000** (5/5/5/5) | 4.6923 (5/4/5/5) | **+0.3077** | **PASS** |
+| `refactor-rename-python` | 4/4 PASS | 4.2727 (5/5/1) | **5.0000** (5/5/5) | **−0.7273** | **FAIL** |
 
 ## Per-scenario detail
 
-### nav-rust-symbol
+### nav-rust-symbol — PASS
 
-**Fixture**: `tests/fixtures/rust-project` — a self-contained expression
-parser/evaluator. `Cargo.toml` declares zero dependencies; case-insensitive
-grep across the fixture for any of `retry / backoff / exponential / http /
-reqwest / hyper / tokio / async / Client / fetch / request / attempt /
-max_retries / jitter / sleep` returns zero match in any source file.
-
-**Ground truth**: "no HTTP-retry exponential-backoff functions exist".
-Confirmed by independent grep + per-file SHA-256 inventory at
-`/tmp/ucil-eval-nav-rust-symbol/fixture-checksum.txt` (9 files,
-byte-for-byte identical to the fixture committed at HEAD).
+**Fixture state.** `tests/fixtures/rust-project/src/http_client.rs` (added
+in commit `1c42c77` per ADR DEC-0017) defines a real
+`retry_with_backoff` combinator that doubles `delay` after each failed
+attempt (`delay = delay.checked_mul(2)…` at `src/http_client.rs:52`),
+plus a thin HTTP-style wrapper `fetch_startup_banner` that calls it. The
+fixture was confirmed byte-for-byte at the run's HEAD by SHA-256 of all
+9 source files at `/tmp/ucil-eval-nav-rust-symbol/fixture-checksum.txt`.
 
 **Setup**
 - `/tmp/ucil-eval-nav-rust-symbol/ucil/` — fresh fixture copy for UCIL run
 - `/tmp/ucil-eval-nav-rust-symbol/baseline/` — fresh fixture copy for baseline run
-- Output sink: `/tmp/ucil-eval-out/nav-rust-symbol.md` (rotated per side)
-- Identical task prompt for both sides modulo "Fixture root: …" line; both prompts captured verbatim at `ucil-prompt.md` / `baseline-prompt.md`
+- Output sink: `/tmp/ucil-eval-out/nav-rust-symbol.md` (rotated between runs)
+- Identical task prompt for both sides modulo "Fixture root: …"; both
+  prompts captured verbatim at `ucil-prompt.md` / `baseline-prompt.md`
 
 **UCIL run**
 - Transport: `ucil-daemon mcp --stdio --repo /tmp/ucil-eval-nav-rust-symbol/ucil`
 - MCP config: `--mcp-config $ROOT/mcp-ucil.json --strict-mcp-config`
 - Settings: `--setting-sources ""` (no project / user / local settings)
-- Session: `9e798e5d-5858-463c-8190-f0cbd1cb979d` (fresh, deterministic UUID)
+- Session: `31d501d1-8eed-43bf-a17b-25b09b2d1a35`
 - Model: `claude-opus-4-7`
-- `duration_ms`: 152 966 (≈ 153 s)
-- `num_turns`: 30
-- `total_cost_usd`: 0.8548
-- `usage.input_tokens`: 44
-- `usage.cache_read_input_tokens`: 812 660
-- `usage.cache_creation_input_tokens`: 37 865
-- `usage.output_tokens`: 8 437
-- `is_error`: false
-- Output: 45 lines, written to `/tmp/ucil-eval-out/nav-rust-symbol.md`,
+- `duration_ms`: 164 336 (≈ 164 s)
+- `num_turns`: 26
+- `total_cost_usd`: 0.7843
+- `usage.input_tokens`: 33; `cache_read_input_tokens`: 532 750;
+  `cache_creation_input_tokens`: 35 238; `output_tokens`: 11 874
+- `is_error`: false; `stop_reason`: end_turn
+- Output: 50 lines, written to `/tmp/ucil-eval-out/nav-rust-symbol.md`,
   preserved at `/tmp/ucil-eval-nav-rust-symbol/ucil-output.md`
 
-**UCIL agent self-report** (excerpted from output, `ucil-output.md` lines 36–45):
-
-> *"This run was intended to use the UCIL MCP tools, but the deferred-tool
-> schemas surfaced for `mcp__ucil__search_code`, `mcp__ucil__find_definition`,
-> and `mcp__ucil__understand_code` did not expose the required `query` /
-> `name` / `target` arguments (despite `additionalProperties: true`), so
-> each invocation was rejected with `InputValidationError`. The conclusion
-> above was therefore verified with `Grep` + `Read` against the fixture;
-> the result (no HTTP retry/backoff functions exist) is independent of
-> which tool is used."*
-
-This is a real UCIL surface defect orthogonal to the scenario-fixture
-flake: the `inputSchema` returned by `tools/list` advertises only the
-universal CEQP fields (`current_task`, `files_in_context`, `reason`,
-`token_budget`) plus `additionalProperties: true`, but Claude Code's
-deferred-tool dispatcher rejects calls whose arguments are not in the
-schema's `properties` map. Filed for triage as a follow-up note in this
-report; no separate escalation since the scenario's substantive answer is
-correct on grep+Read alone for this null-ground-truth fixture, and a
-positive-match scenario will eventually exercise the path under the
-fixture-augmentation remediation tracked in
-`20260507T0357Z-effectiveness-nav-rust-symbol-rs-line-flake.md`.
+**UCIL agent self-report (excerpt).** The agent attempted UCIL MCP tools
+first per the prompt, fell back to `Glob`+`Grep`+`Read` when the
+deferred-tool dispatcher rejected per-tool argument schemas (still the
+known `inputSchema.properties` defect from commit `76045c6`'s report),
+and produced the canonical answer with all real callers cited. The
+agent included the rustdoc doctest invocation at `src/http_client.rs:26`
+as a caller — which the judge correctly credited.
 
 **Baseline run**
 - Transport: no MCP servers (`mcp-empty.json` with empty `mcpServers`)
 - MCP config: `--mcp-config $ROOT/mcp-empty.json --strict-mcp-config`
-- Settings: `--setting-sources ""` (no project / user / local settings)
-- Session: `f095d7b1-e07b-44df-a2c0-c9262f279cd7` (fresh, deterministic UUID)
+- Settings: `--setting-sources ""`
+- Session: `67566a42-68cc-46a3-894f-7eb7d72e3b81`
 - Model: `claude-opus-4-7`
-- `duration_ms`: 77 955 (≈ 78 s)
-- `num_turns`: 18
-- `total_cost_usd`: 0.5460
-- `usage.input_tokens`: 23
-- `usage.cache_read_input_tokens`: 574 256
-- `usage.cache_creation_input_tokens`: 23 129
-- `usage.output_tokens`: 4 539
-- `is_error`: false
-- Output: 55 lines, written to `/tmp/ucil-eval-out/nav-rust-symbol.md`,
+- `duration_ms`: 48 331 (≈ 48 s)
+- `num_turns`: 12
+- `total_cost_usd`: 0.2921
+- `usage.input_tokens`: 13; `cache_read_input_tokens`: 208 070;
+  `output_tokens`: 3 573
+- `is_error`: false; `stop_reason`: end_turn
+- Output: 32 lines, written to `/tmp/ucil-eval-out/nav-rust-symbol.md`,
   preserved at `/tmp/ucil-eval-nav-rust-symbol/baseline-output.md`
+
+Baseline produced an essentially-equivalent answer but did **not**
+include the rustdoc-doctest caller at `src/http_client.rs:26`, which the
+judge credited UCIL for; that single caller is the source of UCIL's
++1 caller_completeness lead.
 
 **Acceptance checks**
 
 | check | UCIL | Baseline |
 |---|---|---|
 | `test -f /tmp/ucil-eval-out/nav-rust-symbol.md` | PASS | PASS |
-| `test $(wc -l < /tmp/ucil-eval-out/nav-rust-symbol.md) -ge 5` | PASS (45) | PASS (55) |
-| `grep -qE "\.rs:[0-9]+" /tmp/ucil-eval-out/nav-rust-symbol.md` | **FAIL** | **PASS** |
+| `test $(wc -l < /tmp/ucil-eval-out/nav-rust-symbol.md) -ge 5` | PASS (50 lines) | PASS (32 lines) |
+| `grep -qE "\\.rs:[0-9]+" /tmp/ucil-eval-out/nav-rust-symbol.md` | **PASS** | **PASS** |
 
-The UCIL output reports its negative-search keywords inline but does not
-quote any `<file>.rs:<line>` token; the closest reference is the prose
-`mcp__ucil__search_code` / `mcp__ucil__find_definition` mentions which are
-not `.rs:LINE` shape. The baseline output incidentally cites
-`src/parser.rs:617,621,738`, `src/eval_ctx.rs:49`, and `src/util.rs:10`
-under the disclaimer *"only `surf` substring matches were incidental hits
-inside `surface` in documentation prose"*, satisfying the grep
-acceptance check trivially. Neither side claimed any function exists; both
-correctly concluded "no qualifying functions" — the acceptance check
-diverges purely on whether the agent happened to emit the literal
-`<file>.rs:<line>` token in passing.
+The `.rs:LINE` flake from prior phase-2 runs (escalation
+`20260507T0357Z-effectiveness-nav-rust-symbol-rs-line-flake.md`) is
+**resolved** by DEC-0017's positive-ground-truth fixture: both sides
+naturally cite `src/http_client.rs:<line>` tokens because the answer is
+non-empty.
 
 **Judge scoring** (fresh `claude -p` session per side, run from
 `cd /tmp` so the repo's project hooks/settings cannot interfere;
-`--setting-sources ""`, `--strict-mcp-config` with empty server map; rubric
-copied verbatim from the scenario yaml; ground truth disclosed to the
-judge so it can score correctness against the truth, not against the
-agent's own claims)
+`--setting-sources ""`, `--strict-mcp-config` with empty server map; the
+ground truth is disclosed to the judge so it can score correctness
+against the truth, not against the agent's own claims)
 
 | criterion | weight | UCIL | Baseline | Δ |
 |---|---|---|---|---|
 | correctness         | 3.0 | 5 | 5 | 0 |
-| caller_completeness | 2.0 | 5 | 5 | 0 |
+| caller_completeness | 2.0 | **5** | **4** | **+1** |
 | precision           | 1.0 | 5 | 5 | 0 |
-| formatting          | 0.5 | **4** | **5** | **−1** |
-| **weighted mean**   |     | **4.9231** | **5.0000** | **−0.0769** |
+| formatting          | 0.5 | 5 | 5 | 0 |
+| **weighted mean**   |     | **5.0000** | **4.6923** | **+0.3077** |
 
-UCIL judge (`6fe5e217-36fe-4169-be29-503af047b6b1`):
+UCIL judge (`/tmp/ucil-eval-nav-rust-symbol/judge-ucil-session-id`):
 
-> *"The solution correctly arrives at the ground-truth answer: no
-> functions in the fixture perform HTTP retry with exponential backoff.
-> The agent justifies the empty result with concrete evidence (crate
-> description, module layout, Cargo.lock dependency audit, an explicit
-> list of negative search terms covering HTTP clients, async runtimes,
-> and backoff vocabulary), so correctness and precision are exemplary,
-> and caller_completeness is vacuously satisfied. Formatting loses a
-> point because the spec called for H2-per-function with bulleted callers
-> and the mechanical `\.rs:[0-9]+` check failed; while an empty result
-> set genuinely cannot produce per-function H2s, the document still
-> deviates from the prescribed shape rather than, e.g., emitting an
-> explicit 'none found' section that hugs the template."*
+> *"The solution correctly identifies retry_with_backoff at
+> src/http_client.rs:37 as the primary exponential-backoff retry
+> primitive and includes fetch_startup_banner at src/http_client.rs:62
+> with explicit justification for treating the delegating wrapper as a
+> qualifying function (which the rubric explicitly allows). All five
+> real callers of retry_with_backoff are listed with correct file:line
+> references, including the rustdoc doctest at line 26, and both callers
+> of fetch_startup_banner (src/main.rs:24, src/http_client.rs:124) are
+> present and accurate. There are no fabricated callers, no stdlib
+> references, and no functions misclassified as exponential-backoff. The
+> structure follows H2-per-function with bulleted caller lists; the
+> small intro paragraph and trailing acceptance-check note are minor
+> additions but do not violate the required format."*
 
-Baseline judge (`016648f0-7a42-431b-ae73-366bcc0c541e`):
+Baseline judge (`/tmp/ucil-eval-nav-rust-symbol/judge-baseline-session-id`):
 
-> *"The solution correctly identifies that no qualifying functions exist,
-> matching ground truth. It provides strong evidence: documents the
-> project's purpose from Cargo.toml, verifies zero external dependencies
-> via Cargo.lock, lists all source files with line counts, and reports
-> an exhaustive keyword search across HTTP/retry/backoff/async/networking
-> terms. It even acknowledges incidental substring hits (e.g. 'surface')
-> and explains why they don't qualify. Caller completeness and precision
-> are vacuously satisfied with an empty result set. Formatting is
-> appropriate for a null result — the empty 'Functions found' section
-> with '(none)' is a reasonable rendering of the H2-per-function
-> structure when there are zero functions."*
+> *"Both qualifying functions are correctly identified with accurate
+> definition lines (37 and 62), and the doubling mechanism is correctly
+> cited at line 52. Including fetch_startup_banner is one of the two
+> acceptable judgment calls per the rubric. All four fixture-tree
+> callers of retry_with_backoff (lines 64, 84, 91, 110) and both
+> callers of fetch_startup_banner (main.rs:24, http_client.rs:124) are
+> listed with correct file:line references and no fabrications. The one
+> real omission is the doctest invocation at src/http_client.rs:26,
+> which the ground truth explicitly enumerates as a caller, costing a
+> point on caller_completeness. Precision is clean (no spurious entries)
+> and the H2-per-function plus bulleted-caller formatting matches the
+> spec exactly."*
 
 Both judges returned clean JSON on first attempt.
 
-**Verdict: FAIL** (per strict contract: UCIL acceptance_checks contain a
-red AND UCIL formatting underperforms baseline by 1.0 — both same
-narrative-style coin flip on `.rs:LINE` token emission).
+**Verdict: PASS** (UCIL acceptance all green; UCIL ≥ baseline − 0.5 on
+every criterion: 5≥4.5, 5≥3.5, 5≥4.5, 5≥4.5; not WIN since Δ weighted
++0.3077 < 1.0).
 
-### refactor-rename-python — `skipped_scenario_defect`
+### refactor-rename-python — FAIL
 
-**Reason for skip**: the scenario's task asserts *"In the Python fixture
-at the current working directory, there is a function named
-`compute_score`"* — but `tests/fixtures/python-project/` is a
-self-contained interpreter (lexer / parser / evaluator) with **zero
-occurrences of `compute_score`** anywhere. The fixture's surface is
-`Lexer / Parser / Evaluator / Environment / Token / ASTNode / Value` —
-60+ functions, none related to scoring or relevance.
+**Fixture state.** `tests/fixtures/python-project/src/python_project/scoring.py`
+(added in commit `14bbace` per ADR DEC-0017) defines `compute_score`
+plus a wrapper `aggregate_scores` that calls it; `evaluator.py` defines
+a builtin `_builtin_compute_score` registered under the key
+`"compute_score"` in the builtins dict; `tests/test_scoring.py` covers
+both functions with 13 cases including a `hasattr(scoring, "compute_score")`
+**string** reference. The original fixture (commit `8379a06`) has 5
+pre-existing `ruff E741` errors at `evaluator.py:1099,1133,1156,1178,1203`
+(ambiguous variable name `l` in the `-`/`/`/`%`/`^` operator handlers).
+Fixture state confirmed at HEAD via SHA-256 inventory at
+`/tmp/ucil-eval-refactor-rename-python/fixture-checksum.txt` (12 files).
 
-```
-$ grep -rn "compute_score\|compute_relevance" tests/fixtures/python-project/
-(no output — exit 1)
-```
+**Setup**
+- `/tmp/ucil-eval-refactor-rename-python/ucil/` — fresh fixture copy for UCIL
+- `/tmp/ucil-eval-refactor-rename-python/baseline/` — fresh fixture copy for baseline
+- Each agent runs the rename in its own copy; the harness re-runs
+  `grep`/`ruff`/`pytest` against each copy directly (no shared output sink)
+- Identical prompts modulo "Fixture root: …"; both at `ucil-prompt.md` /
+  `baseline-prompt.md`
 
-The scenario's acceptance check #2 (`grep -rn --include="*.py"
-"\bcompute_relevance_score\b" .`) cannot be satisfied without the agent
-fabricating a function under that name. A truthful agent (UCIL or
-baseline) would correctly report "no `compute_score` function exists in
-this fixture; nothing to rename", which is the right answer to the
-actual fixture state but FAILs acceptance check #2 deterministically.
+**UCIL run**
+- Transport: `ucil-daemon mcp --stdio --repo /tmp/ucil-eval-refactor-rename-python/ucil`
+- Session: `f253433d-a197-4936-8814-4f6c34ddd189`
+- Model: `claude-opus-4-7`
+- `duration_ms`: 233 342 (≈ 233 s); `num_turns`: 41 (hit `max_turns=40`,
+  `terminal_reason=max_turns`); `total_cost_usd`: 1.3520
+- `usage.input_tokens`: 45; `cache_read_input_tokens`: 1 514 388;
+  `cache_creation_input_tokens`: 35 600; `output_tokens`: 14 857
+- `is_error`: true (max_turns); the rename + post-checks completed
+  on-disk before the cap fired
 
-Per `.claude/agents/effectiveness-evaluator.md` §"Hard rules":
+**UCIL files modified (4 files; cache dirs excluded):**
+1. `pyproject.toml` — added `pythonpath = ["src"]` under
+   `[tool.pytest.ini_options]` (drive-by; not required by the rename)
+2. `src/python_project/scoring.py` — `compute_score` →
+   `compute_relevance_score` (definition + docstring examples + caller)
+3. `src/python_project/evaluator.py` — `compute_score` →
+   `compute_relevance_score` (`_builtin_compute_score` →
+   `_builtin_compute_relevance_score`, all docstring + 4 error strings +
+   import + builtins-table key) **AND** drive-by-renamed five `l`/`r`
+   ambiguous one-letter variables to `lhs`/`rhs` in operator handlers
+   (`-`, `/`, `%`, `^`) at lines 1099/1133/1156/1178/1203 to silence the
+   pre-existing E741s
+4. `tests/test_scoring.py` — all `compute_score` occurrences renamed,
+   including the `hasattr(scoring, "compute_score")` string
 
-> If a scenario is bad (ambiguous task, impossible-to-score rubric), file
-> an escalation describing the defect and skip it with
-> `skipped_scenario_defect`.
+**Baseline run**
+- Transport: no MCP servers
+- Session: `9d6d9363-d0ff-476b-b203-88bf897ba821`
+- Model: `claude-opus-4-7`
+- `duration_ms`: 251 664 (≈ 252 s); `num_turns`: 38;
+  `terminal_reason=completed`; `total_cost_usd`: 1.7278
+- `usage.input_tokens`: 48; `cache_read_input_tokens`: 1 749 270;
+  `cache_creation_input_tokens`: 73 333; `output_tokens`: 15 759
+- `is_error`: false
 
-This is the action taken. Escalation filed at
-`ucil-build/escalations/20260507T1629Z-effectiveness-refactor-rename-python-fixture-missing-symbol.md`
-with three remediation options for planner/ADR triage (augment fixture,
-rewrite scenario to target an existing symbol, defer to Phase-8 audit).
-No UCIL run, no baseline run, no judge call.
+**Baseline files modified (3 files):**
+1. `src/python_project/scoring.py` — rename only
+2. `src/python_project/evaluator.py` — rename only (no E741 fix)
+3. `tests/test_scoring.py` — rename only (incl. `hasattr` string)
 
-This is structurally analogous to the existing `nav-rust-symbol` /
-`rust-project` escalation
-(`20260507T0357Z-effectiveness-nav-rust-symbol-rs-line-flake.md`); both
-are scenario-fixture-alignment defects. Recommend triaging together in a
-Phase-8 dedicated audit work-order (per the prior escalation's resolution
-note).
+The baseline agent's final report (verbatim excerpt):
 
-## Observations
+> *"The rename is complete and consistent; the two non-zero exit codes
+> come from environment/baseline issues outside the rename's scope.
+> ruff check . → 1. Five E741 'Ambiguous variable name: \`l\`' errors
+> in src/python_project/evaluator.py at lines 1099, 1133, 1156, 1178,
+> 1203 — these are pre-existing in operator methods I did not touch
+> (my edits were only in lines 189–210 and 675)."*
 
-- **Substantive parity, structural fail.** The UCIL surface produces the
-  same correct null-ground-truth answer as baseline on `nav-rust-symbol`,
-  with all weight ≥ 1.0 criteria scoring 5/5 on both sides. The only
-  differentiator is the 0.5-weighted `formatting` criterion (UCIL 4,
-  baseline 5) — judge noise tied to the same `.rs:LINE` coin flip that
-  drives the acceptance check. Net Δ-weighted = −0.0769.
+i.e. baseline transparently reported the ruff failure as orthogonal to
+its scope, refused to do a drive-by fix, and still satisfied the two
+substantive checks (old name gone, new name present) plus the pytest
+suite.
 
-- **Cost-edge to baseline (informational).** UCIL was ~1.96× slower this
-  run (153 s vs 78 s) and used ~1.41× more cache-read tokens (812 K vs
-  574 K) and ~1.86× more output tokens (8 437 vs 4 539). UCIL spent a
-  number of turns probing MCP tool schemas before falling through to
-  `Glob` / `Grep` / `Read`. For a positive-match task with `find_references`
-  wired through the MCP layer, the advantage shape would flip; that path
-  is gated on the `find_references` MCP-router patch noted in the probe
-  table.
+**Acceptance checks**
 
-- **Stochastic acceptance-check satisfaction (recurrent).** Across the
-  five known runs at five commits:
+| check | UCIL | Baseline |
+|---|---|---|
+| `! grep -rn --include="*.py" "\\bcompute_score\\b" .` (old gone) | PASS | PASS |
+| `grep -rn --include="*.py" "\\bcompute_relevance_score\\b" .` (new present) | PASS | PASS |
+| `ruff check .` (rc=0) | PASS (rc=0; only because UCIL drive-by-fixed E741s) | **FAIL (rc=1; 5 pre-existing E741 errors remain)** |
+| `pytest -q` (rc=0) | PASS (159 passed) | PASS (159 passed) |
 
-  | commit | UCIL acceptance #3 | Baseline acceptance #3 |
-  |---|---|---|
-  | `70aa72e` | PASS | PASS |
-  | `f4adc41` | FAIL | FAIL |
-  | `762bd5d` | FAIL | PASS |
-  | `1f20c3b` | FAIL | FAIL |
-  | `d3c3c03` (this run) | **FAIL** | **PASS** |
+(Note: the harness invokes `PYTHONPATH=src python3 -m pytest -q` for
+acceptance check #4; both sides return rc=0/159-passed under that
+invocation. The scenario yaml's literal `pytest -q 2>&1` would error
+on baseline because the package isn't installed in the eval env, which
+the baseline agent flagged in its final report. The harness's
+PYTHONPATH-augmented invocation is the gate-side standard already used
+in commit `76045c6`'s report and `tests/scenarios/README.md` precedent.)
 
-  Same fixture, same scenario, same UCIL surface. **This is the fifth
-  instance of the documented flake mode** (and the second showing
-  baseline-PASS / UCIL-FAIL asymmetry).
+**Judge scoring** (fresh `claude -p` per side, `cd /tmp`,
+`--setting-sources ""`, `--strict-mcp-config` empty)
 
-- **`find_references` MCP routing is still a stub.** `feature-list.json`
-  records `P2-W7-F05` as `passes=true`, but the dispatch logic in
-  `crates/ucil-daemon/src/server.rs:700-758` still routes
-  `find_references` to the Phase-1 stub envelope. The fusion-layer impl
-  exists per `executor.rs` cross-references; a follow-up MCP-router WO
-  is required to make the tool live to MCP clients. Did NOT bite this
-  scenario (null ground truth — nothing to cross-reference) but will
-  matter for any positive-match nav scenario.
+| criterion | weight | UCIL | Baseline | Δ |
+|---|---|---|---|---|
+| correctness       | 3.0 | 5 | 5 | 0 |
+| test_preservation | 1.5 | 5 | 5 | 0 |
+| safety            | 1.0 | **1** | **5** | **−4** |
+| **weighted mean** |     | **4.2727** | **5.0000** | **−0.7273** |
 
-- **Tool inputSchema gap (UCIL surface bug).** The UCIL agent's
-  self-report flags that `tools/list` returns `inputSchema` containing
-  only the four CEQP universal fields plus `additionalProperties: true`,
-  with no per-tool `properties` (`query` for `search_code`, `name` for
-  `find_definition`, `target` for refactoring tools, etc.). Claude
-  Code's deferred-tool dispatcher rejects calls with
-  `InputValidationError` when arguments aren't in the listed `properties`
-  map, even with `additionalProperties: true`. This forces the agent to
-  fall through to built-in `Grep` / `Read` rather than using UCIL tools.
-  This is orthogonal to the scenario-fixture flake but is the more
-  load-bearing finding from this run — it should be fixed by extending
-  the static `tools_definitions()` table in
-  `crates/ucil-daemon/src/server.rs:280-369` so each tool's
-  `inputSchema.properties` includes the per-tool argument fields it
-  actually consumes (e.g. `find_definition` takes `name` and optional
-  `file_scope`; `search_code` takes `query` and optional `max_results`).
+UCIL judge:
 
-- **Reproducibility note.** Judge sessions ran from `cd /tmp` with
-  explicit `--setting-sources ""` to avoid the repo Stop-hook hijacking
-  documented in the prior reports. Both judges returned clean JSON on
-  first attempt.
+> *"Correctness is exemplary: every reference to compute_score across
+> scoring.py, evaluator.py, and tests/test_scoring.py was renamed
+> including the docstring/error-string mentions, the builtins-table
+> key, and the hasattr string reference; mechanical checks confirm the
+> old name is gone and the new name is present. Test preservation is
+> full: 159 tests pass and the only test edits are the required
+> mechanical rename (including the string-name reference), which is
+> justified by the task. Safety is poor: the agent made two drive-by
+> changes unrelated to the rename — adding pythonpath=['src'] to
+> pyproject.toml (no scenario justification at all, this is purely
+> environmental convenience) and renaming five l/r operator-handler
+> variables to lhs/rhs to silence the pre-existing E741 errors. Even
+> granting the genuine ruff-vs-no-drive-by tension as a defensible call
+> for the E741 fixes, the pyproject.toml edit has no such excuse, and
+> together they constitute clear drive-by scope creep that the rubric
+> explicitly penalises."*
 
-## Substantive judge-tie line
+Baseline judge:
 
-Per-criterion deltas (UCIL − Baseline):
-- correctness: 0
-- caller_completeness: 0
-- precision: 0
-- formatting: −1 (entirely attributable to the missing `.rs:LINE` token,
-  which is the same coin flip as acceptance check #3)
+> *"The rename is complete and accurate across all four expected
+> locations: scoring.py (definition, docstring examples, and
+> aggregate_scores caller), evaluator.py (_builtin_compute_score
+> wrapper definition, docstring, import, error message strings, body
+> call, and the builtins-table key string), and tests/test_scoring.py
+> (import, call sites, and the hasattr string reference). The agent's
+> grep verification confirms no stray compute_score references remain
+> and the new name is present. Tests pass cleanly (159 passed) when
+> invoked the way the repo's own run-acceptance.sh invokes them
+> (PYTHONPATH=src), confirming the rename preserves behavior without
+> modifying tests. The agent correctly refused drive-by edits to the
+> pre-existing E741 errors in unrelated operator methods (lines
+> 1099-1203) that the rename does not touch, which is the behavior the
+> safety criterion rewards; it also transparently reported the ruff
+> non-zero exit and traced it to baseline issues with precise line
+> numbers, distinguishing them from the rename's scope. The ruff
+> failure is entirely attributable to pre-existing fixture errors
+> orthogonal to the task."*
 
-Weighted-mean delta: **−0.0769** (UCIL 4.9231 vs baseline 5.0000).
+Both judges returned clean JSON on first attempt.
 
-UCIL did not regress on any substantive criterion. The single-point
-formatting gap is a downstream symptom of the same narrative-style flake
-that drives acceptance check #3. The substantive UCIL behaviour is
-**indistinguishable from baseline** on this null-ground-truth scenario.
+**Verdict: FAIL** (UCIL underperforms baseline by 4.0 on `safety`,
+exceeding the ±0.5 noise window). UCIL acceptance is all green, but the
+rubric's strict-letter contract triggers FAIL on the per-criterion drop.
+
+## Substantive analysis — root cause of refactor FAIL
+
+UCIL's safety drop has two distinct components:
+
+1. **`pyproject.toml` drive-by** (added `pythonpath = ["src"]`). This
+   has no defensible justification under the rename task. UCIL's
+   environment convenience (so `pytest -q` from the fixture root works
+   without `PYTHONPATH=src`) is unrelated to renaming `compute_score`.
+   This is a clean rubric violation.
+2. **`l`/`r` → `lhs`/`rhs` rename in five operator handlers**. This
+   silences the **pre-existing** ruff E741 errors at
+   `evaluator.py:1099,1133,1156,1178,1203` (introduced in commit
+   `8379a06`, never touched by DEC-0017). Without this fix, acceptance
+   check #3 (`ruff check . == 0`) FAILS because the original fixture is
+   already non-clean. There is genuine tension between the scenario's
+   `ruff clean` requirement and the rubric's `safety` criterion: any
+   agent doing a faithful, scope-bounded rename will hit the
+   pre-existing E741s and the acceptance check will go red.
+
+Component 1 alone is enough to drop UCIL's safety score; component 2
+compounds it. The tension in component 2 is a **fixture quality
+defect** (`fixture-pre-existing-ruff-errors`). It is filed as a new
+escalation (`20260507T1723Z-effectiveness-refactor-rename-python-fixture-pre-existing-ruff-errors.md`)
+for planner triage. Possible remediations (planner / ADR-gated):
+
+- **A. Fix the fixture's E741 errors upstream**, in a follow-up to
+  DEC-0017, so `ruff check .` is clean *before* any rename. This is
+  the cleanest fix; it removes the safety-vs-acceptance tension
+  entirely. Both UCIL and baseline would then be expected to PASS this
+  scenario deterministically.
+- **B. Loosen acceptance check #3** to skip the E741 rule in the
+  scenario yaml (e.g. `ruff check . --select E,W,F --ignore E741`).
+  This degrades the effectiveness signal slightly (one rule's worth of
+  lint coverage gone) but preserves both the rename and the safety
+  contract.
+- **C. Update the rubric** to explicitly carve out "drive-by edits
+  required to satisfy a stated post-condition" as not-penalised. This
+  is more permissive and might erode the safety signal in future
+  scenarios; option A is preferred.
+
+This run records the FAIL faithfully per the strict contract; the gate
+should remain red until one of A/B/C lands.
+
+## Per-criterion deltas (UCIL − Baseline)
+
+| scenario | criterion | weight | UCIL − Baseline |
+|---|---|---|---|
+| nav-rust-symbol | correctness | 3.0 | 0 |
+| nav-rust-symbol | caller_completeness | 2.0 | **+1** |
+| nav-rust-symbol | precision | 1.0 | 0 |
+| nav-rust-symbol | formatting | 0.5 | 0 |
+| refactor-rename-python | correctness | 3.0 | 0 |
+| refactor-rename-python | test_preservation | 1.5 | 0 |
+| refactor-rename-python | safety | 1.0 | **−4** |
 
 ## Gate contract (why this run is FAIL)
 
@@ -367,87 +426,82 @@ Per `.claude/agents/effectiveness-evaluator.md` §6 "Per-scenario verdict":
 > **WIN**: UCIL outperforms baseline by at least 1.0 on the weighted-average score.
 > **FAIL**: `acceptance_checks` red on UCIL run, OR UCIL underperforms baseline by > 0.5 on any criterion.
 
-Two FAIL triggers fire on the surviving scenario:
-1. UCIL acceptance_check `cites at least one file:line` is RED.
-2. UCIL `formatting` = 4 vs baseline `formatting` = 5 (Δ = −1.0 > 0.5).
-
-Both triggers are downstream of the same narrative-style coin flip
-documented above and in the existing escalation. The substantive tie at
-4.9231 / 5.0000 weighted-mean (Δ = −0.0769) is recorded but does not
-override the strict-letter verdict.
+For `refactor-rename-python` UCIL underperforms baseline by 4 points on
+`safety` (>0.5 tolerance) → **FAIL** under the strict-letter rule.
+`nav-rust-symbol` is a clean PASS (UCIL ties or wins on every
+criterion). One scenario FAIL → gate FAIL.
 
 Per `.claude/agents/effectiveness-evaluator.md` §"Exit code":
 
 > 0 if gate passes, 1 if any scenario FAIL, 2 on evaluator-internal error.
 
-One scenario FAIL recorded → **exit 1**.
+Exit code: **1**.
 
 ## Reproducibility
 
-All artefacts of this run are preserved under
-`/tmp/ucil-eval-nav-rust-symbol/`:
+All artefacts of this run are preserved under the per-scenario tempdirs:
 
+### `/tmp/ucil-eval-nav-rust-symbol/`
 - `task.md` — scenario task prompt (verbatim from yaml)
 - `ucil-prompt.md`, `baseline-prompt.md` — full agent task prompts (with fixture root)
-- `ucil-output.md`, `baseline-output.md` — raw agent outputs
+- `ucil-output.md`, `baseline-output.md` — raw agent outputs (copies of `/tmp/ucil-eval-out/nav-rust-symbol.md`)
 - `ucil-run.json`, `baseline-run.json` — `claude -p` JSON envelopes
-  (duration, tokens, session ids, stop reason)
 - `ucil-run.stderr`, `baseline-run.stderr` — child-process stderr
-- `mcp-ucil.json`, `mcp-empty.json` — MCP configs for UCIL and baseline
+- `mcp-ucil.json`, `mcp-empty.json` — MCP configs
 - `run-ucil.sh`, `run-baseline.sh` — exact `claude` invocations
-- `run-judge-ucil.sh`, `run-judge-baseline.sh` — judge invocations
+- `run-judge.sh ucil|baseline` — judge invocations
 - `judge-ucil-prompt.md` (`/tmp/ucil-eval-judge-nav-rust-symbol-ucil.md`),
   `judge-baseline-prompt.md` (`/tmp/ucil-eval-judge-nav-rust-symbol-baseline.md`)
-  — verbatim judge prompts
-- `judge-ucil-raw.json`, `judge-baseline-raw.json` — judge `claude -p`
-  JSON envelopes
+- `judge-ucil-raw.json`, `judge-baseline-raw.json` — judge envelopes
 - `judge-ucil.json`, `judge-baseline.json` — extracted scoring JSON
 - `ucil-acceptance.txt`, `baseline-acceptance.txt` — acceptance check results
-- `ucil-session-id`, `baseline-session-id`, `judge-ucil-session-id`,
-  `judge-baseline-session-id` — session UUIDs
+- `ucil-session-id`, `baseline-session-id`, `judge-{ucil,baseline}-session-id`
 - `fixture-checksum.txt` — per-file SHA-256 of the fixture (9 files)
 
-## Advisory — recurring scenario-fixture defects (Phase-8 audit recommended)
+### `/tmp/ucil-eval-refactor-rename-python/`
+- `task.md`, `ucil-prompt.md`, `baseline-prompt.md`
+- `ucil-output.md` — synthesized summary of UCIL agent's actions (since
+  max_turns truncated the agent's own self-report)
+- `baseline-output.md` — baseline agent's verbatim final message
+- `ucil-run.json`, `baseline-run.json`, `*-run.stderr`
+- `mcp-ucil.json`, `mcp-empty.json`
+- `run-ucil.sh`, `run-baseline.sh`, `run-acceptance.sh`, `run-judge.sh`
+- `judge-{ucil,baseline}-prompt.md`,
+  `judge-{ucil,baseline}-raw.json`, `judge-{ucil,baseline}.json`
+- `ucil-acceptance.txt`, `baseline-acceptance.txt`,
+  `{ucil,baseline}-acc{1..4}-*.txt` — per-acceptance-check artefacts
+- `{ucil,baseline}-session-id`, `judge-{ucil,baseline}-session-id`
+- `fixture-checksum.txt` — per-file SHA-256 of the fixture (12 files)
 
-This phase-2 run records two distinct scenario-fixture-alignment defects:
+## Advisory — fixture quality issue (Phase-2 escalation filed)
 
-1. **`nav-rust-symbol` × `rust-project`** — fifth instance of the
-   `.rs:LINE` flake. Documented in
-   `20260507T0357Z-effectiveness-nav-rust-symbol-rs-line-flake.md`.
-   Resolution deferred to Phase-8 (planner/ADR-gated since `tests/fixtures`
-   and `tests/scenarios` are protected).
+The pre-existing E741 errors in `tests/fixtures/python-project/src/python_project/evaluator.py`
+predate DEC-0017 (introduced by commit `8379a06`, the original fixture
+seed). They constitute a fixture quality defect that surfaces as a
+structural FAIL trigger on the `refactor-rename-python` scenario: any
+faithful, scope-bounded rename agent hits the same trap. A new
+escalation
+(`ucil-build/escalations/20260507T1723Z-effectiveness-refactor-rename-python-fixture-pre-existing-ruff-errors.md`)
+documents this for planner triage.
 
-2. **`refactor-rename-python` × `python-project`** — symbol referenced
-   by scenario does not exist in fixture. Documented in
-   `20260507T1629Z-effectiveness-refactor-rename-python-fixture-missing-symbol.md`
-   (filed by this run).
+The `nav-rust-symbol` scenario is now flake-free post-DEC-0017; the
+prior `.rs:LINE` flake (escalation
+`20260507T0357Z-effectiveness-nav-rust-symbol-rs-line-flake.md`) is
+**resolved** by the augmented fixture (positive ground truth). That
+escalation should be marked `resolved: true` in a follow-up.
 
-Both defects share a structural shape: a scenario asserts the existence
-of code that doesn't exist in the named fixture. A Phase-8
-scenario-fixture-alignment WO should: (a) augment fixtures with the
-referenced symbols, OR (b) rewrite scenarios to target existing symbols,
-plus update `tests/scenarios/README.md` with a guard ("scenarios MUST
-cite at least one identifier that `grep -q` finds in the named
-fixture"). The current effectiveness gate is correctly identifying
-substantive parity but is forced to FAIL by structural contract triggers
-neither side can deterministically satisfy.
+## Follow-up notes for the executor pool (no separate WO filed)
 
-## Follow-up notes for the executor pool (no separate escalations filed)
-
-1. **`find_references` MCP routing patch.** Add a real-handler dispatch
-   to `crates/ucil-daemon/src/server.rs:700-758` that routes
-   `find_references` to the existing fusion-layer code referenced from
-   `executor.rs:497`/`:792`/`:965`/`:1177`/`:1222`/`:2109`/`:2383`,
-   following the same KG-attached-router pattern used for
-   `find_definition` / `get_conventions` / `search_code` /
-   `understand_code` / `find_similar`. Same shape applies to `refactor`
-   when its fusion-layer impl lands. Tracked under existing
-   feature-list entry; not a regression.
-
-2. **Tool inputSchema completeness.** Extend the static
-   `tools_definitions()` table in `crates/ucil-daemon/src/server.rs:280-369`
-   so each tool advertises its real per-tool argument fields under
-   `inputSchema.properties`. Without this, Claude Code's deferred-tool
-   dispatcher rejects MCP tool calls with `InputValidationError` and the
-   agent falls through to built-in `Grep`/`Read`, neutralising the UCIL
-   advantage. This is the most load-bearing finding from this run.
+1. **`find_references` / `refactor` MCP routing patch.** Same
+   dispatcher-routing follow-up identified in the prior phase-2
+   effectiveness report. Until those handlers route to their fusion-layer
+   impls, UCIL agents fall back to `Edit/Read/Grep` for symbol-rename
+   workflows; this matters less for the gate verdict here than the
+   fixture quality issue.
+2. **Tool inputSchema completeness.** Same finding as commit `76045c6`'s
+   report — `tools_definitions()` in
+   `crates/ucil-daemon/src/server.rs:280-369` still advertises only the
+   universal CEQP fields. Until per-tool argument fields are declared,
+   Claude Code's deferred-tool dispatcher rejects MCP tool calls and
+   the agent silently falls through to built-in tools, neutralising
+   UCIL's edge. This is the most load-bearing finding from this run.
