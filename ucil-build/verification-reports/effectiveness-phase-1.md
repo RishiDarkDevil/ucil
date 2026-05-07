@@ -1,7 +1,8 @@
 # Effectiveness Report — Phase 1
 
-Run at: 2026-04-19T07:45Z
-Commit: 26dfeb23f82ea03b9d942220a849a4ccd98d6ec5
+Run at: 2026-05-07T03:23:46Z
+Commit: 70aa72e12f2655fbd3fbb0b5799c67a726b23f88
+Branch: feat/WO-0065-vector-query-p95-bench
 Evaluator: effectiveness-evaluator (fresh session, `claude-opus-4-7`)
 
 ## Summary
@@ -16,103 +17,181 @@ Evaluator: effectiveness-evaluator (fresh session, `claude-opus-4-7`)
 | Scenarios FAIL | 0 |
 
 **Gate verdict: PASS (substantive)** — the single phase-1-eligible
-scenario (`nav-rust-symbol`) was executed end-to-end: UCIL and
+scenario (`nav-rust-symbol`) was executed end-to-end. UCIL and
 baseline runs both completed, every `acceptance_check` was green on
 both sides, and the LLM judge scored UCIL and baseline equally
 (5.0/5.0 weighted-average each, Δ = 0.0 → PASS per rubric §6).
 
-Earlier phase-1 effectiveness reports auto-skipped on the theory
-that `find_references` is still a Phase-1 stub (feature
-`P2-W7-F05`). This run chose to execute the scenario because (a) the
-evaluator contract (`.claude/agents/effectiveness-evaluator.md` §
-"Tool-availability checks") defines "registered and responsive" as
-the gating test, and `find_references` currently satisfies both —
-`tools/list` enumerates it, and a `tools/call` returns a
-well-formed JSON-RPC result (with `_meta.not_yet_implemented: true`,
-but no transport error); and (b) the scenario's ground-truth answer
-is "no HTTP-retry-with-exponential-backoff functions exist in the
-fixture", so the task is fully resolvable with
-`find_definition` + `search_code` (both real at this commit) plus
-fallback `Read`/`grep`. The stub is documented under §"Advisory"
-below so a future executor can light up the substantive-win path
-when `P2-W7-F05` graduates.
+This re-run reproduces the substantive-tie outcome originally recorded
+on 2026-04-19 (commit `26dfeb23`) at the current head
+(`70aa72e1`). The Phase-1 surface that determines this scenario's
+outcome — `find_definition` (real, KG-backed) and `find_references`
+(registered, returns the `_meta.not_yet_implemented` stub) — has not
+changed, and the fixture (`tests/fixtures/rust-project`) is byte-for-byte
+identical to the prior run (sha256 of sorted file digest:
+`3d8af62a21af3752c714dd40612f8e26b500cbb7775197e2d35f01f6c145c4c6`).
+
+## Tool-availability probe
+
+`tools/list` against `ucil-daemon mcp --stdio --repo <fixture>` reported
+all 22 §3.2 tools registered. The two tools required by the scenario
+(`find_definition`, `find_references`) were both present.
+
+| tool | listed? | tools/call returns real data? |
+|---|---|---|
+| `find_definition` | yes | yes — `_meta.source = "tree-sitter+kg"`, `found=true`, real `file_path`/`start_line` |
+| `find_references` | yes | **no** — handler returns `_meta.not_yet_implemented: true` (stub, awaiting `P2-W7-F05`) |
+
+Per `.claude/agents/effectiveness-evaluator.md` §"Tool-availability
+checks", the probe is `tools/list`, and a tool is "operational" if
+registered + responsive. `find_references` is registered and the call
+returns a well-formed JSON-RPC `result` envelope (no transport error).
+The scenario therefore runs (rather than being marked
+`skipped_tool_not_ready`); the consequences of the stub for this
+scenario are documented under "Advisory" below.
 
 ## Scenarios
 
 | scenario | tools_present | tools_real | UCIL pass? | UCIL score | Baseline score | Δ weighted | verdict |
 |---|---|---|---|---|---|---|---|
-| nav-rust-symbol | find_definition, find_references | find_definition (real); find_references (stub — returns `_meta.not_yet_implemented: true`) | yes | 5.00 | 5.00 | 0.00 | PASS |
+| nav-rust-symbol | find_definition, find_references | find_definition (real); find_references (stub — `_meta.not_yet_implemented: true`) | yes | 5.00 | 5.00 | 0.00 | PASS |
 
 ## Per-scenario detail
 
 ### nav-rust-symbol
 
-**Fixture**: `tests/fixtures/rust-project` (expression parser/evaluator; no HTTP, no retry, no backoff code — ground-truth answer is "none found")
+**Fixture**: `tests/fixtures/rust-project` — a self-contained expression
+parser/evaluator. `Cargo.lock` shows zero external dependencies;
+`grep -rE "retry|backoff|exponential|http|reqwest|hyper"` across the
+fixture returns zero matches. Ground truth answer: "no HTTP-retry
+exponential-backoff functions exist".
 
 **Setup**
-- `/tmp/ucil-eval-nav-rust-symbol/ucil/` — fixture copy for UCIL run
-- `/tmp/ucil-eval-nav-rust-symbol/baseline/` — fixture copy for baseline run
-- Output sink: `/tmp/ucil-eval-out/nav-rust-symbol.md`
+- `/tmp/ucil-eval-nav-rust-symbol/ucil/` — fresh fixture copy for UCIL run
+- `/tmp/ucil-eval-nav-rust-symbol/baseline/` — fresh fixture copy for baseline run
+- Output sink: `/tmp/ucil-eval-out/nav-rust-symbol.md` (rotated per side)
+- Identical task prompt for both sides, captured in `task.md`
 
 **UCIL run**
-- Transport: `ucil-daemon mcp --repo /tmp/ucil-eval-nav-rust-symbol/ucil` (stdio MCP), wired via `--mcp-config` + `--strict-mcp-config`
+- Transport: `ucil-daemon mcp --stdio --repo /tmp/ucil-eval-nav-rust-symbol/ucil`
+- MCP config: `--mcp-config mcp-ucil.json --strict-mcp-config`
+- Settings: `--setting-sources ""` (no project / user / local settings)
+- Session: `f8c9a5a3-bad5-4222-95ba-4a295943067d` (fresh, `--no-session-persistence`)
 - Model: `claude-opus-4-7`
-- Session: `41a8d2c5-1026-42f5-9f4c-b814adb0ce84` (fresh, no persistence)
-- `duration_ms`: 50545 (≈ 50s)
-- `num_turns`: 12
-- `input_tokens`: 27 fresh + 303 954 cache-read + 21 078 cache-creation
-- `output_tokens`: 2 765
+- `duration_ms`: 86324 (≈ 86s)
+- `num_turns`: 17
+- `total_cost_usd`: 0.4226
+- `usage.input_tokens`: 19
+- `usage.cache_read_input_tokens`: 367 623
+- `usage.cache_creation_input_tokens`: 18 049
+- `usage.output_tokens`: 5 011
 - Stop reason: `end_turn`
+- Output: 65 lines, written to `/tmp/ucil-eval-out/nav-rust-symbol.md`
 
 **Baseline run**
-- Transport: no MCP (`--mcp-config` pointed at an empty `mcpServers` object; `--strict-mcp-config`). Built-in `Bash`/`Read`/`Glob`/`Grep` only; no UCIL skills/hooks.
+- Transport: no MCP servers (`mcp-empty.json` with empty `mcpServers`)
+- MCP config: `--mcp-config mcp-empty.json --strict-mcp-config`
+- Settings: `--setting-sources ""` (no project / user / local settings)
+- Session: `798294aa-0936-47eb-9ee6-430f3020f564` (fresh, `--no-session-persistence`)
 - Model: `claude-opus-4-7`
-- Session: `f4626039-b8fd-455a-808d-fd87f443cceb` (fresh, no persistence)
-- `duration_ms`: 31343 (≈ 31s)
-- `num_turns`: 8
-- `input_tokens`: 13 fresh + 189 031 cache-read + 11 610 cache-creation
-- `output_tokens`: 1 979
+- `duration_ms`: 77333 (≈ 77s)
+- `num_turns`: 13
+- `total_cost_usd`: 0.4266
+- `usage.input_tokens`: 18
+- `usage.cache_read_input_tokens`: 339 389
+- `usage.cache_creation_input_tokens`: 22 269
+- `usage.output_tokens`: 4 680
 - Stop reason: `end_turn`
+- Output: 92 lines, written to `/tmp/ucil-eval-out/nav-rust-symbol.md`
 
-**Acceptance checks** (executed by copying each agent's output into `/tmp/ucil-eval-out/nav-rust-symbol.md` and running the scenario's commands)
+**Acceptance checks** (run after copying each side's output to `/tmp/ucil-eval-out/nav-rust-symbol.md`)
 
 | check | UCIL | Baseline |
 |---|---|---|
 | `test -f /tmp/ucil-eval-out/nav-rust-symbol.md` | PASS | PASS |
-| `test $(wc -l < ...) -ge 5` (UCIL=27 lines, baseline=25 lines) | PASS | PASS |
-| `grep -qE "\.rs:[0-9]+" ...` | PASS | PASS |
+| `test $(wc -l < /tmp/ucil-eval-out/nav-rust-symbol.md) -ge 5` | PASS (65) | PASS (92) |
+| `grep -qE "\.rs:[0-9]+" /tmp/ucil-eval-out/nav-rust-symbol.md` | PASS | PASS |
 
-**Judge scoring** (fresh `claude -p` session per side, CWD outside repo, `--setting-sources ""`, rubric reproduced verbatim from the scenario yaml)
+**Judge scoring** (fresh `claude -p` session per side, run from `/tmp` so the
+repo's project hooks/settings cannot interfere; `--setting-sources ""`,
+`--strict-mcp-config` with empty server map; rubric copied verbatim from
+the scenario yaml; ground truth disclosed to the judge so it can score
+correctness against the truth, not against the agent's own claims)
 
 | criterion | weight | UCIL | Baseline |
 |---|---|---|---|
-| correctness        | 3.0 | 5 | 5 |
-| caller_completeness| 2.0 | 5 | 5 |
-| precision          | 1.0 | 5 | 5 |
-| formatting         | 0.5 | 5 | 5 |
-| **weighted mean**  |     | **5.00** | **5.00** |
+| correctness         | 3.0 | 5 | 5 |
+| caller_completeness | 2.0 | 5 | 5 |
+| precision           | 1.0 | 5 | 5 |
+| formatting          | 0.5 | 5 | 5 |
+| **weighted mean**   |     | **5.00** | **5.00** |
 
-UCIL justification: "Correctly concludes none found; provides thorough evidence with file:line citations, lists files consulted and search queries run, no hallucinations."
+UCIL judge: "The solution correctly concludes 'none found' matching the
+ground truth, and supports it with thorough negative evidence:
+inspection of Cargo.toml/Cargo.lock confirming zero dependencies,
+enumeration of every source file with its purpose, an extensive list
+of HTTP/retry/backoff/timing patterns searched, and explicit handling
+of plausible false positives (the `**` exponentiation operator's
+`powf` calls, substring hits like 'surf' inside 'surface'). … No
+fabricated functions or callers are introduced. The negative report is
+well-structured with clear headings, an upfront verdict, and a
+methodology section, which is appropriate given the H2-per-function
+template doesn't apply."
 
-Baseline justification: "Correctly identifies no HTTP retry functions exist. Provides thorough evidence with file:line citations, search queries run, and clear structured negative report."
+Baseline judge: "The solution correctly identifies that no HTTP retry
+with exponential backoff functions exist in the fixture, matching the
+ground truth. The negative evidence is thorough and rigorous: it
+enumerates all source files with line counts, confirms zero external
+dependencies via Cargo.lock, lists all non-crate imports, and documents
+an exhaustive case-insensitive search across HTTP/retry/backoff/timing-
+related terms including hand-rolled patterns like `pow`, `<<`, and
+`2^attempt`. … Since no functions exist, caller-completeness is
+appropriately N/A and the negative reasoning explicitly establishes
+there is nothing to find references for. No false positives are listed."
 
-**Verdict: PASS** (UCIL ties baseline on every criterion; Δ = 0.0, within the rubric's half-point tolerance).
+**Verdict: PASS** (UCIL ties baseline on every criterion; Δ weighted =
+0.0, within the rubric's half-point tolerance; no FAIL conditions
+triggered).
 
 ## Observations
 
-- **Parity on correctness, not speed.** Both agents correctly inferred from `Cargo.toml` that the fixture is a pure expression evaluator with no HTTP/retry crates, and cited file-level evidence. UCIL took ~1.6× longer (50s vs 31s) and consumed ~1.6× more cache-read tokens (~304K vs ~189K) — the MCP tool-schema overhead costs real time when the task happens to be solvable by grep alone. For a positive-match task (real HTTP retry code to discover), the advantage shape would flip, but this fixture does not exercise that path.
-- **UCIL's `search_code` did not surface false positives.** Both UCIL calls to `search_code` ("exponential backoff retry http", "retry backoff") returned zero matches, consistent with the ground truth.
-- **`find_references` stub did not bite this scenario.** The ground-truth answer requires no `find_references` call (nothing to cross-reference when nothing exists). When `P2-W7-F05` lands, a follow-up run at that commit will exercise the positive-match path.
-- **Judge hook-interference gotcha.** The first UCIL judge session was hijacked by the repository's `Stop` hook (wip-commit watchdog) because CWD was inside the repo — the judge returned `"Committed and pushed as wip: carryover (26dfeb2). Working tree clean."` instead of JSON. Rerunning with `cd /tmp` + `--setting-sources ""` produced clean JSON. Future evaluator runs should always judge from a cwd outside the UCIL repo root. (This did not corrupt any scoring — only the UCIL judge needed a rerun; baseline judge was already clean because it ran when the working tree was already stable.)
+- **Parity on correctness, slight cost-edge to baseline.** Both sides
+  arrive at the correct negative conclusion with sufficient evidence.
+  UCIL was ~1.12× slower (86s vs 77s) and used ~1.08× more
+  cache-read tokens (367K vs 339K) — the MCP tool-schema overhead
+  is real time when the task happens to be solvable by `Glob`/`Grep`/
+  `Read` alone. For a positive-match task (real HTTP retry code to
+  discover and cross-reference), the advantage shape would flip, but
+  this fixture does not exercise that path.
+- **`find_references` stub did not bite this scenario.** The ground-truth
+  answer requires no `find_references` call (nothing to cross-reference
+  when nothing exists). When `P2-W7-F05` lands, a follow-up run at that
+  commit will exercise the positive-match path.
+- **Both sides disambiguated the `**` exponentiation operator from
+  exponential backoff.** The fixture's `powf` / `Pow` arms in
+  `parser.rs`, `util.rs`, `eval_ctx.rs`, and `transform.rs` implement
+  `aᵇ` for the toy expression language, not retry-delay computation.
+  Both runs caught this and called it out explicitly.
+- **Reproducibility note.** The CWD-outside-repo gotcha documented in
+  the prior run (judge sessions hijacked by the repo `Stop` hook when
+  CWD was inside the repo) was avoided here by `cd /tmp` + explicit
+  `--setting-sources ""` on every judge invocation. Both judges
+  returned clean JSON on first attempt.
 
 ## Advisory — path to a substantive WIN
 
-This run records a substantive tie. For UCIL to post a substantive WIN on this scenario, two things must change:
+This run, like the 2026-04-19 run, records a substantive tie. For UCIL
+to post a substantive WIN on this scenario, two things must change:
 
-1. `P2-W7-F05` (`find_references` real handler) graduates from stub to KG-backed lookup.
-2. Either this scenario's fixture grows real HTTP-retry code, or a new phase-1-tagged scenario is added whose ground truth requires a multi-hop call-graph walk (where `find_references` provides > grep's single-file-string-match capability).
+1. `P2-W7-F05` (`find_references` real handler) graduates from stub to
+   KG-backed lookup.
+2. Either this scenario's fixture grows real HTTP-retry code, or a new
+   phase-1-tagged scenario is added whose ground truth requires a
+   multi-hop call-graph walk — i.e. where `find_references` provides
+   capability beyond a single-file `grep` text-match.
 
-Until then, phase-1 effectiveness should remain PASS on the strength of UCIL matching the baseline — the gate contract does not require a WIN.
+Until then, phase-1 effectiveness should remain PASS on the strength of
+UCIL matching the baseline — the gate contract does not require a WIN.
 
 ## Gate contract (why this run is PASS, not FAIL)
 
@@ -122,7 +201,8 @@ Per `.claude/agents/effectiveness-evaluator.md` §6 "Per-scenario verdict":
 > **WIN**: UCIL outperforms baseline by at least 1.0 on the weighted-average score.
 > **FAIL**: `acceptance_checks` red on UCIL run, OR UCIL underperforms baseline by > 0.5 on any criterion.
 
-UCIL scored 5/5 on every criterion; baseline scored 5/5. Δ = 0.0 ≥ -0.5 on every criterion → PASS. Not WIN (Δ weighted < 1.0). Not FAIL.
+UCIL scored 5/5 on every criterion; baseline scored 5/5. Δ = 0.0 ≥ -0.5
+on every criterion → **PASS**. Not WIN (Δ weighted < 1.0). Not FAIL.
 
 Per `.claude/agents/effectiveness-evaluator.md` §"Exit code":
 
@@ -132,11 +212,22 @@ No FAIL recorded → **exit 0**.
 
 ## Reproducibility
 
-All artefacts of this run are preserved under `/tmp/ucil-eval-nav-rust-symbol/`:
+All artefacts of this run are preserved under
+`/tmp/ucil-eval-nav-rust-symbol/`:
+
+- `task.md` — agent task prompt (identical for both sides)
 - `ucil-output.md`, `baseline-output.md` — raw agent outputs
-- `ucil-run.json`, `baseline-run.json` — `claude -p` JSON envelopes (duration, tokens, session ids)
-- `judge-ucil.json`, `judge-baseline.json` — LLM judge scoring envelopes
-- `judge-ucil-prompt.txt`, `judge-baseline-prompt.txt` — exact prompts fed to the judge
-- `mcp-config.json`, `empty-mcp.json` — MCP configs for UCIL and baseline
-- `task-ucil.md`, `task-baseline.md` — agent task prompts
-- `probe.out` — `tools/list` probe confirming all 22 tools registered
+- `ucil-run.json`, `baseline-run.json` — `claude -p` JSON envelopes
+  (duration, tokens, session ids, stop reason)
+- `mcp-ucil.json`, `mcp-empty.json` — MCP configs for UCIL and baseline
+- `run-ucil.sh`, `run-baseline.sh` — exact `claude` invocations
+- `judge-ucil-prompt.md`, `judge-baseline-prompt.md` — verbatim judge prompts
+- `judge-ucil-raw.json`, `judge-baseline-raw.json` — judge `claude -p` JSON envelopes
+- `judge-ucil.json`, `judge-baseline.json` — extracted scoring JSON
+- `ucil-session-id`, `baseline-session-id`, `judge-ucil-session-id`,
+  `judge-baseline-session-id` — session UUIDs
+
+Tempdirs are cleaned by the evaluator's `rm -rf /tmp/ucil-eval-*` step
+on exit (per agent §"Exit cleanly"); the artefacts above must be
+collected before the cleanup if a future operator wants to inspect a
+specific run by hand.
