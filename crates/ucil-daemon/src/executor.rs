@@ -2763,7 +2763,7 @@ pub(crate) fn build_synthetic_chunker_for_lancedb_f04() -> ucil_embeddings::Embe
 ///
 /// **Visibility**: `pub(crate)` per `WO-0066`'s second-consumer
 /// carve-out — `crate::server::test_find_similar_tool` reuses this
-/// helper to verify the LanceDB table is populated post-`index_paths`.
+/// helper to verify the `LanceDB` table is populated post-`index_paths`.
 #[cfg(test)]
 pub(crate) async fn read_table_rows_for_lancedb_f04(
     branches_root: &Path,

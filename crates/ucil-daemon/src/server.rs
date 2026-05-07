@@ -4971,3 +4971,427 @@ async fn test_understand_code_tool_no_kg_returns_stub() {
         "_meta.tool must echo the tool name even in the stub path: {response}"
     );
 }
+
+// ── WO-0066 / P2-W8-F08 frozen acceptance test ────────────────────────────
+//
+// `server::test_find_similar_tool` lives at MODULE ROOT (NOT inside
+// `mod tests {}`) per `DEC-0007` so the frozen selector
+// `cargo nextest run -p ucil-daemon server::test_find_similar_tool`
+// resolves directly to `ucil_daemon::server::test_find_similar_tool`
+// without an intermediate `tests::` segment.
+
+/// Frozen acceptance selector for feature `P2-W8-F08` — see
+/// `ucil-build/feature-list.json` entry for
+/// `-p ucil-daemon server::test_find_similar_tool`.
+///
+/// Closes Phase 2 Week 8 and the entire Phase 2 envelope per
+/// master-plan §3.2 line 219 (`find_similar` tool listing) +
+/// §18 Phase 2 Week 8 line 1791 ("Vector search works").
+///
+/// Eight sub-assertions (SA1..SA8) per the WO-0066 scope:
+///
+/// 1. **SA1** — happy-path JSON-RPC envelope: `jsonrpc == "2.0"`,
+///    matching `id`, no `error`, `result.isError == false`.
+/// 2. **SA2** — `_meta` shape: `tool == "find_similar"`, `source`
+///    non-empty string, `branch == "main"`, `query_dim == 768`,
+///    `hits_count` is a JSON number, `hits` is a JSON array.
+/// 3. **SA3** — hits length matches `max_results` and each hit
+///    carries the projection fields with the right types.
+/// 4. **SA4** — IDENTITY query: a snippet that is byte-identical
+///    to a known corpus chunk's content puts that chunk's
+///    `file_path` at `_meta.hits[0]`.  Under
+///    `TestEmbeddingSource`'s deterministic Sha256-derived
+///    vectors, identical input → identical embedding → distance
+///    ≈ 0 → top hit.
+/// 5. **SA5** — similarity ordering monotonically descending:
+///    `hits[i].similarity_score >= hits[i+1].similarity_score`
+///    for all `i`.
+/// 6. **SA6** — error path: missing `arguments.snippet` returns
+///    JSON-RPC `error.code == -32602` with `error.message`
+///    mentioning `snippet`.
+/// 7. **SA7** — error path: `arguments.branch ==
+///    "nonexistent-branch"` returns `result.isError == true` with
+///    `_meta.error_kind ∈ {"branch_not_found", "table_not_found"}`.
+/// 8. **SA8** — fall-through path: `McpServer::new()` (no
+///    `with_find_similar_executor`) responding to
+///    `find_similar` returns `_meta.not_yet_implemented == true`,
+///    preserving phase-1 invariant #9 for the un-attached case.
+///
+/// # Panics
+///
+/// Panics on any sub-assertion failure (test-only).  Panic
+/// messages are operator-actionable — they quote the JSON
+/// response on failure.
+#[cfg(test)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::too_many_lines)]
+pub async fn test_find_similar_tool() {
+    use crate::branch_manager::BranchManager;
+    use crate::executor::{
+        build_synthetic_chunker_for_lancedb_f04, read_table_rows_for_lancedb_f04,
+        TestEmbeddingSource,
+    };
+    use crate::lancedb_indexer::LancedbChunkIndexer;
+
+    // ── Fixture: build per-branch code_chunks table populated via
+    //    LancedbChunkIndexer + TestEmbeddingSource ─────────────────
+    let repo = tempfile::tempdir().expect("tmp repo");
+    let branches_root = repo.path().join(".ucil/branches");
+    tokio::fs::create_dir_all(&branches_root)
+        .await
+        .expect("mkdir branches");
+
+    let mgr = Arc::new(BranchManager::new(&branches_root));
+    mgr.create_branch_table("main", None)
+        .await
+        .expect("create main");
+
+    let chunker = Arc::new(tokio::sync::Mutex::new(
+        build_synthetic_chunker_for_lancedb_f04(),
+    ));
+    let source = Arc::new(TestEmbeddingSource { dim: 768 });
+
+    // Three small Rust source files with DISTINCT multi-statement
+    // bodies so the synthetic chunker emits ≥1 chunk per file under
+    // the WordLevel tokenizer.
+    let foo_path = repo.path().join("src/foo.rs");
+    let bar_path = repo.path().join("src/bar.rs");
+    let baz_path = repo.path().join("src/baz.rs");
+    tokio::fs::create_dir_all(foo_path.parent().expect("foo parent"))
+        .await
+        .expect("mkdir src");
+    let alpha_text = "pub fn foo_alpha() { let x = 1; let y = 2; let z = x + y; }";
+    let beta_text = "pub fn bar_beta() -> i32 { 42 }";
+    let gamma_text = "pub fn baz_gamma(input: &str) -> usize { input.len() }";
+    tokio::fs::write(&foo_path, alpha_text)
+        .await
+        .expect("write foo.rs");
+    tokio::fs::write(&bar_path, beta_text)
+        .await
+        .expect("write bar.rs");
+    tokio::fs::write(&baz_path, gamma_text)
+        .await
+        .expect("write baz.rs");
+
+    let mut indexer =
+        LancedbChunkIndexer::new(mgr.clone(), "main", chunker.clone(), source.clone());
+    let stats = indexer
+        .index_paths(
+            repo.path(),
+            &[foo_path.clone(), bar_path.clone(), baz_path.clone()],
+        )
+        .await
+        .expect("index_paths must succeed");
+    assert!(
+        stats.chunks_inserted >= 3,
+        "fixture: expected ≥3 chunks across 3 files; got stats={stats:?}"
+    );
+    let (_rows, count) = read_table_rows_for_lancedb_f04(&branches_root, "main").await;
+    assert!(
+        count >= 3,
+        "fixture: code_chunks table must have ≥3 rows after indexing; got count={count}"
+    );
+
+    let executor = Arc::new(FindSimilarExecutor::new(
+        mgr.clone(),
+        source.clone() as Arc<dyn crate::lancedb_indexer::EmbeddingSource>,
+        "main",
+    ));
+    let server = McpServer::new().with_find_similar_executor(executor);
+
+    // ── SA1 — happy-path envelope ──────────────────────────────────
+    //
+    // Uses a query snippet IDENTICAL to baz.rs's content so the
+    // deterministic Sha256-derived embedding produces an
+    // identical vector to the chunk emitted from baz.rs — distance
+    // ≈ 0 to that chunk, which lands at hits[0] in SA4.
+    let identity_snippet = gamma_text.to_owned();
+    let request = json!({
+        "jsonrpc": JSONRPC_VERSION,
+        "id": 401,
+        "method": "tools/call",
+        "params": {
+            "name": "find_similar",
+            "arguments": {
+                "snippet": identity_snippet.clone(),
+                "max_results": 3
+            }
+        }
+    })
+    .to_string();
+    let response = server.handle_line(&request).await;
+
+    assert_eq!(
+        response.get("jsonrpc").and_then(Value::as_str),
+        Some(JSONRPC_VERSION),
+        "(SA1) response must carry jsonrpc == \"2.0\": {response}"
+    );
+    assert_eq!(
+        response.get("id").and_then(Value::as_i64),
+        Some(401),
+        "(SA1) response id must echo 401: {response}"
+    );
+    assert!(
+        response.get("error").is_none(),
+        "(SA1) response must not carry an error envelope: {response}"
+    );
+    assert_eq!(
+        response.pointer("/result/isError").and_then(Value::as_bool),
+        Some(false),
+        "(SA1) result.isError must be false on the happy path: {response}"
+    );
+
+    let meta = response
+        .pointer("/result/_meta")
+        .expect("(SA1) response must carry result._meta");
+
+    // ── SA2 — _meta shape ──────────────────────────────────────────
+    assert_eq!(
+        meta.get("tool").and_then(Value::as_str),
+        Some("find_similar"),
+        "(SA2) _meta.tool must be \"find_similar\": {response}"
+    );
+    let source_str = meta
+        .get("source")
+        .and_then(Value::as_str)
+        .expect("(SA2) _meta.source must be a string");
+    assert!(
+        !source_str.is_empty(),
+        "(SA2) _meta.source must be a non-empty string; got {source_str:?}"
+    );
+    assert_eq!(
+        meta.get("branch").and_then(Value::as_str),
+        Some("main"),
+        "(SA2) _meta.branch must be \"main\": {response}"
+    );
+    assert_eq!(
+        meta.get("query_dim").and_then(Value::as_u64),
+        Some(768),
+        "(SA2) _meta.query_dim must be 768 (TestEmbeddingSource default): {response}"
+    );
+    assert!(
+        meta.get("hits_count").and_then(Value::as_u64).is_some(),
+        "(SA2) _meta.hits_count must be a JSON number: {response}"
+    );
+    let hits = meta
+        .get("hits")
+        .and_then(Value::as_array)
+        .expect("(SA2) _meta.hits must be a JSON array");
+
+    // ── SA3 — hits count and projection structure ──────────────────
+    let hits_count_meta = meta
+        .get("hits_count")
+        .and_then(Value::as_u64)
+        .expect("(SA3) _meta.hits_count must be a JSON number");
+    assert_eq!(
+        hits.len() as u64,
+        hits_count_meta,
+        "(SA3) _meta.hits.len() must equal _meta.hits_count: \
+         hits.len()={} hits_count={hits_count_meta}; response={response}",
+        hits.len(),
+    );
+    assert!(
+        hits.len() >= 3,
+        "(SA3) _meta.hits.len() must be >= 3 (max_results=3, corpus=≥3): \
+         got {} hits; response={response}",
+        hits.len(),
+    );
+    for (i, hit) in hits.iter().enumerate() {
+        let file_path = hit
+            .get("file_path")
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| panic!("(SA3) hits[{i}].file_path must be a string: {hit}"));
+        assert!(
+            !file_path.is_empty(),
+            "(SA3) hits[{i}].file_path must be non-empty: {hit}"
+        );
+        let start_line = hit
+            .get("start_line")
+            .and_then(Value::as_i64)
+            .unwrap_or_else(|| panic!("(SA3) hits[{i}].start_line must be an integer: {hit}"));
+        assert!(
+            start_line >= 1,
+            "(SA3) hits[{i}].start_line must be >= 1: {hit}"
+        );
+        let end_line = hit
+            .get("end_line")
+            .and_then(Value::as_i64)
+            .unwrap_or_else(|| panic!("(SA3) hits[{i}].end_line must be an integer: {hit}"));
+        assert!(
+            end_line >= start_line,
+            "(SA3) hits[{i}].end_line must be >= start_line: {hit}"
+        );
+        assert!(
+            hit.get("content").and_then(Value::as_str).is_some(),
+            "(SA3) hits[{i}].content must be a string: {hit}"
+        );
+        assert!(
+            hit.get("language").and_then(Value::as_str).is_some(),
+            "(SA3) hits[{i}].language must be a string: {hit}"
+        );
+        // symbol_name and symbol_kind are nullable (Option<String>)
+        let symbol_name_field = hit
+            .get("symbol_name")
+            .unwrap_or_else(|| panic!("(SA3) hits[{i}].symbol_name field must be present: {hit}"));
+        assert!(
+            symbol_name_field.is_string() || symbol_name_field.is_null(),
+            "(SA3) hits[{i}].symbol_name must be string or null: {hit}"
+        );
+        let symbol_kind_field = hit
+            .get("symbol_kind")
+            .unwrap_or_else(|| panic!("(SA3) hits[{i}].symbol_kind field must be present: {hit}"));
+        assert!(
+            symbol_kind_field.is_string() || symbol_kind_field.is_null(),
+            "(SA3) hits[{i}].symbol_kind must be string or null: {hit}"
+        );
+        assert!(
+            hit.get("similarity_score")
+                .and_then(Value::as_f64)
+                .is_some(),
+            "(SA3) hits[{i}].similarity_score must be a number: {hit}"
+        );
+    }
+
+    // ── SA4 — IDENTITY query: top hit is baz.rs ────────────────────
+    //
+    // The chunker emits chunk content unchanged from the source slice,
+    // so the identical input produces an identical content string AND
+    // therefore — under TestEmbeddingSource's deterministic
+    // Sha256-derived vectors — an identical 768-d embedding, hence
+    // distance ≈ 0 to that chunk and the largest similarity_score.
+    let top_file_path = hits[0]
+        .get("file_path")
+        .and_then(Value::as_str)
+        .expect("(SA4) hits[0].file_path must be a string");
+    assert!(
+        top_file_path.ends_with("baz.rs"),
+        "(SA4) hits[0].file_path must end with \"baz.rs\" (the file holding the \
+         identical-content chunk under TestEmbeddingSource's Sha256-derived \
+         deterministic embedding); got {top_file_path:?}; response={response}"
+    );
+
+    // ── SA5 — similarity ordering monotonically descending ─────────
+    for i in 0..hits.len().saturating_sub(1) {
+        let s_i = hits[i]
+            .get("similarity_score")
+            .and_then(Value::as_f64)
+            .unwrap_or_else(|| panic!("(SA5) hits[{i}].similarity_score: {}", hits[i]));
+        let s_next = hits[i + 1]
+            .get("similarity_score")
+            .and_then(Value::as_f64)
+            .unwrap_or_else(|| panic!("(SA5) hits[{}].similarity_score: {}", i + 1, hits[i + 1]));
+        assert!(
+            s_i >= s_next,
+            "(SA5) hits[{i}].similarity_score ({s_i}) must be >= \
+             hits[{}].similarity_score ({s_next}); response={response}",
+            i + 1,
+        );
+    }
+
+    // ── SA6 — error path: missing arguments.snippet ────────────────
+    let request_missing_snippet = json!({
+        "jsonrpc": JSONRPC_VERSION,
+        "id": 402,
+        "method": "tools/call",
+        "params": {
+            "name": "find_similar",
+            "arguments": {}
+        }
+    })
+    .to_string();
+    let response_missing_snippet = server.handle_line(&request_missing_snippet).await;
+    let err_missing = response_missing_snippet
+        .get("error")
+        .expect("(SA6) missing snippet must produce a JSON-RPC error envelope");
+    assert_eq!(
+        err_missing.get("code").and_then(Value::as_i64),
+        Some(-32602),
+        "(SA6) missing-snippet error code must be -32602 (Invalid params): \
+         {response_missing_snippet}"
+    );
+    let err_message = err_missing
+        .get("message")
+        .and_then(Value::as_str)
+        .expect("(SA6) error.message must be a string");
+    assert!(
+        err_message.contains("snippet"),
+        "(SA6) error.message must mention `snippet`; got {err_message:?}; \
+         response={response_missing_snippet}"
+    );
+
+    // ── SA7 — error path: nonexistent branch ───────────────────────
+    let request_nonexistent_branch = json!({
+        "jsonrpc": JSONRPC_VERSION,
+        "id": 403,
+        "method": "tools/call",
+        "params": {
+            "name": "find_similar",
+            "arguments": {
+                "snippet": "anything",
+                "branch": "nonexistent-branch"
+            }
+        }
+    })
+    .to_string();
+    let response_nonexistent_branch = server.handle_line(&request_nonexistent_branch).await;
+    assert!(
+        response_nonexistent_branch.get("error").is_none(),
+        "(SA7) nonexistent-branch must NOT produce a JSON-RPC error envelope \
+         (per master-plan §3.2 UX: runtime failures are isError=true, NOT \
+         JSON-RPC error); got {response_nonexistent_branch}"
+    );
+    assert_eq!(
+        response_nonexistent_branch
+            .pointer("/result/isError")
+            .and_then(Value::as_bool),
+        Some(true),
+        "(SA7) result.isError must be true on nonexistent-branch: \
+         {response_nonexistent_branch}"
+    );
+    let error_kind = response_nonexistent_branch
+        .pointer("/result/_meta/error_kind")
+        .and_then(Value::as_str)
+        .expect("(SA7) _meta.error_kind must be present on nonexistent-branch");
+    assert!(
+        matches!(error_kind, "branch_not_found" | "table_not_found"),
+        "(SA7) _meta.error_kind must be \"branch_not_found\" OR \
+         \"table_not_found\" for a nonexistent branch dir; got {error_kind:?}; \
+         response={response_nonexistent_branch}"
+    );
+
+    // ── SA8 — fall-through path when no executor attached ──────────
+    let server_no_executor = McpServer::new();
+    let request_no_executor = json!({
+        "jsonrpc": JSONRPC_VERSION,
+        "id": 404,
+        "method": "tools/call",
+        "params": {
+            "name": "find_similar",
+            "arguments": {
+                "snippet": "anything"
+            }
+        }
+    })
+    .to_string();
+    let response_no_executor = server_no_executor.handle_line(&request_no_executor).await;
+    assert!(
+        response_no_executor.get("error").is_none(),
+        "(SA8) no-executor stub path must not return a JSON-RPC error: \
+         {response_no_executor}"
+    );
+    assert_eq!(
+        response_no_executor
+            .pointer("/result/_meta/not_yet_implemented")
+            .and_then(Value::as_bool),
+        Some(true),
+        "(SA8) no-executor call must return _meta.not_yet_implemented == true \
+         (phase-1 invariant #9): {response_no_executor}"
+    );
+    assert_eq!(
+        response_no_executor
+            .pointer("/result/_meta/tool")
+            .and_then(Value::as_str),
+        Some("find_similar"),
+        "(SA8) stub envelope must echo tool name: {response_no_executor}"
+    );
+}
