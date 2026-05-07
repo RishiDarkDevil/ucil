@@ -1,15 +1,16 @@
 # Effectiveness Report — Phase 2
 
-Run at: 2026-05-07T18:39Z (re-confirmation pass)
-Commit: `4efda0b` (`HEAD` at evaluator-launch)
+Run at: 2026-05-07T18:42Z (re-confirmation pass)
+Commit: `43645fd` (`HEAD` at evaluator-launch)
 Branch: `main`
 Evaluator: `effectiveness-evaluator` (this session, `claude-opus-4-7`)
 Prior substantive run: commit `aa7dc84` (full UCIL+baseline+judge invocations)
-Prior refresh-pass: commit `dd4659e` at HEAD `c45933c`
+Prior refresh-pass: commit `43645fd` at HEAD `4efda0b` (peer evaluator session, 2026-05-07T18:39Z)
+Earlier refresh-pass: commit `dd4659e` at HEAD `c45933c`
 
 ## Refresh-pass note
 
-This is a **re-confirmation pass** at HEAD `4efda0b`. The substantive
+This is a **re-confirmation pass** at HEAD `43645fd`. The substantive
 evaluation data (UCIL/baseline runs, judge scores, acceptance results)
 is inherited verbatim from the full run at commit `aa7dc84` because:
 
@@ -66,6 +67,50 @@ are bit-identical.
 The full substantive evaluation detail (per-side run envelopes, judge
 prompts, acceptance results, observation list) is preserved unchanged
 below.
+
+### Probe evidence — 2026-05-07T18:42Z (this session @ HEAD `43645fd`)
+
+This evaluator session independently re-ran the three-invariant probe at
+HEAD `43645fd` (the parent of which is the peer evaluator's
+`4efda0b → 43645fd` refresh from 2026-05-07T18:39Z; only the report
+itself changed in that commit, no source touch):
+
+- **Source delta vs `aa7dc84`** (this session):
+  `git diff aa7dc84..HEAD --stat -- crates/ tests/ adapters/ ml/ plugin*/`
+  → **0 lines** of output. Confirmed via `wc -l` on the diff stream.
+- **`tools/list` probe** at `target/debug/ucil-daemon mcp --stdio
+  --repo /tmp/ucil-mcp-probe-2026-05-08/rust-project` → **22 tools**
+  registered, identical names to prior probes. All four
+  scenario-required tools listed:
+  - `find_definition` — "Go-to-definition with full context (signature, docs, callers)."
+  - `find_references` — "All references to a symbol, grouped by usage type (call, import, type)."
+  - `refactor` — "Safe refactoring with cross-file reference updates via Serena."
+  - `search_code` — "Hybrid search: text + structural + semantic."
+- **`tools/call find_definition name=retry_with_backoff`** →
+  `_meta.source = "tree-sitter+kg"`, `isError = false`,
+  payload: ``"`retry_with_backoff` defined in
+  /tmp/ucil-mcp-probe-2026-05-08/rust-project/src/http_client.rs at line 37"``.
+  Real handler.
+- **`tools/call find_references name=retry_with_backoff`** →
+  `_meta.not_yet_implemented = true`. Stub envelope.
+- **`tools/call refactor old_name=compute_score new_name=x`** →
+  `_meta.not_yet_implemented = true`. Stub envelope.
+- **Fixture state** (this session):
+  - `tests/fixtures/rust-project/src/http_client.rs` — `pub fn
+    retry_with_backoff` at line 37; in-file callers at lines
+    64, 84, 91, 110 (4 callers, matching prior); doc-comment example
+    at lines 23/26/27 unchanged.
+  - `tests/fixtures/python-project/` — **28 `compute_score`
+    occurrences across 3 .py files** (10 in `evaluator.py`, 8 in
+    `scoring.py`, 10 in `tests/test_scoring.py`), unchanged from prior.
+  - `git log -1 --oneline -- tests/fixtures/rust-project/
+    tests/fixtures/python-project/` →
+    `14bbace test(fixtures): add python-project scoring.compute_score (DEC-0017)`,
+    same commit as prior runs.
+
+All three substantive invariants hold at HEAD `43645fd`. Inherited
+verdict (PASS, exit 0) is correct at this HEAD. No new escalations
+filed.
 
 ## Summary
 
