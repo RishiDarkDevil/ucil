@@ -1,6 +1,7 @@
 # WO-0064 Ready for Review — `LancedbChunkIndexer` (P2-W8-F04)
 
-**Final commit sha**: `d118dea5a9e7a5367893e91c8c9570bddc0c5047`
+**Final commit sha (pre-RFR)**: `d118dea5a9e7a5367893e91c8c9570bddc0c5047`
+**Final commit sha (RFR-marker tip)**: `ef881104e0a14e4e2c54da13aef72ae84a266dde` (this RFR adds 1 file under the AC24 allow-list `ucil-build/work-orders/0064-ready-for-review.md`)
 **Branch**: `feat/WO-0064-lancedb-chunk-indexer`
 **Feature**: `P2-W8-F04` (background `LanceDB` chunk indexing,
 master-plan §18 Phase 2 Week 8 line 1789)
