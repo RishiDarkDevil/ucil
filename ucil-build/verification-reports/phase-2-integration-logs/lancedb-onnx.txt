@@ -1,6 +1,6 @@
 === LanceDB / ONNX linkage probe ===
-2026-05-07T17:59:51Z
-HEAD: f9b0a696262425a95bc03ff3180ff36e3c975e3a
+2026-05-07T18:12:59Z
+HEAD: 2ad0dfa159d83732d1e2a9f6fb4e7488aea2c7af
 
 name = "lancedb"
 version = "0.16.0"
@@ -13,6 +13,14 @@ version = "0.1.0"
 
 -- ucil-embeddings dependency declaration --
 ort.workspace = true
-# the arrow-stack ABI tier identical (`lancedb 0.16` → `lance 0.23` →
-lancedb = { workspace = true }
-# `lancedb 0.16` transitively depends on.
+lancedb     = { workspace = true }   # dev-dep for vector_query bench
+arrow-array = { workspace = true }
+arrow-schema= { workspace = true }
+
+-- workspace-level pins (root Cargo.toml) --
+ort     = { version = "=2.0.0-rc.12", default-features = false, features = ["std", "download-binaries", "tls-rustls"] }
+lancedb = { version = "0.16",         default-features = false }
+
+-- build smoke --
+$ cargo build -p ucil-embeddings --quiet
+rc=0  (warm incremental cache; ucil-embeddings consumes both ort and lancedb)

@@ -1,10 +1,10 @@
 # Phase 2 Integration Report
 
-**Tester session**: itg-ee1060d6-1578-40a5-98d2-cfd6f9e9f2c5
-**Started at**:     2026-05-07T17:59:08Z
-**Verified at**:    2026-05-07T17:59:51Z
+**Tester session**: itg-6f1bcd21-5ff3-4630-a30b-8db3c92ca7bb
+**Started at**:     2026-05-07T18:10:56Z
+**Verified at**:    2026-05-07T18:12:59Z
 **Phase**:          2 (Week 1, per `ucil-build/progress.json`)
-**HEAD commit**:    f9b0a696262425a95bc03ff3180ff36e3c975e3a
+**HEAD commit**:    2ad0dfa159d83732d1e2a9f6fb4e7488aea2c7af
 **Verdict**:        PASS
 
 ## Summary
@@ -21,34 +21,32 @@ Detailed per-feature embedding/recall benches (`bench-embed.sh`,
 `scripts/gate/phase-2.sh`, not by this integration-tester pass — this
 pass is the agent-visible black-box wrapper.
 
-The source-code delta between this run's HEAD `f9b0a69` and the prior
-integration HEAD `0d05864` is limited to harness fixes and report
-bookkeeping: `00c840c` implements `scripts/verify/real-repo-smoke.sh`
-end-to-end (was a TODO stub returning exit 1; the new implementation
-clones rust-lang/log, drives ucil-daemon over MCP for 4 JSON-RPC
-frames, and asserts 0 errors), `92737d2` removes `ucil-agents` from
-the Phase-2 coverage list per ADR DEC-0018 (the crate is Phase-3.5),
-and `f9b0a69` is a `chore(verification-reports)` refresh. None of
-these touch the daemon, Serena adapter, or pyright bridge — they are
-bit-for-bit identical between `0d05864` and `f9b0a69`.
+The source-code delta between this run's HEAD `2ad0dfa` and the
+prior integration HEAD `f9b0a69` is a single commit, `2ad0dfa
+chore(verification-reports): refresh phase-2-integration.md @ HEAD
+f9b0a69`, which only refreshes this report file and its log dir —
+the daemon, Serena adapter, and pyright bridge sources are bit-for-bit
+identical to the prior verified HEAD. This run is therefore a
+re-confirmation under a fresh tester session, not a re-validation of
+new code.
 
-- `scripts/verify/e2e-mcp-smoke.sh` — **exit 0** (PASS, 403 ms).
+- `scripts/verify/e2e-mcp-smoke.sh` — **exit 0** (PASS, 387 ms).
   `cargo build -p ucil-daemon` served from a fully warm incremental
   cache (no source delta versus the prior verification HEAD
-  `0d05864`); the daemon answered `initialize` and `tools/list` over
+  `f9b0a69`); the daemon answered `initialize` and `tools/list` over
   `ucil-daemon mcp --stdio`. All 22 frozen MCP tools advertise the
   four CEQP universal params.
-- `scripts/verify/serena-live.sh` — **exit 0** (PASS, 3 306 ms).
+- `scripts/verify/serena-live.sh` — **exit 0** (PASS, 3 221 ms).
   Serena v1.0.0 spawned via `uvx` and advertised 20 tools, including
   the three required by G1 structural (`find_symbol`,
   `find_referencing_symbols`, `get_symbols_overview`).
-- `scripts/verify/diagnostics-bridge.sh` — **exit 0** (PASS, 404 ms).
+- `scripts/verify/diagnostics-bridge.sh` — **exit 0** (PASS, 418 ms).
   `pyright` v1.1.409 on PATH at
   `/home/rishidarkdevil/.nvm/versions/node/v22.22.2/bin/pyright`; the
   script ran `pyright --outputjson __diagnostics_probe.py` against a
   copy of `tests/fixtures/python-project/` and parsed
   `generalDiagnostics`, finding one `error`-severity diagnostic for
-  the deliberate `int → str` mismatch in the probe. Seventh
+  the deliberate `int → str` mismatch in the probe. Eighth
   consecutive passing run for this script.
 
 Because all gate scripts pass, the overall verdict is **PASS**.
@@ -85,10 +83,11 @@ compose stand-up was attempted — also unnecessary for Phase 2.
 
 | Suite                                          | Passed | Failed | Skipped | Duration |
 |------------------------------------------------|--------|--------|---------|----------|
-| `scripts/verify/e2e-mcp-smoke.sh`              | 1      | 0      | 0       | 403 ms   |
-| `scripts/verify/serena-live.sh`                | 1      | 0      | 0       | 3 306 ms |
-| `scripts/verify/diagnostics-bridge.sh`         | 1      | 0      | 0       | 404 ms   |
+| `scripts/verify/e2e-mcp-smoke.sh`              | 1      | 0      | 0       | 387 ms   |
+| `scripts/verify/serena-live.sh`                | 1      | 0      | 0       | 3 221 ms |
+| `scripts/verify/diagnostics-bridge.sh`         | 1      | 0      | 0       | 418 ms   |
 | LanceDB / ONNX linkage probe (Cargo.lock grep) | 2      | 0      | 0       | <1 ms    |
+| `cargo build -p ucil-embeddings --quiet`       | 1      | 0      | 0       | <1 s     |
 
 Per-feature acceptance tests (`cargo nextest`, `pnpm vitest`,
 `pytest`) are owned by the per-WO verifier sessions and the
@@ -107,18 +106,18 @@ Per-script captures live in
 ```
 phase-2-integration-logs/
   e2e-mcp-smoke.rc          → 0
-  e2e-mcp-smoke.dur         → 403 (ms)
+  e2e-mcp-smoke.dur         → 387 (ms)
   e2e-mcp-smoke.stdout      → "[e2e-mcp-smoke] OK — 22 tools registered, CEQP params on all, daemon spoke MCP cleanly."
-  e2e-mcp-smoke.stderr      → cargo build noise only
+  e2e-mcp-smoke.stderr      → empty
   serena-live.rc            → 0
-  serena-live.dur           → 3306 (ms)
+  serena-live.dur           → 3221 (ms)
   serena-live.stdout        → "[serena-live] OK — Serena v1.0.0 alive, advertises 20 tools …"
-  serena-live.stderr        → uvx / Serena startup info
+  serena-live.stderr        → empty
   diagnostics-bridge.rc     → 0
-  diagnostics-bridge.dur    → 404 (ms)
+  diagnostics-bridge.dur    → 418 (ms)
   diagnostics-bridge.stdout → "[diagnostics-bridge] OK — pyright returned 1 diagnostic(s) for the probe (severity=error)."
   diagnostics-bridge.stderr → empty
-  lancedb-onnx.txt          → Cargo.lock grep + ucil-embeddings dependency declarations
+  lancedb-onnx.txt          → Cargo.lock grep + ucil-embeddings dependency declarations + cargo build smoke
 ```
 
 ## Teardown
@@ -133,8 +132,8 @@ handlers.
 
 ## Provenance
 
-- HEAD at start of run: `f9b0a696262425a95bc03ff3180ff36e3c975e3a` (clean working tree).
-- HEAD at end of run:   `f9b0a696262425a95bc03ff3180ff36e3c975e3a` (no source touched).
+- HEAD at start of run: `2ad0dfa159d83732d1e2a9f6fb4e7488aea2c7af` (clean working tree, ahead=0).
+- HEAD at end of run:   `2ad0dfa159d83732d1e2a9f6fb4e7488aea2c7af` (no source touched).
 - Tester role:          `integration-tester` (per `.claude/agents/integration-tester.md`).
 - Phase from progress:  `2` (`jq .phase ucil-build/progress.json`).
-- Toolchain probed:     docker v29.4.2 (compose v5.1.3, daemon socket unreachable); uvx 0.11.6; pyright 1.1.409.
+- Toolchain probed:     docker v29.4.2 (compose v5.1.3, daemon socket unreachable); uvx 0.11.6; pyright 1.1.409; cargo 1.94.1; rustc 1.94.1.
