@@ -3,7 +3,7 @@ ts: 2026-05-07T05:21:00Z
 phase: 2
 session: monitor
 trigger: stop-hook-blocks-on-mid-phase-gate-red
-resolved: false
+resolved: true
 blocks_loop: false
 severity: low
 auto_classify: bucket-A-admin
@@ -20,3 +20,11 @@ landed (refactor + FindSimilarExecutor + handle_find_similar + 8-assertion
 test + verify script + effectiveness re-run). RFR marker imminent then
 critic + verifier sequence. Pipeline healthy: run-phase.sh 1679854 alive,
 patched run-phase.sh:332 guard active, branch synced, github 200.
+
+## Resolution (2026-05-07T17:35Z)
+
+P2 reached 25/25 (P2-W8-F08 / WO-0066 merged at HEAD `7d89ca9`). The
+`close_when` condition is satisfied. Auto-resolved by monitor session as
+Bucket-A admin per `auto_classify`.
+
+resolved: true
