@@ -105,6 +105,11 @@ retry_fn() {
 }
 
 if command -v retry_with_backoff >/dev/null 2>&1; then
+  # `bash -c` spawns a fresh shell that doesn't inherit unexported locals
+  # ($PROMPT, $AGENT_PATH, $LOG). Export them so the inner retry_fn sees
+  # non-empty values; otherwise tee/cat fail with `'': No such file or directory`
+  # and harness-fixer never actually invokes claude.
+  export PROMPT AGENT_PATH LOG
   retry_with_backoff 2 30 -- bash -c "$(declare -f retry_fn); retry_fn"
 else
   retry_fn
