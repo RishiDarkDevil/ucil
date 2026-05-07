@@ -19,3 +19,24 @@ Latest root-cause: ucil-build/verification-reports/root-cause-WO-0064.md (if pre
 If the rejection cites harness-script bugs (reality-check.sh,
 flip-feature.sh, a hook, a launcher), triage may auto-resolve this
 escalation via Bucket B before the loop halts.
+
+## Resolution
+
+Bucket A — auto-resolve. This is a duplicate of the already-handled
+verifier-attempts-exhausted condition for WO-0064. Evidence:
+
+- WO-0064 (lancedb-chunk-indexer) was merged into main at commit
+  `bbe645d` (`merge: WO-0064 lancedb-chunk-indexer (orphan → main) — P2-W8-F04 closure`).
+- The associated feature `P2-W8-F04` is `passes: true`, last verified by
+  a verifier session (`verifier-7f7ea48e-…`) at commit
+  `e737892fa7095a9a97cee069107180e67bc044c9`, with `attempts: 0`.
+- The same condition was already auto-resolved in commit `e3d12cd`
+  (`chore(escalation): resolve WO-0064 attempts-exhausted — already merged + passing`).
+- The `verifier_attempts: 4` counter reflects post-merge stale-rejection-prompt
+  retries handled by the harness fix at commit `c6609b9`
+  (`fix(harness): guard run-phase.sh against stale post-merge rejection-retry dispatch`).
+
+No further action required; the work-order is shipped and the feature
+is registered as passing. Triage closes this duplicate.
+
+resolved: true
