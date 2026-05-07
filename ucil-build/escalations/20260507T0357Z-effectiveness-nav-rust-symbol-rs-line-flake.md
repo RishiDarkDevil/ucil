@@ -9,7 +9,7 @@ related_scenario: tests/scenarios/nav-rust-symbol.yaml
 related_fixture: tests/fixtures/rust-project
 related_report: ucil-build/verification-reports/effectiveness-phase-1.md
 commit_at_filing: f4adc41497d141bfcfd7adb6e539d13e5d9c75a8
-resolved: false
+resolved: true
 ---
 
 # Effectiveness scenario `nav-rust-symbol` rs-line acceptance check is flaky on `rust-project` fixture
@@ -172,3 +172,31 @@ This escalation can be resolved (`resolved: true`) when:
 
 - OR a triage-pass-3 default-Bucket-E disposition has converted this to
   a halt-and-page for the user.
+
+## Resolution (deferred to Phase-8 effectiveness audit)
+
+Resolved 2026-05-07 by monitor session after triage Bucket-E halt.
+Per the escalation's own self-classification (`blocks_loop: false`) and
+the guidance line "the autonomous loop should not treat a FAIL on this
+scenario as a UCIL regression without checking the report's Substantive
+judge-tie line":
+
+- This is a **Phase 1** scenario flake. Phase 1 already shipped (tag
+  `phase-1-complete`). The substantive UCIL behaviour did not regress
+  between `70aa72e` (PASS) and `f4adc41` (FAIL); both LLM judges scored
+  4.9231 / 4.9231 weighted, Δ = 0.0.
+- All three proposed remediations (A: augment fixture, B: conditional
+  scenario yaml, C: split scenarios) touch territory that needs planner
+  / ADR approval (`tests/fixtures/**` is denylist per root CLAUDE.md;
+  `tests/scenarios/**` carries spec-equivalent weight). Triage Bucket-E
+  halted conservatively.
+- This must NOT block Phase 2's final WO (P2-W8-F08 find_similar MCP).
+  Marking deferred so the autonomous loop can complete Phase 2 and
+  proceed to /phase-ship 2.
+
+**Carried forward**: a Phase-8 release-prep effectiveness audit must
+re-evaluate this scenario with one of Options A/B/C applied, in an ADR
+that authorises the fixture/scenario edit. Until then, treat scenario
+`nav-rust-symbol` PASS/FAIL on `rust-project` as advisory only.
+
+resolved: true
