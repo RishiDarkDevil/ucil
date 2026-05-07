@@ -1,15 +1,15 @@
 # Coverage Gate — ucil-embeddings
 
-- **Verdict**: PASS
+- **Verdict**: FAIL
 - **Min line coverage**: 85%
 - **Min branch coverage**: 75%
-- **Generated**: 2026-05-07T18:45:02Z
+- **Generated**: 2026-05-07T19:49:39Z
 
 ## Summary
 
 | Metric       | Value |
 |--------------|-------|
-| Line         | 89.46107784431138% (floor 85%) |
+| Line         | 0% (floor 85%) |
 | Branch       | _unavailable (toolchain)_ |
 
 ## Raw JSON
@@ -23,19 +23,19 @@
     "percent": 0
   },
   "functions": {
-    "count": 86,
-    "covered": 76,
-    "percent": 88.37209302325581
+    "count": 0,
+    "covered": 0,
+    "percent": 0
   },
   "instantiations": {
-    "count": 172,
-    "covered": 152,
-    "percent": 88.37209302325581
+    "count": 0,
+    "covered": 0,
+    "percent": 0
   },
   "lines": {
-    "count": 835,
-    "covered": 747,
-    "percent": 89.46107784431138
+    "count": 0,
+    "covered": 0,
+    "percent": 0
   },
   "mcdc": {
     "count": 0,
@@ -44,10 +44,22 @@
     "percent": 0
   },
   "regions": {
-    "count": 1208,
-    "covered": 1071,
-    "notcovered": 137,
-    "percent": 88.65894039735099
+    "count": 0,
+    "covered": 0,
+    "notcovered": 0,
+    "percent": 0
   }
 }
 ```
+
+## Failures
+
+
+- Line coverage 0% < floor 85% (delta: 85pp).
+
+## Why this is failing
+
+Coverage below the floor means code paths exist that no test ever
+exercises. Combine this with mutation-gate: if a new file has 95% line
+coverage but 40% mutation score, the tests run the lines without
+asserting on their effects. Address both dimensions.

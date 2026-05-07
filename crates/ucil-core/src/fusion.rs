@@ -332,6 +332,328 @@ pub fn fuse_g2_rrf(per_source: &[G2SourceResults]) -> G2FusedOutcome {
     G2FusedOutcome { hits }
 }
 
+// ── §6.2 Query-type weight matrix + classifier (P3-W9-F01) ────────────────────
+//
+// Master-plan §6.2 lines 643-658 freeze a 10-row × 8-column weight
+// matrix that drives cross-group `RRF` fusion.  The 10 rows are the
+// canonical `QueryType` variants; the 8 columns are groups
+// `[G1, G2, G3, G4, G5, G6, G7, G8]`.  This block lands the matrix
+// alongside the deterministic classifier so feature `P3-W9-F01` ships
+// the `§6.2` contract end-to-end.  The cross-group `RRF` engine that
+// consumes [`group_weights_for`] is `P3-W9-F04`, deferred to a
+// follow-up work-order.
+
+/// One of the 10 canonical UCIL query types per master-plan §6.2.
+///
+/// Variant declaration order MUST stay aligned with the `§6.2` matrix
+/// row order so that `query_type as usize == QUERY_WEIGHT_MATRIX` row
+/// index is correct (verified by [`group_weights_for`] sub-assertions
+/// SA4 + SA5 in the frozen test `test_deterministic_classifier`).
+///
+/// The enum is intentionally NOT `#[non_exhaustive]` — the 10 variants
+/// are frozen by the master-plan; introducing a new query type
+/// requires both a master-plan amendment and an `ADR`.
+///
+/// `serde(rename_all = "snake_case")` produces the JSON wire labels
+/// `"understand_code"`, `"find_definition"`, … exactly matching the
+/// `§6.2` row names.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    Hash,
+    PartialOrd,
+    Ord,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum QueryType {
+    /// "Explain what a file/function/module does, why it exists, its
+    /// context" — master-plan §3.2 row 1.  Default per `§8.6` lines
+    /// 817-822 (most-permissive bonus-context fallback when both
+    /// `tool_name` AND `reason_keywords` are unknown).
+    #[default]
+    UnderstandCode,
+    /// "Go-to-definition with full context" — master-plan §3.2 row 2.
+    FindDefinition,
+    /// "All references to a symbol" — master-plan §3.2 row 3.
+    FindReferences,
+    /// "Hybrid search: text + structural + semantic" — master-plan
+    /// §3.2 row 4.
+    SearchCode,
+    /// "Optimal context for editing a file/region" — master-plan §3.2
+    /// row 6.  Also the target for `Refactor`-flavoured intents
+    /// surfaced via the keyword fallback path.
+    GetContextForEdit,
+    /// "Upstream and downstream dependency chains" — master-plan §3.2
+    /// row 9.
+    TraceDependencies,
+    /// "What would be affected by changing this code?" — master-plan
+    /// §3.2 row 10.
+    BlastRadius,
+    /// "Analyze diff/PR against conventions, quality, security,
+    /// tests, blast radius" — master-plan §3.2 row 13.
+    ReviewChanges,
+    /// "Run lint + type check + security scan on specified code" —
+    /// master-plan §3.2 row 14.
+    CheckQuality,
+    /// "Store or retrieve agent learnings, decisions, observations" —
+    /// master-plan §3.2 row 12.  The `§6.2` sentinel row — its weight
+    /// vector `[0, 0, 3.0, 0, 0, 0, 0, 0]` encodes the strict
+    /// knowledge-only constraint and is the canary for matrix-row-
+    /// shift bugs.
+    Remember,
+}
+
+/// Output of [`classify_query`] — the query-type plus metadata the
+/// downstream cross-group fusion engine (`P3-W9-F04`) and bonus-
+/// context selector (`§6.3`) consume.
+///
+/// The `group_weight_overrides` field is reserved for future
+/// per-classification overrides on top of the static
+/// [`QUERY_WEIGHT_MATRIX`]; the classifier emits an empty map for now
+/// (the override surface lands when the cross-group `RRF` engine
+/// gains a runtime knob — master-plan §6.2 line 645).  `intent_hint`
+/// and `domain_tags` are reserved for future enrichment by the LLM
+/// `QueryInterpreter` agent (`P3.5-W12-F02`); the deterministic-
+/// fallback classifier emits empty values per `DEC-0018`'s phase
+/// boundary.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ClassifierOutput {
+    /// Selected query type.
+    pub query_type: QueryType,
+    /// Optional human-readable hint about the user's intent — `None`
+    /// from the deterministic classifier; populated by
+    /// `P3.5-W12-F02`.
+    pub intent_hint: Option<String>,
+    /// Domain tokens that match the canonical UCIL vocabulary —
+    /// empty from the deterministic classifier; populated by the
+    /// `CEQP` `parse_reason` path (`P3-W9-F02`).
+    pub domain_tags: Vec<String>,
+    /// Per-classification overrides on top of [`QUERY_WEIGHT_MATRIX`]
+    /// — empty from the deterministic classifier (the
+    /// `BTreeMap::new()` default).  Reserved for `P3-W9-F04`.
+    pub group_weight_overrides: BTreeMap<G2Source, f32>,
+}
+
+/// `tool_name → QueryType` static lookup table.  Covers the 12
+/// user-facing tools shipped or in-flight by phase 3 week 9 per
+/// master-plan §3.2 lines 215-226.  Tools omitted here fall through
+/// to the keyword scan in [`classify_query`].
+const TOOL_NAME_MAP: &[(&str, QueryType)] = &[
+    ("understand_code", QueryType::UnderstandCode),
+    ("find_definition", QueryType::FindDefinition),
+    ("find_references", QueryType::FindReferences),
+    ("search_code", QueryType::SearchCode),
+    ("find_similar", QueryType::SearchCode),
+    ("get_context_for_edit", QueryType::GetContextForEdit),
+    ("get_conventions", QueryType::UnderstandCode),
+    ("trace_dependencies", QueryType::TraceDependencies),
+    ("blast_radius", QueryType::BlastRadius),
+    ("review_changes", QueryType::ReviewChanges),
+    ("check_quality", QueryType::CheckQuality),
+    ("remember", QueryType::Remember),
+];
+
+/// Keyword → `QueryType` precedence list.  [`classify_query`] joins
+/// the lower-cased keyword slice with single spaces, pads with a
+/// leading + trailing space, then scans this slice for the first
+/// matching pattern.  Order matters — see the rustdoc on
+/// [`classify_query`] for the precedence ladder.
+///
+/// The `"refactor" | "rename" | "cleanup"` patterns map to
+/// [`QueryType::GetContextForEdit`] because the master-plan §6.2
+/// matrix has no dedicated `Refactor` row — refactor-flavoured
+/// intents borrow the `get_context_for_edit` weight profile (high
+/// G5 conventions weight, balanced retrieval).
+const KEYWORD_RULES: &[(&str, QueryType)] = &[
+    ("definition", QueryType::FindDefinition),
+    ("declared", QueryType::FindDefinition),
+    ("references", QueryType::FindReferences),
+    ("callers", QueryType::FindReferences),
+    ("usages", QueryType::FindReferences),
+    ("blast radius", QueryType::BlastRadius),
+    ("impact", QueryType::BlastRadius),
+    ("affected", QueryType::BlastRadius),
+    ("trace", QueryType::TraceDependencies),
+    ("depends on", QueryType::TraceDependencies),
+    ("refactor", QueryType::GetContextForEdit),
+    ("rename", QueryType::GetContextForEdit),
+    ("cleanup", QueryType::GetContextForEdit),
+    ("review", QueryType::ReviewChanges),
+    ("diff", QueryType::ReviewChanges),
+    (" pr ", QueryType::ReviewChanges),
+    ("lint", QueryType::CheckQuality),
+    ("quality", QueryType::CheckQuality),
+    ("vulnerab", QueryType::CheckQuality),
+    ("find code", QueryType::SearchCode),
+    ("search", QueryType::SearchCode),
+    ("grep", QueryType::SearchCode),
+    ("remember", QueryType::Remember),
+    ("save", QueryType::Remember),
+    ("persist", QueryType::Remember),
+    ("explain", QueryType::UnderstandCode),
+    ("how does", QueryType::UnderstandCode),
+    ("what is", QueryType::UnderstandCode),
+];
+
+/// 10 × 8 weight matrix — master-plan §6.2 lines 649-658.
+///
+/// Rows are indexed by `QueryType as usize`; each row is the 8-column
+/// weight vector `[G1, G2, G3, G4, G5, G6, G7, G8]`.  This is the
+/// data table the cross-group `RRF` engine (`P3-W9-F04`, deferred)
+/// will consume via [`group_weights_for`].  Validating any row
+/// realignment is the job of sub-assertions SA4 + SA5 in
+/// [`test_deterministic_classifier`].
+const QUERY_WEIGHT_MATRIX: [[f32; 8]; 10] = [
+    // §6.2 line 649: understand_code
+    [2.0, 1.0, 2.5, 1.5, 2.0, 0.5, 1.0, 0.5],
+    // §6.2 line 650: find_definition
+    [3.0, 1.5, 1.0, 0.5, 0.5, 0.0, 0.5, 0.0],
+    // §6.2 line 651: find_references
+    [3.0, 2.0, 0.5, 1.0, 0.5, 0.0, 0.5, 0.0],
+    // §6.2 line 652: search_code
+    [1.5, 3.0, 0.5, 0.5, 1.0, 0.0, 0.0, 0.0],
+    // §6.2 line 653: get_context_for_edit
+    [2.0, 2.0, 1.5, 1.5, 2.5, 0.5, 1.5, 1.0],
+    // §6.2 line 654: trace_dependencies
+    [1.5, 0.5, 1.5, 3.0, 0.5, 0.0, 0.5, 0.0],
+    // §6.2 line 655: blast_radius
+    [1.5, 0.5, 1.5, 3.0, 0.5, 0.5, 1.0, 1.0],
+    // §6.2 line 656: review_changes
+    [1.5, 1.0, 1.5, 1.5, 0.5, 1.0, 3.0, 2.5],
+    // §6.2 line 657: check_quality
+    [1.0, 0.5, 1.0, 1.5, 0.5, 0.5, 3.0, 2.5],
+    // §6.2 line 658: remember (sentinel — strict knowledge-only)
+    [0.0, 0.0, 3.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+];
+
+/// Lookup the `[G1..G8]` weight row for `query_type` per master-plan
+/// §6.2 line 645.  Returns the 8-element row from
+/// [`QUERY_WEIGHT_MATRIX`] keyed by `query_type as usize`.
+///
+/// Variant-declaration order on [`QueryType`] is the source of truth
+/// for the row index — the `[[f32; 8]; 10]` array length is the
+/// compile-time guarantee that exactly 10 rows are present.
+///
+/// # Examples
+///
+/// ```
+/// use ucil_core::fusion::{group_weights_for, QueryType};
+///
+/// // §6.2 line 658 — `Remember` is the sentinel row.
+/// assert_eq!(
+///     group_weights_for(QueryType::Remember),
+///     [0.0, 0.0, 3.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+/// );
+/// ```
+#[must_use]
+pub const fn group_weights_for(query_type: QueryType) -> [f32; 8] {
+    QUERY_WEIGHT_MATRIX[query_type as usize]
+}
+
+/// Deterministic-fallback classifier — master-plan §7.1 lines 693-695.
+///
+/// Per §7.1 ("when `provider = none` is configured, the keyword
+/// classifier is the path") and §6.1 lines 585-641 (which places this
+/// function under the Query-Interpreter step of the pipeline), this is
+/// the fallback brain that runs when no LLM provider is configured.
+///
+/// Precedence ladder:
+///
+/// 1. **`tool_name`** is the primary signal — match against the
+///    static [`TOOL_NAME_MAP`] derived from master-plan §3.2 lines
+///    211-237.  A hit returns immediately.
+/// 2. **`reason_keywords`** is the tie-breaker — when `tool_name`
+///    is unknown, lower-case the keywords, join with single spaces
+///    (and pad with one space on each end), then scan for the first
+///    matching pattern in the precedence-ordered keyword table.  A
+///    hit returns immediately.
+/// 3. **Default** → [`QueryType::UnderstandCode`] per master-plan
+///    §8.6 lines 817-822 (most-permissive bonus-context default).
+///
+/// The function is pure: no IO, no async, no logging.  It never
+/// panics and always returns a valid [`ClassifierOutput`].
+///
+/// # Examples
+///
+/// ```
+/// use ucil_core::fusion::{classify_query, QueryType};
+///
+/// // Tool-name primary signal.
+/// assert_eq!(
+///     classify_query("find_definition", &[]).query_type,
+///     QueryType::FindDefinition,
+/// );
+///
+/// // Keyword fallback when the tool name is unknown.
+/// assert_eq!(
+///     classify_query("unknown_tool", &["find", "references"]).query_type,
+///     QueryType::FindReferences,
+/// );
+///
+/// // Default when both tool name AND keywords are unknown.
+/// assert_eq!(
+///     classify_query("", &[]).query_type,
+///     QueryType::UnderstandCode,
+/// );
+/// ```
+#[must_use]
+pub fn classify_query(tool_name: &str, reason_keywords: &[&str]) -> ClassifierOutput {
+    // Step 1: tool_name primary signal.
+    for &(name, qt) in TOOL_NAME_MAP {
+        if name == tool_name {
+            return ClassifierOutput {
+                query_type: qt,
+                intent_hint: None,
+                domain_tags: Vec::new(),
+                group_weight_overrides: BTreeMap::new(),
+            };
+        }
+    }
+
+    // Step 2: keyword fallback.  Lower-case once, join with single
+    // spaces, then scan precedence rules.  Pad with leading +
+    // trailing spaces so the `" pr "` rule (which guards against
+    // matching the literal `pr` inside `print` / `provider`) can
+    // still hit a single-token slice like `&["pr"]` (joined → `" pr "`).
+    let mut joined = String::from(" ");
+    for (idx, kw) in reason_keywords.iter().enumerate() {
+        if idx > 0 {
+            joined.push(' ');
+        }
+        for c in kw.chars() {
+            for lc in c.to_lowercase() {
+                joined.push(lc);
+            }
+        }
+    }
+    joined.push(' ');
+
+    for &(pattern, qt) in KEYWORD_RULES {
+        if joined.contains(pattern) {
+            return ClassifierOutput {
+                query_type: qt,
+                intent_hint: None,
+                domain_tags: Vec::new(),
+                group_weight_overrides: BTreeMap::new(),
+            };
+        }
+    }
+
+    // Step 3: default per master-plan §8.6.
+    ClassifierOutput {
+        query_type: QueryType::UnderstandCode,
+        intent_hint: None,
+        domain_tags: Vec::new(),
+        group_weight_overrides: BTreeMap::new(),
+    }
+}
+
 // ── Frozen acceptance test ────────────────────────────────────────────────────
 //
 // Per `DEC-0007`, the frozen acceptance selector lives at MODULE ROOT —
@@ -537,5 +859,163 @@ fn test_g2_rrf_weights() {
         "(7) contributing_sources[1] must be Ripgrep (weight 1.5); \
          got {:?}",
         outcome.hits[0].contributing_sources,
+    );
+}
+
+// ── Frozen acceptance test — P3-W9-F01 deterministic classifier ───────────────
+//
+// Per `DEC-0007`, the frozen selector lives at MODULE ROOT so the
+// `cargo test -p ucil-core fusion::test_deterministic_classifier`
+// selector resolves directly without traversing a `mod tests {}`
+// barrier.  Sub-assertions are inline-rustdoc-numbered SA1..SA6 so
+// failure messages map to a specific assertion-of-record.
+
+#[cfg(test)]
+#[test]
+#[allow(clippy::too_many_lines, clippy::float_cmp)]
+fn test_deterministic_classifier() {
+    // ── SA1: tool_name primary signal — all 12 §3.2 mappings ─────────
+    //
+    // Every entry in `TOOL_NAME_MAP` MUST resolve to its declared
+    // `QueryType`.  This is the load-bearing assertion against the
+    // M1 verifier mutation (bypass tool_name match to default).
+    let tool_cases: &[(&str, QueryType)] = &[
+        ("understand_code", QueryType::UnderstandCode),
+        ("find_definition", QueryType::FindDefinition),
+        ("find_references", QueryType::FindReferences),
+        ("search_code", QueryType::SearchCode),
+        ("find_similar", QueryType::SearchCode),
+        ("get_context_for_edit", QueryType::GetContextForEdit),
+        ("get_conventions", QueryType::UnderstandCode),
+        ("trace_dependencies", QueryType::TraceDependencies),
+        ("blast_radius", QueryType::BlastRadius),
+        ("review_changes", QueryType::ReviewChanges),
+        ("check_quality", QueryType::CheckQuality),
+        ("remember", QueryType::Remember),
+    ];
+    for &(name, expected) in tool_cases {
+        let got = classify_query(name, &[]).query_type;
+        assert_eq!(
+            got, expected,
+            "(SA1) tool_name primary signal: classify_query({name:?}, &[]) \
+             must yield {expected:?}; got {got:?}"
+        );
+    }
+
+    // ── SA2: keyword fallback when tool_name is unknown ──────────────
+    //
+    // `find` alone matches no rule, but `references` matches the
+    // `references` rule → FindReferences.  Validates that the
+    // keyword scan runs after the tool-name miss AND that joining
+    // multi-token slices works.
+    let out = classify_query("unknown_tool", &["find", "references"]);
+    assert_eq!(
+        out.query_type,
+        QueryType::FindReferences,
+        "(SA2) keyword fallback: classify_query(\"unknown_tool\", &[\"find\", \
+         \"references\"]) must yield FindReferences; got {:?}",
+        out.query_type,
+    );
+
+    // Bonus: phrase patterns work via the space-padded join.
+    let out = classify_query("unknown_tool", &["blast", "radius"]);
+    assert_eq!(
+        out.query_type,
+        QueryType::BlastRadius,
+        "(SA2) phrase fallback: classify_query(\"unknown_tool\", &[\"blast\", \
+         \"radius\"]) must yield BlastRadius; got {:?}",
+        out.query_type,
+    );
+
+    // ── SA3: default when tool AND keywords both unknown ─────────────
+    //
+    // §8.6 lines 817-822 — most-permissive bonus-context default.
+    let out = classify_query("", &[]);
+    assert_eq!(
+        out.query_type,
+        QueryType::UnderstandCode,
+        "(SA3) default when both unknown: classify_query(\"\", &[]) must \
+         yield UnderstandCode; got {:?}",
+        out.query_type,
+    );
+    // ClassifierOutput defaults are populated correctly.
+    assert!(
+        out.intent_hint.is_none(),
+        "(SA3) intent_hint must be None from the deterministic path"
+    );
+    assert!(
+        out.domain_tags.is_empty(),
+        "(SA3) domain_tags must be empty from the deterministic path"
+    );
+    assert!(
+        out.group_weight_overrides.is_empty(),
+        "(SA3) group_weight_overrides must be empty from the deterministic path"
+    );
+
+    // ── SA4: group-weight matrix shape (4 query types) ───────────────
+    //
+    // §6.2 line 649 — UnderstandCode row.
+    assert_eq!(
+        group_weights_for(QueryType::UnderstandCode),
+        [2.0, 1.0, 2.5, 1.5, 2.0, 0.5, 1.0, 0.5],
+        "(SA4) UnderstandCode row mismatch — §6.2 line 649"
+    );
+    // §6.2 line 650 — FindDefinition row.  Load-bearing against
+    // the M2 verifier mutation (swap UnderstandCode ↔ FindDefinition
+    // rows in QUERY_WEIGHT_MATRIX).
+    assert_eq!(
+        group_weights_for(QueryType::FindDefinition),
+        [3.0, 1.5, 1.0, 0.5, 0.5, 0.0, 0.5, 0.0],
+        "(SA4) FindDefinition row mismatch — §6.2 line 650"
+    );
+    // §6.2 line 655 — BlastRadius row.
+    assert_eq!(
+        group_weights_for(QueryType::BlastRadius),
+        [1.5, 0.5, 1.5, 3.0, 0.5, 0.5, 1.0, 1.0],
+        "(SA4) BlastRadius row mismatch — §6.2 line 655"
+    );
+
+    // ── SA5: Remember row is the §6.2 sentinel ───────────────────────
+    //
+    // §6.2 line 658 — `[0, 0, 3.0, 0, 0, 0, 0, 0]` encodes the strict
+    // knowledge-only constraint.  This row is the canary for matrix-
+    // row-shift bugs (any insertion above Remember in the matrix
+    // would break this assertion).
+    assert_eq!(
+        group_weights_for(QueryType::Remember),
+        [0.0, 0.0, 3.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        "(SA5) Remember sentinel row mismatch — §6.2 line 658 \
+         (knowledge-only constraint)"
+    );
+
+    // ── SA6: JSON round-trip on QueryType ────────────────────────────
+    //
+    // Verifies serde(rename_all = "snake_case") matches the §6.2 row
+    // labels and that the wire format is stable.
+    for qt in [
+        QueryType::UnderstandCode,
+        QueryType::FindDefinition,
+        QueryType::FindReferences,
+        QueryType::SearchCode,
+        QueryType::GetContextForEdit,
+        QueryType::TraceDependencies,
+        QueryType::BlastRadius,
+        QueryType::ReviewChanges,
+        QueryType::CheckQuality,
+        QueryType::Remember,
+    ] {
+        let json = serde_json::to_string(&qt).expect("serialize QueryType");
+        let back: QueryType = serde_json::from_str(&json).expect("deserialize QueryType");
+        assert_eq!(
+            qt, back,
+            "(SA6) JSON round-trip mismatch for {qt:?}: serialised={json}"
+        );
+    }
+    // Wire-format spot check — §6.2 row label.
+    let wire = serde_json::to_string(&QueryType::FindDefinition).unwrap();
+    assert_eq!(
+        wire, "\"find_definition\"",
+        "(SA6) FindDefinition wire-format must equal \"find_definition\" \
+         (the §6.2 row label); got {wire}"
     );
 }
