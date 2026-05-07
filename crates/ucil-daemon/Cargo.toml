@@ -97,3 +97,23 @@ sha2.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+# `futures::TryStreamExt` is needed by the WO-0064 / P2-W8-F04 frozen
+# acceptance tests in `executor.rs` to drain the
+# `lancedb::Table::query().execute().await?` stream into a `Vec<RecordBatch>`
+# for inspection of `(file_path, file_hash)` rows.  Test-only — no
+# production code consumes `futures`.
+futures.workspace = true
+# `tokenizers` is needed by the WO-0064 / P2-W8-F04 frozen acceptance
+# tests in `executor.rs` to construct a synthetic `WordLevel` tokenizer
+# inline (no on-disk model artefact required).  Test-only — production
+# code reaches the tokenizer transitively via `ucil-embeddings`.
+tokenizers.workspace = true
+# `sha2::Digest::digest` is needed by the WO-0064 / P2-W8-F04 frozen
+# acceptance tests' `TestEmbeddingSource` impl to derive deterministic
+# 768-dim vectors from a content hash.  Production code uses `sha2`
+# transitively via the `[dependencies]` `sha2.workspace = true` line.
+sha2.workspace = true
+# `async-trait` is needed by the `TestEmbeddingSource` `EmbeddingSource`
+# trait impl in `executor.rs`'s test-only block.  Production code uses
+# `async-trait` via the existing `[dependencies]` line.
+async-trait.workspace = true

@@ -253,6 +253,16 @@ arrow-schema = "53"
 # re-indexing.  Pin `0.10` (current stable line as of 2026-05-07).
 sha2 = "0.10"
 
+# `futures` provides `TryStreamExt::try_collect` used by the WO-0064
+# / P2-W8-F04 frozen acceptance tests to drain
+# `lancedb::Table::query().execute().await?` streams into a
+# `Vec<RecordBatch>` for inspection.  Test-only consumer in
+# `crates/ucil-daemon/src/executor.rs`.  `default-features = false`
+# avoids the `executor` / `thread-pool` transitive bloat — the
+# `std` and `async-await` features are sufficient for the trait
+# extensions used.
+futures = { version = "0.3", default-features = false, features = ["std", "async-await"] }
+
 [profile.dev]
 opt-level = 0
 
