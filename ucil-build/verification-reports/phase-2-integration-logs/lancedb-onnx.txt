@@ -1,0 +1,17 @@
+## LanceDB + ONNX availability check (Phase 2 layer)
+
+### Cargo.lock probe
+name = "lancedb"
+version = "0.16.0"
+--
+name = "ort"
+version = "2.0.0-rc.12"
+--
+name = "ucil-embeddings"
+version = "0.1.0"
+
+### ucil-embeddings cargo metadata
+name=ucil-embeddings version=0.1.0
+  deps:
+    ort -> =2.0.0-rc.12
+    lancedb -> ^0.16
