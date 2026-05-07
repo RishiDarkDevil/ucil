@@ -1,26 +1,27 @@
-=== LanceDB / ONNX linkage probe ===
-2026-05-07T18:12:59Z
-HEAD: 2ad0dfa159d83732d1e2a9f6fb4e7488aea2c7af
-
+=== Cargo.lock entries for lancedb / ort ===
 name = "lancedb"
 version = "0.16.0"
 --
 name = "ort"
 version = "2.0.0-rc.12"
---
-name = "ucil-embeddings"
-version = "0.1.0"
 
--- ucil-embeddings dependency declaration --
+=== ucil-embeddings/Cargo.toml dependency declarations ===
 ort.workspace = true
-lancedb     = { workspace = true }   # dev-dep for vector_query bench
-arrow-array = { workspace = true }
-arrow-schema= { workspace = true }
+# the arrow-stack ABI tier identical (`lancedb 0.16` → `lance 0.23` →
+lancedb = { workspace = true }
+# `lancedb 0.16` transitively depends on.
 
--- workspace-level pins (root Cargo.toml) --
-ort     = { version = "=2.0.0-rc.12", default-features = false, features = ["std", "download-binaries", "tls-rustls"] }
-lancedb = { version = "0.16",         default-features = false }
-
--- build smoke --
-$ cargo build -p ucil-embeddings --quiet
-rc=0  (warm incremental cache; ucil-embeddings consumes both ort and lancedb)
+=== root Cargo.toml workspace.dependencies ===
+# OpenTelemetry — stdout-only exporter for Phase 0 (invariant 8)
+# `cargo_bench_support` feature is required for `cargo bench`
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support", "plotters"] }
+# tree-sitter >= 0.25 (0.24.x only supports up to ABI 14).
+# crate's re-exports.  Pinned to `=3.7.2` to align with `scip = "0.7"`'s
+# `P2-W8-F01`).  `ort` 2.x is the current line; as of 2026-05-06 it is
+# `libonnxruntime.so` (DEC-0006 spirit); ort-sys also requires a TLS
+ort = { version = "=2.0.0-rc.12", default-features = false, features = ["std", "download-binaries", "tls-rustls"] }
+# `chrono` 0.4.44+, and (b) lance 0.29 (pulled by lancedb 0.20+) trips
+lancedb = { version = "0.16", default-features = false }
+# `Field`, `DataType`.  Pinned to the `53` line that lancedb 0.16
+# `crates/ucil-daemon/src/lancedb_indexer.rs` (P2-W8-F04, WO-0064) to
+# `lancedb::Table::query().execute().await?` streams into a
