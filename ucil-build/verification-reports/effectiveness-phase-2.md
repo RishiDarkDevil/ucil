@@ -1,26 +1,55 @@
 # Effectiveness Report — Phase 2
 
-Run at: 2026-05-07T18:42Z (re-confirmation pass)
-Commit: `43645fd` (`HEAD` at evaluator-launch)
-Branch: `main`
+Run at: 2026-05-07T19:45Z (re-confirmation pass)
+Commit: `f9fd29d` (`HEAD` at evaluator-launch)
+Branch: `feat/WO-0067-classifier-and-reason-parser`
 Evaluator: `effectiveness-evaluator` (this session, `claude-opus-4-7`)
 Prior substantive run: commit `aa7dc84` (full UCIL+baseline+judge invocations)
-Prior refresh-pass: commit `43645fd` at HEAD `4efda0b` (peer evaluator session, 2026-05-07T18:39Z)
-Earlier refresh-pass: commit `dd4659e` at HEAD `c45933c`
+Prior refresh-passes: `43645fd` @ HEAD `4efda0b` (2026-05-07T18:39Z), `43645fd` @ HEAD `43645fd` (2026-05-07T18:42Z), `dd4659e` @ HEAD `c45933c` (earlier)
 
 ## Refresh-pass note
 
-This is a **re-confirmation pass** at HEAD `43645fd`. The substantive
-evaluation data (UCIL/baseline runs, judge scores, acceptance results)
-is inherited verbatim from the full run at commit `aa7dc84` because:
+This is a **re-confirmation pass** at HEAD `f9fd29d` (Phase 3 Week 1
+WO-0067 branch — the working branch for the in-flight classifier work).
+The substantive evaluation data (UCIL/baseline runs, judge scores,
+acceptance results) is inherited verbatim from the full run at commit
+`aa7dc84` because:
 
-1. **Zero UCIL source delta since the full run.** `git diff aa7dc84..HEAD
-   --stat -- crates/ adapters/ ml/ plugin/ plugins/ tests/fixtures/
-   tests/scenarios/` returns zero file changes (verified at evaluator
-   launch). All 19 commits on the path are confined to `scripts/`
-   (harness + gate fixes for DEC-0018), `ucil-build/decisions/` (the
-   DEC-0018 ADR itself), and `ucil-build/verification-reports/`
-   (coverage + integration refreshes; effectiveness report itself).
+1. **UCIL source delta is confined to additive Phase-3 modules in
+   `ucil-core`, with zero changes to MCP dispatch or fixtures.**
+
+   `git diff aa7dc84..HEAD --stat -- crates/ adapters/ ml/ plugin/
+   plugins/ tests/fixtures/ tests/scenarios/`:
+   ```
+    crates/ucil-core/src/ceqp.rs   | 547 +++++++++++++++ (new file)
+    crates/ucil-core/src/fusion.rs | 480 +++++++++++++++ (additive: QueryType + classify_query + QUERY_WEIGHT_MATRIX + test_deterministic_classifier)
+    crates/ucil-core/src/lib.rs    |   1 + (pub mod ceqp;)
+    3 files changed, 1028 insertions(+)
+   ```
+
+   Both new modules are Phase 3 Week 9 deterministic-fallback
+   classifier brain (CEQP + query-type classifier per master-plan §6.2),
+   landed in commits `43f0c93` (`feat(core): add QueryType enum +
+   classify_query + QUERY_WEIGHT_MATRIX`), `22a87c4` (`test(core): add
+   fusion::test_deterministic_classifier`), and `1521525` (`feat(core):
+   add ceqp module with parse_reason + Intent/PlannedAction/ParsedReason`).
+
+   Critically, `git diff aa7dc84..HEAD --stat -- crates/ucil-daemon/
+   crates/ucil-mcp/` returns **zero file changes**: the MCP server
+   dispatch path (`ucil-daemon::server::dispatch_tools_call`) and the
+   transport (`ucil-mcp`) — the only crates that determine what an
+   agent sees when it calls `find_definition` / `find_references` /
+   `refactor` / `search_code` — are untouched. The classifier
+   machinery in `ucil-core::fusion` is not yet wired into the MCP
+   handler dispatch (this is the Phase 3 follow-up tracked separately).
+   Therefore the MCP tool envelopes that drive the Phase-2 scenarios
+   are bit-identical to those at `aa7dc84`.
+
+   All other commits on the `aa7dc84..HEAD` path are confined to
+   `scripts/` (harness + gate fixes for DEC-0018), `ucil-build/decisions/`
+   (DEC-0018 ADR), `ucil-build/verification-reports/`,
+   `ucil-build/work-orders/`, and `ucil-build/escalations/` — none of
+   which affect agent runtime behavior.
 2. **MCP tool registration unchanged.** `tools/list` probe at HEAD
    `4efda0b` (against `target/debug/ucil-daemon mcp --stdio --repo
    /tmp/ucil-eval-probe-2026-05-08-27505/repo`) returned **22 tools**
@@ -62,13 +91,81 @@ the integration-tester's "refresh @ HEAD" pattern (cf. commits `2ad0dfa`,
 `c45933c`, `4efda0b` for `phase-2-integration.md`): a real
 probe-evidenced re-confirmation that the prior substantive run still
 applies, without re-spending the ~$8 LLM-judge cost when the inputs
-are bit-identical.
+that drive the Phase-2 MCP tool surface are bit-identical (Phase-3
+modules in `ucil-core` are unrelated to Phase-2 MCP dispatch).
 
 The full substantive evaluation detail (per-side run envelopes, judge
 prompts, acceptance results, observation list) is preserved unchanged
 below.
 
-### Probe evidence — 2026-05-07T18:42Z (this session @ HEAD `43645fd`)
+### Probe evidence — 2026-05-07T19:45Z (this session @ HEAD `f9fd29d`)
+
+This evaluator session independently re-ran the three-invariant probe at
+HEAD `f9fd29d` on the `feat/WO-0067-classifier-and-reason-parser`
+branch. The branch carries Phase 3 in-flight classifier work but does
+not modify the MCP dispatch or fixtures.
+
+- **Source delta vs `aa7dc84`** (this session):
+  `git diff aa7dc84..HEAD --stat -- crates/ adapters/ ml/ plugin/
+  plugins/ tests/fixtures/ tests/scenarios/` →
+  `crates/ucil-core/src/ceqp.rs`, `crates/ucil-core/src/fusion.rs`,
+  `crates/ucil-core/src/lib.rs` (+1028 lines, additive only).
+  `git diff aa7dc84..HEAD --stat -- crates/ucil-daemon/ crates/ucil-mcp/`
+  → **0 lines** — MCP dispatch path bit-identical to `aa7dc84`.
+- **`tools/list` probe** at `target/debug/ucil-daemon mcp --stdio
+  --repo /tmp/ucil-eval-probe-2026-05-08-413417/repo` (fresh fixture
+  copy from `tests/fixtures/rust-project/`) → **22 tools** registered,
+  identical names to prior probes. All four scenario-required tools
+  listed:
+  - `find_definition` — "Go-to-definition with full context (signature, docs, callers)."
+  - `find_references` — "All references to a symbol, grouped by usage type (call, import, type)."
+  - `refactor` — "Safe refactoring with cross-file reference updates via Serena."
+  - `search_code` — "Hybrid search: text + structural + semantic."
+- **`tools/call find_definition name=retry_with_backoff`** →
+  `_meta.source = "tree-sitter+kg"`, `isError = false`,
+  payload: ``"`retry_with_backoff` defined in
+  /tmp/ucil-eval-probe-2026-05-08-413417/repo/src/http_client.rs at line 37"``.
+  Real handler. Identical envelope to prior runs.
+- **`tools/call find_references name=retry_with_backoff`** →
+  `_meta.not_yet_implemented = true`,
+  `"tool 'find_references' is registered but its handler is not yet
+  implemented (Phase 1 stub)"`. Stub envelope. Identical to prior.
+- **`tools/call refactor old_name=compute_score
+  new_name=compute_relevance_score`** →
+  `_meta.not_yet_implemented = true`. Stub envelope. Identical to prior.
+- **`tools/call search_code query=compute_score`** → `isError=false`,
+  count-only envelope (`"50 matches"` against rust-project; the count
+  differs by fixture, but the envelope shape — count without per-result
+  file/line breakdown — is identical to prior probes).
+- **Fixture state** (this session, verified by independent grep):
+  - `tests/fixtures/rust-project/src/http_client.rs` — `pub fn
+    retry_with_backoff` at line 37; in-file callers at lines
+    64, 84, 91, 110 (4 callers, matching prior); doc-comment example
+    snippet at line 26 (the rustdoc fence opens at line 23).
+    `pub fn fetch_startup_banner` at line 62; callers at
+    `src/main.rs:24` and `src/http_client.rs:124`; use-import at
+    `src/main.rs:15` (correctly excluded by ground truth).
+  - `tests/fixtures/python-project/` — **28 `compute_score`
+    occurrences across 3 .py files** (10 in `evaluator.py` including
+    the `_builtin_compute_score` substring match, 8 in `scoring.py`,
+    10 in `tests/test_scoring.py`), identical to prior. The
+    `\b`-bounded count is 27; the unbounded count is 28; both match
+    the augmented fixture.
+  - `git log -1 --oneline -- tests/fixtures/rust-project/
+    tests/fixtures/python-project/` →
+    `14bbace test(fixtures): add python-project scoring.compute_score (DEC-0017)`,
+    same commit as prior runs.
+
+All three substantive invariants hold at HEAD `f9fd29d`. Inherited
+verdict (PASS, exit 0) is correct at this HEAD. No new escalations
+filed.
+
+Probe artefacts preserved:
+- `/tmp/ucil-eval-probe-tools-413475.txt` — initialize + tools/list (22 tools)
+- `/tmp/ucil-eval-probe-toolcalls-413577.txt` — 4× tools/call envelopes
+- `/tmp/ucil-eval-probe-2026-05-08-413417/repo/` — fresh rust-project fixture copy used for probe
+
+### Probe evidence — 2026-05-07T18:42Z (peer evaluator session @ HEAD `43645fd`)
 
 This evaluator session independently re-ran the three-invariant probe at
 HEAD `43645fd` (the parent of which is the peer evaluator's
@@ -167,7 +264,28 @@ Probe: `tools/list` against
 and `find_references` + `refactor` (required by `refactor-rename-python`)
 are listed.
 
-**Re-probe at HEAD `4efda0b`** (this re-confirmation pass,
+**Re-probe at HEAD `f9fd29d`** (this evaluator session,
+`/tmp/ucil-eval-probe-2026-05-08-413417/repo`, 2026-05-07T19:45Z):
+- `tools/list` → 22 tools registered, identical names. All four
+  scenario-required tools listed (`find_definition`, `find_references`,
+  `refactor`, `search_code`).
+- `tools/call find_definition name=retry_with_backoff` →
+  `_meta.source = "tree-sitter+kg"`, `isError = false`, returns
+  `retry_with_backoff` at `src/http_client.rs:37`. Real handler.
+- `tools/call find_references name=retry_with_backoff` →
+  `_meta.not_yet_implemented = true`. Stub.
+- `tools/call refactor old_name=compute_score new_name=compute_relevance_score`
+  → `_meta.not_yet_implemented = true`. Stub.
+- `tools/call search_code query=compute_score` → `isError=false`,
+  count-only envelope (`"50 matches"` against rust-project).
+
+Identical surface to prior probes. The Phase-3 modules added to
+`ucil-core` (`ceqp.rs`, `fusion.rs::QueryType`/`classify_query`) are
+not yet wired into the MCP dispatch (the dispatch in
+`crates/ucil-daemon/src/server.rs` has zero source delta vs `aa7dc84`),
+so the agent-visible MCP behavior is unchanged.
+
+**Re-probe at HEAD `4efda0b`** (peer evaluator session, 2026-05-07T18:42Z,
 `/tmp/ucil-eval-probe-2026-05-08-27505/repo`):
 - `tools/list` → 22 tools, identical names to prior run. All four
   scenario-required tools listed.
