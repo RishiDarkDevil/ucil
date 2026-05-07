@@ -52,7 +52,9 @@ use tokio::{
 };
 use ucil_core::KnowledgeGraph;
 
+use crate::branch_manager::BranchManager;
 use crate::g2_search::G2SourceFactory;
+use crate::lancedb_indexer::EmbeddingSource;
 use crate::text_search::{self, TextMatch, TextSearchError};
 use ucil_core::{fuse_g2_rrf, G2FusedOutcome, G2SourceResults};
 
@@ -114,6 +116,39 @@ pub const G2_MASTER_DEADLINE: Duration = Duration::from_secs(5);
 /// the caller's request at this ceiling and emits `tracing::warn!` so
 /// the agent can see the clamp in its own logs.
 pub const SEARCH_CODE_MAX_RESULTS: usize = 500;
+
+/// Default value for `find_similar`'s `arguments.max_results`.
+///
+/// Ten covers the common "show me the closest semantic matches"
+/// use case while keeping the response envelope under typical
+/// context budgets.  Paired with
+/// [`FIND_SIMILAR_MAX_RESULTS_CAP`], which caps whatever the caller
+/// asks for so a pathological request cannot drain the `LanceDB`
+/// query (master-plan §3.2 line 219).
+pub const FIND_SIMILAR_DEFAULT_MAX_RESULTS: u64 = 10;
+
+/// Saturating cap on `find_similar`'s `arguments.max_results`.
+///
+/// `LanceDB`'s flat-scan `nearest_to(...)` cost grows linearly in
+/// the table's row count when no ANN index has been created (the
+/// small fixture tables this WO exercises do not need an index per
+/// the `scope_out` carve-out); we cap the per-call result count
+/// at 100 to keep the response envelope finite.
+pub const FIND_SIMILAR_MAX_RESULTS_CAP: u64 = 100;
+
+/// Per-call deadline for `find_similar`'s `LanceDB` query path.
+///
+/// Combined budget for the embedding + `LanceDB` `nearest_to` +
+/// `RecordBatch` drain.  Wraps every `.await` in
+/// `handle_find_similar` per `.claude/rules/rust-style.md`'s
+/// invariant that every `.await` touching IO is wrapped in
+/// `tokio::time::timeout` with a named const.
+///
+/// Five seconds is generous for the test corpus's ≤10 chunks and
+/// tight enough to bound a wedged `LanceDB` call.  Production-side
+/// tuning is deferred to a follow-up `WO` once the daemon's
+/// startup orchestrator wires in the production embedder.
+pub const FIND_SIMILAR_QUERY_TIMEOUT: Duration = Duration::from_secs(5);
 
 // ── Errors ───────────────────────────────────────────────────────────────────
 
@@ -336,6 +371,75 @@ pub fn ucil_tools() -> Vec<ToolDescriptor> {
 
 // ── Server ──────────────────────────────────────────────────────────────────
 
+/// Per-branch `find_similar` executor.
+///
+/// Bundles the dependencies the `handle_find_similar` MCP handler
+/// needs to embed a query snippet and run a `LanceDB` `nearest_to`
+/// query against the per-branch `code_chunks` table.
+///
+/// Master-plan §3.2 line 219 freezes the `find_similar` tool's
+/// contract ("Find code similar to a given snippet or pattern").
+/// Master-plan §18 Phase 2 Week 8 line 1791 frames the deliverable
+/// as "Vector search works" — `P2-W8-F08` closes Phase 2 Week 8 and
+/// the entire Phase 2 envelope.  Master-plan §12.2 lines 1321-1346
+/// freezes the per-branch `code_chunks` table the executor queries.
+///
+/// The executor wraps three injected collaborators:
+///
+/// * [`BranchManager`] — resolves the per-branch `vectors/`
+///   directory via [`BranchManager::branch_vectors_dir`] (see
+///   `WO-0064` line 660-672 for the canonical connect/open pattern).
+/// * [`EmbeddingSource`] — `UCIL`-internal trait seam per `DEC-0008`
+///   §4 (production `CodeRankEmbeddingSource` from `WO-0059`; tests
+///   inject a deterministic `TestEmbeddingSource`).
+/// * `default_branch` — fall-back branch name when
+///   `arguments.branch` is omitted from the MCP request.
+///
+/// Production wiring of the executor into the daemon's startup
+/// orchestrator is deferred to a follow-up `WO` per the
+/// `WO-0066` `scope_out`.
+pub struct FindSimilarExecutor {
+    branch_manager: Arc<BranchManager>,
+    embedding_source: Arc<dyn EmbeddingSource>,
+    default_branch: String,
+}
+
+impl std::fmt::Debug for FindSimilarExecutor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FindSimilarExecutor")
+            .field("branch_manager", &self.branch_manager)
+            .field("embedding_source", &self.embedding_source.name())
+            .field("default_branch", &self.default_branch)
+            .finish()
+    }
+}
+
+impl FindSimilarExecutor {
+    /// Build a new executor from the three injected collaborators.
+    ///
+    /// `default_branch` is the branch name the
+    /// [`McpServer::handle_find_similar`] handler falls back to when
+    /// the inbound request omits `arguments.branch`.
+    pub fn new(
+        branch_manager: Arc<BranchManager>,
+        embedding_source: Arc<dyn EmbeddingSource>,
+        default_branch: impl Into<String>,
+    ) -> Self {
+        Self {
+            branch_manager,
+            embedding_source,
+            default_branch: default_branch.into(),
+        }
+    }
+
+    /// Read-only accessor for the fall-back branch name.  Used by
+    /// the handler when `arguments.branch` is omitted.
+    #[must_use]
+    pub fn default_branch(&self) -> &str {
+        &self.default_branch
+    }
+}
+
 /// UCIL's MCP server over newline-delimited JSON-RPC 2.0.
 ///
 /// Tool *dispatch* is still a Phase-2 concern (G1/G2 fusion) — every
@@ -368,6 +472,17 @@ pub struct McpServer {
     /// handler returns the legacy `P1-W5-F09` KG+ripgrep merge envelope
     /// byte-identically per `DEC-0015` D1.
     pub g2_sources: Option<Arc<G2SourceFactory>>,
+    /// Optional `find_similar` executor (`P2-W8-F08`, master-plan §3.2
+    /// row 5 / §18 Phase 2 Week 8 line 1791).  When present,
+    /// `tools/call name == "find_similar"` is dispatched to
+    /// [`McpServer::handle_find_similar`], which embeds the inbound
+    /// snippet, runs a `LanceDB` `nearest_to` query against the
+    /// per-branch `code_chunks` table, and returns the top-N
+    /// semantically similar code chunks ranked by similarity score.
+    /// When absent, the tool falls through to the phase-1
+    /// `_meta.not_yet_implemented: true` stub path so phase-1
+    /// invariant #9 stays preserved for the unwired case.
+    pub find_similar: Option<Arc<FindSimilarExecutor>>,
 }
 
 impl Default for McpServer {
@@ -391,6 +506,7 @@ impl McpServer {
             tools: ucil_tools(),
             kg: None,
             g2_sources: None,
+            find_similar: None,
         }
     }
 
@@ -422,6 +538,7 @@ impl McpServer {
             tools: ucil_tools(),
             kg: Some(kg),
             g2_sources: None,
+            find_similar: None,
         }
     }
 
@@ -440,6 +557,29 @@ impl McpServer {
     #[must_use]
     pub fn with_g2_sources(mut self, factory: Arc<G2SourceFactory>) -> Self {
         self.g2_sources = Some(factory);
+        self
+    }
+
+    /// Attach a [`FindSimilarExecutor`] so `tools/call name ==
+    /// "find_similar"` is dispatched to
+    /// [`McpServer::handle_find_similar`] (`P2-W8-F08`,
+    /// master-plan §3.2 row 5 / §18 Phase 2 Week 8 line 1791).
+    ///
+    /// Builder method: chains off [`Self::new`],
+    /// [`Self::with_knowledge_graph`], or
+    /// [`Self::with_g2_sources`] so the daemon's startup
+    /// orchestrator can attach the executor after wiring the KG /
+    /// G2 layers.  When this builder is **not** called, the
+    /// `find_similar` tool falls through to the phase-1
+    /// `_meta.not_yet_implemented: true` stub path so phase-1
+    /// invariant #9 stays preserved (and `WO-0010`'s
+    /// `test_all_22_tools_registered` selector remains
+    /// wire-compatible).  See `DEC-0008` for the
+    /// `UCIL`-internal-trait boundary the executor's
+    /// [`EmbeddingSource`] dependency leans on.
+    #[must_use]
+    pub fn with_find_similar_executor(mut self, executor: Arc<FindSimilarExecutor>) -> Self {
+        self.find_similar = Some(executor);
         self
     }
 
@@ -585,6 +725,11 @@ impl McpServer {
         if name == "understand_code" {
             if let Some(kg) = self.kg.as_ref() {
                 return crate::understand_code::handle_understand_code(id, params, kg);
+            }
+        }
+        if name == "find_similar" {
+            if let Some(exec) = self.find_similar.as_ref() {
+                return Self::handle_find_similar(id, params, exec).await;
             }
         }
 
@@ -880,6 +1025,553 @@ impl McpServer {
 
         envelope
     }
+
+    /// Handle the `find_similar` MCP tool (`P2-W8-F08`,
+    /// master-plan §3.2 row 5 / §18 Phase 2 Week 8 line 1791).
+    ///
+    /// Embeds the inbound `arguments.snippet` via the injected
+    /// [`EmbeddingSource`], opens the per-branch `code_chunks`
+    /// `LanceDB` table (master-plan §12.2 lines 1321-1346) via
+    /// [`BranchManager::branch_vectors_dir`] (the same connect /
+    /// `open_table` pattern `LancedbChunkIndexer::index_paths`
+    /// uses at `lancedb_indexer.rs:660-672` per `WO-0064`), runs
+    /// `Table::query().nearest_to(query_vec).limit(N).execute()`
+    /// (the `WO-0065` bench precedent at
+    /// `crates/ucil-embeddings/benches/vector_query.rs:300-307`),
+    /// drains the result `RecordBatchStream`, and projects the
+    /// 12-column rows + the synthetic `_distance` column onto
+    /// `_meta.hits[]` ranked by similarity.
+    ///
+    /// Per `DEC-0008` the [`EmbeddingSource`] is a UCIL-internal
+    /// trait seam; `LanceDB` is exercised end-to-end (no mocking).
+    ///
+    /// # Arguments
+    ///
+    /// * `arguments.snippet` — REQUIRED string.  Missing / non-string
+    ///   yields JSON-RPC `-32602` (Invalid params).
+    /// * `arguments.max_results` — OPTIONAL `u64`, default
+    ///   [`FIND_SIMILAR_DEFAULT_MAX_RESULTS`] (10), clamped to
+    ///   `[1, FIND_SIMILAR_MAX_RESULTS_CAP]`.
+    /// * `arguments.branch` — OPTIONAL string, defaults to the
+    ///   executor's [`FindSimilarExecutor::default_branch`].
+    ///
+    /// # Result envelope
+    ///
+    /// `result.isError == false` on the happy path.  `result._meta`
+    /// carries `tool == "find_similar"`, `source ==
+    /// "lancedb+coderankembed"`, `branch`, `query_dim`,
+    /// `hits_count`, and `hits[]` sorted by `similarity_score`
+    /// descending.  Each hit projects 8 fields:
+    /// `{file_path, start_line, end_line, content, language,
+    /// symbol_name, symbol_kind, similarity_score}`.
+    ///
+    /// # Error envelopes
+    ///
+    /// Runtime failures surface as `result.isError == true` with
+    /// `_meta.error_kind` per master-plan §3.2 UX contract:
+    ///
+    /// * `embedding_failed` — the injected source returned an
+    ///   error.
+    /// * `dim_mismatch` — the returned vector's length disagreed
+    ///   with the source's declared dimension.
+    /// * `branch_not_found` — the per-branch `vectors/` directory
+    ///   was missing or `lancedb::connect` failed.
+    /// * `table_not_found` — `code_chunks` table did not exist on
+    ///   the branch.
+    /// * `query_failed` — the `LanceDB` `nearest_to` query or
+    ///   stream drain failed.
+    /// * `query_timeout` — exceeded
+    ///   [`FIND_SIMILAR_QUERY_TIMEOUT`].
+    ///
+    /// Protocol violations (missing `arguments.snippet`, non-string
+    /// `arguments.snippet`, non-string `arguments.branch`) surface
+    /// as JSON-RPC `error.code == -32602`.
+    #[tracing::instrument(
+        name = "ucil.daemon.find_similar",
+        level = "debug",
+        skip(id, params, executor)
+    )]
+    async fn handle_find_similar(
+        id: &Value,
+        params: &Value,
+        executor: &FindSimilarExecutor,
+    ) -> Value {
+        let args = params
+            .get("arguments")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+
+        let snippet = match args.get("snippet") {
+            Some(Value::String(s)) => s.clone(),
+            Some(_) => {
+                return jsonrpc_error(
+                    id,
+                    -32602,
+                    "find_similar: `arguments.snippet` must be a string",
+                );
+            }
+            None => {
+                return jsonrpc_error(
+                    id,
+                    -32602,
+                    "find_similar: `arguments.snippet` is required and must be a string",
+                );
+            }
+        };
+
+        let max_results = parse_find_similar_max_results(&args);
+        let branch = match parse_find_similar_branch(&args, executor.default_branch()) {
+            Ok(b) => b,
+            Err(e) => return jsonrpc_error(id, e.code, &e.message),
+        };
+
+        let span = tracing::info_span!(
+            "ucil.daemon.find_similar",
+            branch = %branch,
+            max_results = max_results,
+            query_dim = executor.embedding_source.dim(),
+        );
+        let _enter = span.enter();
+
+        let Ok(outcome) = timeout(
+            FIND_SIMILAR_QUERY_TIMEOUT,
+            execute_find_similar(&snippet, &branch, max_results, executor),
+        )
+        .await
+        else {
+            tracing::warn!(
+                branch = %branch,
+                error_kind = "query_timeout",
+                "find_similar timed out after {:?}",
+                FIND_SIMILAR_QUERY_TIMEOUT,
+            );
+            return find_similar_error_envelope(
+                id,
+                &branch,
+                executor.embedding_source.dim(),
+                "query_timeout",
+                &format!(
+                    "find_similar exceeded {} ms",
+                    FIND_SIMILAR_QUERY_TIMEOUT.as_millis()
+                ),
+            );
+        };
+
+        match outcome {
+            Ok(hits) => {
+                find_similar_success_envelope(id, &branch, executor.embedding_source.dim(), hits)
+            }
+            Err(err) => {
+                tracing::warn!(
+                    branch = %branch,
+                    error_kind = err.kind,
+                    "find_similar failed: {}",
+                    err.message,
+                );
+                find_similar_error_envelope(
+                    id,
+                    &branch,
+                    executor.embedding_source.dim(),
+                    err.kind,
+                    &err.message,
+                )
+            }
+        }
+    }
+}
+
+// ── find_similar helpers (P2-W8-F08) ────────────────────────────────────────
+
+/// Projection of a single `LanceDB` row onto the JSON shape the
+/// `find_similar` MCP envelope advertises in `_meta.hits[]`.
+///
+/// The 12-column `code_chunks` table (master-plan §12.2 lines
+/// 1321-1346) is reduced to 8 user-facing fields plus a derived
+/// `similarity_score`.  The raw `embedding` / `token_count` /
+/// `file_hash` / `indexed_at` columns are storage-internal and
+/// dropped from the projection.
+#[derive(Debug)]
+struct FindSimilarHit {
+    file_path: String,
+    start_line: i32,
+    end_line: i32,
+    content: String,
+    language: String,
+    symbol_name: Option<String>,
+    symbol_kind: Option<String>,
+    similarity_score: f64,
+}
+
+/// Internal failure shape for [`execute_find_similar`].  Threads the
+/// human-readable error message + the stable `error_kind` discriminant
+/// up to the handler so the envelope encoder can build a typed
+/// `result.isError = true` response without re-classifying the cause.
+#[derive(Debug)]
+struct FindSimilarError {
+    kind: &'static str,
+    message: String,
+}
+
+/// Parse `arguments.max_results` for `find_similar`.
+///
+/// Optional `u64`, defaults to [`FIND_SIMILAR_DEFAULT_MAX_RESULTS`].
+/// Clamped to `[1, FIND_SIMILAR_MAX_RESULTS_CAP]` so a pathological
+/// request cannot drain the `LanceDB` query; out-of-range or
+/// non-numeric values fall back to the default.
+fn parse_find_similar_max_results(args: &Value) -> u64 {
+    let raw = args
+        .get("max_results")
+        .and_then(Value::as_u64)
+        .unwrap_or(FIND_SIMILAR_DEFAULT_MAX_RESULTS);
+    raw.clamp(1, FIND_SIMILAR_MAX_RESULTS_CAP)
+}
+
+/// Internal error shape for the `find_similar` argument-parsing
+/// stage — for the JSON-RPC `error` envelope (protocol violations
+/// only; runtime failures use [`FindSimilarError`] +
+/// `result.isError` instead).
+#[derive(Debug)]
+struct FindSimilarArgError {
+    code: i64,
+    message: String,
+}
+
+/// Parse `arguments.branch` for `find_similar`.
+///
+/// Optional string, defaults to the executor's
+/// [`FindSimilarExecutor::default_branch`].  Non-string yields
+/// JSON-RPC `-32602`.
+fn parse_find_similar_branch(
+    args: &Value,
+    default_branch: &str,
+) -> Result<String, FindSimilarArgError> {
+    match args.get("branch") {
+        Some(Value::String(s)) => Ok(s.clone()),
+        Some(Value::Null) | None => Ok(default_branch.to_owned()),
+        Some(_) => Err(FindSimilarArgError {
+            code: -32602,
+            message: "find_similar: `arguments.branch` must be a string".to_owned(),
+        }),
+    }
+}
+
+/// Embed the snippet, open the per-branch `code_chunks` table, run
+/// `nearest_to(...).limit(N).execute()`, drain the
+/// `RecordBatchStream`, and project rows onto [`FindSimilarHit`].
+///
+/// All `.await`s are bounded by [`FIND_SIMILAR_QUERY_TIMEOUT`] via
+/// the outer `tokio::time::timeout` wrapper in
+/// [`McpServer::handle_find_similar`] per language-agnostic
+/// invariant "every async IO await is wrapped in
+/// `tokio::time::timeout`".
+async fn execute_find_similar(
+    snippet: &str,
+    branch: &str,
+    max_results: u64,
+    executor: &FindSimilarExecutor,
+) -> Result<Vec<FindSimilarHit>, FindSimilarError> {
+    use futures::TryStreamExt as _;
+    use lancedb::query::{ExecutableQuery as _, QueryBase as _};
+
+    // ── (a) embed snippet ──────────────────────────────────────────
+    let query_vec = match executor.embedding_source.embed(snippet).await {
+        Ok(v) => v,
+        Err(e) => {
+            return Err(FindSimilarError {
+                kind: "embedding_failed",
+                message: format!("embedding failed: {e}"),
+            });
+        }
+    };
+
+    // ── (b) dim mismatch guard ─────────────────────────────────────
+    let dim = executor.embedding_source.dim();
+    if query_vec.len() != dim {
+        return Err(FindSimilarError {
+            kind: "dim_mismatch",
+            message: format!(
+                "embedding source returned vector of length {} but declared dim {}",
+                query_vec.len(),
+                dim,
+            ),
+        });
+    }
+
+    // ── (c) resolve per-branch vectors dir ─────────────────────────
+    let vectors_dir = executor.branch_manager.branch_vectors_dir(branch);
+    if !vectors_dir.exists() {
+        return Err(FindSimilarError {
+            kind: "branch_not_found",
+            message: format!(
+                "branch `{branch}` has no vectors directory at {}",
+                vectors_dir.display(),
+            ),
+        });
+    }
+    let Some(uri) = vectors_dir.to_str() else {
+        return Err(FindSimilarError {
+            kind: "branch_not_found",
+            message: format!(
+                "branch `{branch}` vectors path is not valid UTF-8: {}",
+                vectors_dir.display(),
+            ),
+        });
+    };
+
+    // ── (d) connect ────────────────────────────────────────────────
+    let conn = match lancedb::connect(uri).execute().await {
+        Ok(c) => c,
+        Err(e) => {
+            return Err(FindSimilarError {
+                kind: "branch_not_found",
+                message: format!("lancedb connect failed for `{branch}`: {e}"),
+            });
+        }
+    };
+
+    // ── (e) open code_chunks table ─────────────────────────────────
+    let table = match conn.open_table("code_chunks").execute().await {
+        Ok(t) => t,
+        Err(e) => {
+            return Err(FindSimilarError {
+                kind: "table_not_found",
+                message: format!("code_chunks table missing for `{branch}`: {e}"),
+            });
+        }
+    };
+
+    // ── (f) nearest_to(query_vec).limit(N).execute() ───────────────
+    let limit = usize::try_from(max_results).unwrap_or(usize::MAX);
+    let stream = match table
+        .query()
+        .nearest_to(query_vec.as_slice())
+        .map_err(|e| FindSimilarError {
+            kind: "query_failed",
+            message: format!("nearest_to failed: {e}"),
+        })?
+        .limit(limit)
+        .execute()
+        .await
+    {
+        Ok(s) => s,
+        Err(e) => {
+            return Err(FindSimilarError {
+                kind: "query_failed",
+                message: format!("execute failed: {e}"),
+            });
+        }
+    };
+
+    let batches: Vec<arrow_array::RecordBatch> = match stream.try_collect().await {
+        Ok(b) => b,
+        Err(e) => {
+            return Err(FindSimilarError {
+                kind: "query_failed",
+                message: format!("RecordBatchStream drain failed: {e}"),
+            });
+        }
+    };
+
+    // ── (g) project rows onto FindSimilarHit ───────────────────────
+    let mut hits = project_find_similar_rows(&batches);
+
+    // ── (h) defence-in-depth sort by similarity DESC ───────────────
+    // Per AC13 / AC35: LanceDB's `nearest_to` results are typically
+    // already distance-ordered, but this is not contractually
+    // guaranteed across versions; the explicit sort here is
+    // load-bearing — `WO-0066` mutation `M3` proves SA5 fails when
+    // this line is removed.
+    hits.sort_by(|a, b| {
+        b.similarity_score
+            .partial_cmp(&a.similarity_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    Ok(hits)
+}
+
+/// Project a vector of `RecordBatch`es from the `LanceDB`
+/// `nearest_to` stream onto [`FindSimilarHit`].
+///
+/// The `_distance` column `LanceDB` appends to `nearest_to`
+/// results is `Float32` per the upstream impl convention.  The
+/// synthetic `similarity_score = 1.0 / (1.0 + f64::from(_distance))`
+/// is monotonic descending in distance — top hit (smallest
+/// distance) has the largest score.
+fn project_find_similar_rows(batches: &[arrow_array::RecordBatch]) -> Vec<FindSimilarHit> {
+    use arrow_array::Array as _;
+
+    let mut hits: Vec<FindSimilarHit> = Vec::new();
+    for batch in batches {
+        let file_paths = batch
+            .column_by_name("file_path")
+            .map(arrow_array::cast::AsArray::as_string::<i32>);
+        let start_lines = batch
+            .column_by_name("start_line")
+            .and_then(|a| a.as_any().downcast_ref::<arrow_array::Int32Array>());
+        let end_lines = batch
+            .column_by_name("end_line")
+            .and_then(|a| a.as_any().downcast_ref::<arrow_array::Int32Array>());
+        let contents = batch
+            .column_by_name("content")
+            .map(arrow_array::cast::AsArray::as_string::<i32>);
+        let languages = batch
+            .column_by_name("language")
+            .map(arrow_array::cast::AsArray::as_string::<i32>);
+        let symbol_names = batch
+            .column_by_name("symbol_name")
+            .map(arrow_array::cast::AsArray::as_string::<i32>);
+        let symbol_kinds = batch
+            .column_by_name("symbol_kind")
+            .map(arrow_array::cast::AsArray::as_string::<i32>);
+        let distances = batch
+            .column_by_name("_distance")
+            .and_then(|a| a.as_any().downcast_ref::<arrow_array::Float32Array>());
+
+        let (
+            Some(file_paths),
+            Some(start_lines),
+            Some(end_lines),
+            Some(contents),
+            Some(languages),
+            Some(symbol_names),
+            Some(symbol_kinds),
+            Some(distances),
+        ) = (
+            file_paths,
+            start_lines,
+            end_lines,
+            contents,
+            languages,
+            symbol_names,
+            symbol_kinds,
+            distances,
+        )
+        else {
+            tracing::warn!(
+                "find_similar: skipping RecordBatch with unexpected schema (missing required column or _distance)"
+            );
+            continue;
+        };
+
+        for i in 0..batch.num_rows() {
+            let dist_f32 = distances.value(i);
+            let similarity_score = 1.0_f64 / (1.0_f64 + f64::from(dist_f32));
+            let symbol_name_val = if symbol_names.is_null(i) {
+                None
+            } else {
+                let raw = symbol_names.value(i).to_owned();
+                if raw.is_empty() {
+                    None
+                } else {
+                    Some(raw)
+                }
+            };
+            let symbol_kind_val = if symbol_kinds.is_null(i) {
+                None
+            } else {
+                let raw = symbol_kinds.value(i).to_owned();
+                if raw.is_empty() {
+                    None
+                } else {
+                    Some(raw)
+                }
+            };
+            hits.push(FindSimilarHit {
+                file_path: file_paths.value(i).to_owned(),
+                start_line: start_lines.value(i),
+                end_line: end_lines.value(i),
+                content: contents.value(i).to_owned(),
+                language: languages.value(i).to_owned(),
+                symbol_name: symbol_name_val,
+                symbol_kind: symbol_kind_val,
+                similarity_score,
+            });
+        }
+    }
+    hits
+}
+
+/// Build the JSON-RPC happy-path response envelope for
+/// `find_similar`.  `result.isError = false`; `_meta` carries the
+/// per-master-plan §3.2 row 5 contract fields.
+fn find_similar_success_envelope(
+    id: &Value,
+    branch: &str,
+    query_dim: usize,
+    hits: Vec<FindSimilarHit>,
+) -> Value {
+    let hits_count = hits.len();
+    let hits_json: Vec<Value> = hits
+        .into_iter()
+        .map(|h| {
+            json!({
+                "file_path": h.file_path,
+                "start_line": h.start_line,
+                "end_line": h.end_line,
+                "content": h.content,
+                "language": h.language,
+                "symbol_name": h.symbol_name,
+                "symbol_kind": h.symbol_kind,
+                "similarity_score": h.similarity_score,
+            })
+        })
+        .collect();
+    let text = format!(
+        "found {hits_count} similar code chunk{} on branch `{branch}`",
+        if hits_count == 1 { "" } else { "s" },
+    );
+    json!({
+        "jsonrpc": JSONRPC_VERSION,
+        "id": id.clone(),
+        "result": {
+            "_meta": {
+                "tool": "find_similar",
+                "source": "lancedb+coderankembed",
+                "branch": branch,
+                "query_dim": query_dim,
+                "hits_count": hits_count,
+                "hits": hits_json,
+            },
+            "content": [
+                { "type": "text", "text": text }
+            ],
+            "isError": false
+        }
+    })
+}
+
+/// Build the JSON-RPC user-facing error envelope for `find_similar`
+/// (per master-plan §3.2 UX contract: runtime failures surface as
+/// `result.isError = true` with `_meta.error_kind`, NOT as JSON-RPC
+/// `error` envelopes).
+fn find_similar_error_envelope(
+    id: &Value,
+    branch: &str,
+    query_dim: usize,
+    error_kind: &str,
+    error_message: &str,
+) -> Value {
+    json!({
+        "jsonrpc": JSONRPC_VERSION,
+        "id": id.clone(),
+        "result": {
+            "_meta": {
+                "tool": "find_similar",
+                "source": "lancedb+coderankembed",
+                "branch": branch,
+                "query_dim": query_dim,
+                "error_kind": error_kind,
+                "error_message": error_message,
+            },
+            "content": [
+                {
+                    "type": "text",
+                    "text": format!("find_similar failed ({error_kind}): {error_message}")
+                }
+            ],
+            "isError": true
+        }
+    })
 }
 
 /// Internal error shape for the `find_definition` read pipeline —
@@ -4277,5 +4969,429 @@ async fn test_understand_code_tool_no_kg_returns_stub() {
             .and_then(Value::as_str),
         Some("understand_code"),
         "_meta.tool must echo the tool name even in the stub path: {response}"
+    );
+}
+
+// ── WO-0066 / P2-W8-F08 frozen acceptance test ────────────────────────────
+//
+// `server::test_find_similar_tool` lives at MODULE ROOT (NOT inside
+// `mod tests {}`) per `DEC-0007` so the frozen selector
+// `cargo nextest run -p ucil-daemon server::test_find_similar_tool`
+// resolves directly to `ucil_daemon::server::test_find_similar_tool`
+// without an intermediate `tests::` segment.
+
+/// Frozen acceptance selector for feature `P2-W8-F08` — see
+/// `ucil-build/feature-list.json` entry for
+/// `-p ucil-daemon server::test_find_similar_tool`.
+///
+/// Closes Phase 2 Week 8 and the entire Phase 2 envelope per
+/// master-plan §3.2 line 219 (`find_similar` tool listing) +
+/// §18 Phase 2 Week 8 line 1791 ("Vector search works").
+///
+/// Eight sub-assertions (SA1..SA8) per the WO-0066 scope:
+///
+/// 1. **SA1** — happy-path JSON-RPC envelope: `jsonrpc == "2.0"`,
+///    matching `id`, no `error`, `result.isError == false`.
+/// 2. **SA2** — `_meta` shape: `tool == "find_similar"`, `source`
+///    non-empty string, `branch == "main"`, `query_dim == 768`,
+///    `hits_count` is a JSON number, `hits` is a JSON array.
+/// 3. **SA3** — hits length matches `max_results` and each hit
+///    carries the projection fields with the right types.
+/// 4. **SA4** — IDENTITY query: a snippet that is byte-identical
+///    to a known corpus chunk's content puts that chunk's
+///    `file_path` at `_meta.hits[0]`.  Under
+///    `TestEmbeddingSource`'s deterministic Sha256-derived
+///    vectors, identical input → identical embedding → distance
+///    ≈ 0 → top hit.
+/// 5. **SA5** — similarity ordering monotonically descending:
+///    `hits[i].similarity_score >= hits[i+1].similarity_score`
+///    for all `i`.
+/// 6. **SA6** — error path: missing `arguments.snippet` returns
+///    JSON-RPC `error.code == -32602` with `error.message`
+///    mentioning `snippet`.
+/// 7. **SA7** — error path: `arguments.branch ==
+///    "nonexistent-branch"` returns `result.isError == true` with
+///    `_meta.error_kind ∈ {"branch_not_found", "table_not_found"}`.
+/// 8. **SA8** — fall-through path: `McpServer::new()` (no
+///    `with_find_similar_executor`) responding to
+///    `find_similar` returns `_meta.not_yet_implemented == true`,
+///    preserving phase-1 invariant #9 for the un-attached case.
+///
+/// # Panics
+///
+/// Panics on any sub-assertion failure (test-only).  Panic
+/// messages are operator-actionable — they quote the JSON
+/// response on failure.
+#[cfg(test)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::too_many_lines)]
+pub async fn test_find_similar_tool() {
+    use crate::branch_manager::BranchManager;
+    use crate::executor::{
+        build_synthetic_chunker_for_lancedb_f04, read_table_rows_for_lancedb_f04,
+        TestEmbeddingSource,
+    };
+    use crate::lancedb_indexer::LancedbChunkIndexer;
+
+    // ── Fixture: build per-branch code_chunks table populated via
+    //    LancedbChunkIndexer + TestEmbeddingSource ─────────────────
+    let repo = tempfile::tempdir().expect("tmp repo");
+    let branches_root = repo.path().join(".ucil/branches");
+    tokio::fs::create_dir_all(&branches_root)
+        .await
+        .expect("mkdir branches");
+
+    let mgr = Arc::new(BranchManager::new(&branches_root));
+    mgr.create_branch_table("main", None)
+        .await
+        .expect("create main");
+
+    let chunker = Arc::new(tokio::sync::Mutex::new(
+        build_synthetic_chunker_for_lancedb_f04(),
+    ));
+    let source = Arc::new(TestEmbeddingSource { dim: 768 });
+
+    // Three small Rust source files with DISTINCT multi-statement
+    // bodies so the synthetic chunker emits ≥1 chunk per file under
+    // the WordLevel tokenizer.
+    let foo_path = repo.path().join("src/foo.rs");
+    let bar_path = repo.path().join("src/bar.rs");
+    let baz_path = repo.path().join("src/baz.rs");
+    tokio::fs::create_dir_all(foo_path.parent().expect("foo parent"))
+        .await
+        .expect("mkdir src");
+    let alpha_text = "pub fn foo_alpha() { let x = 1; let y = 2; let z = x + y; }";
+    let beta_text = "pub fn bar_beta() -> i32 { 42 }";
+    let gamma_text = "pub fn baz_gamma(input: &str) -> usize { input.len() }";
+    tokio::fs::write(&foo_path, alpha_text)
+        .await
+        .expect("write foo.rs");
+    tokio::fs::write(&bar_path, beta_text)
+        .await
+        .expect("write bar.rs");
+    tokio::fs::write(&baz_path, gamma_text)
+        .await
+        .expect("write baz.rs");
+
+    let mut indexer =
+        LancedbChunkIndexer::new(mgr.clone(), "main", chunker.clone(), source.clone());
+    let stats = indexer
+        .index_paths(
+            repo.path(),
+            &[foo_path.clone(), bar_path.clone(), baz_path.clone()],
+        )
+        .await
+        .expect("index_paths must succeed");
+    assert!(
+        stats.chunks_inserted >= 3,
+        "fixture: expected ≥3 chunks across 3 files; got stats={stats:?}"
+    );
+    let (_rows, count) = read_table_rows_for_lancedb_f04(&branches_root, "main").await;
+    assert!(
+        count >= 3,
+        "fixture: code_chunks table must have ≥3 rows after indexing; got count={count}"
+    );
+
+    let executor = Arc::new(FindSimilarExecutor::new(
+        mgr.clone(),
+        source.clone() as Arc<dyn crate::lancedb_indexer::EmbeddingSource>,
+        "main",
+    ));
+    let server = McpServer::new().with_find_similar_executor(executor);
+
+    // ── SA1 — happy-path envelope ──────────────────────────────────
+    //
+    // Uses a query snippet IDENTICAL to baz.rs's content so the
+    // deterministic Sha256-derived embedding produces an
+    // identical vector to the chunk emitted from baz.rs — distance
+    // ≈ 0 to that chunk, which lands at hits[0] in SA4.
+    let identity_snippet = gamma_text.to_owned();
+    let request = json!({
+        "jsonrpc": JSONRPC_VERSION,
+        "id": 401,
+        "method": "tools/call",
+        "params": {
+            "name": "find_similar",
+            "arguments": {
+                "snippet": identity_snippet.clone(),
+                "max_results": 3
+            }
+        }
+    })
+    .to_string();
+    let response = server.handle_line(&request).await;
+
+    assert_eq!(
+        response.get("jsonrpc").and_then(Value::as_str),
+        Some(JSONRPC_VERSION),
+        "(SA1) response must carry jsonrpc == \"2.0\": {response}"
+    );
+    assert_eq!(
+        response.get("id").and_then(Value::as_i64),
+        Some(401),
+        "(SA1) response id must echo 401: {response}"
+    );
+    assert!(
+        response.get("error").is_none(),
+        "(SA1) response must not carry an error envelope: {response}"
+    );
+    assert_eq!(
+        response.pointer("/result/isError").and_then(Value::as_bool),
+        Some(false),
+        "(SA1) result.isError must be false on the happy path: {response}"
+    );
+
+    let meta = response
+        .pointer("/result/_meta")
+        .expect("(SA1) response must carry result._meta");
+
+    // ── SA2 — _meta shape ──────────────────────────────────────────
+    assert_eq!(
+        meta.get("tool").and_then(Value::as_str),
+        Some("find_similar"),
+        "(SA2) _meta.tool must be \"find_similar\": {response}"
+    );
+    let source_str = meta
+        .get("source")
+        .and_then(Value::as_str)
+        .expect("(SA2) _meta.source must be a string");
+    assert!(
+        !source_str.is_empty(),
+        "(SA2) _meta.source must be a non-empty string; got {source_str:?}"
+    );
+    assert_eq!(
+        meta.get("branch").and_then(Value::as_str),
+        Some("main"),
+        "(SA2) _meta.branch must be \"main\": {response}"
+    );
+    assert_eq!(
+        meta.get("query_dim").and_then(Value::as_u64),
+        Some(768),
+        "(SA2) _meta.query_dim must be 768 (TestEmbeddingSource default): {response}"
+    );
+    assert!(
+        meta.get("hits_count").and_then(Value::as_u64).is_some(),
+        "(SA2) _meta.hits_count must be a JSON number: {response}"
+    );
+    let hits = meta
+        .get("hits")
+        .and_then(Value::as_array)
+        .expect("(SA2) _meta.hits must be a JSON array");
+
+    // ── SA3 — hits count and projection structure ──────────────────
+    let hits_count_meta = meta
+        .get("hits_count")
+        .and_then(Value::as_u64)
+        .expect("(SA3) _meta.hits_count must be a JSON number");
+    assert_eq!(
+        hits.len() as u64,
+        hits_count_meta,
+        "(SA3) _meta.hits.len() must equal _meta.hits_count: \
+         hits.len()={} hits_count={hits_count_meta}; response={response}",
+        hits.len(),
+    );
+    assert!(
+        hits.len() >= 3,
+        "(SA3) _meta.hits.len() must be >= 3 (max_results=3, corpus=≥3): \
+         got {} hits; response={response}",
+        hits.len(),
+    );
+    for (i, hit) in hits.iter().enumerate() {
+        let file_path = hit
+            .get("file_path")
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| panic!("(SA3) hits[{i}].file_path must be a string: {hit}"));
+        assert!(
+            !file_path.is_empty(),
+            "(SA3) hits[{i}].file_path must be non-empty: {hit}"
+        );
+        let start_line = hit
+            .get("start_line")
+            .and_then(Value::as_i64)
+            .unwrap_or_else(|| panic!("(SA3) hits[{i}].start_line must be an integer: {hit}"));
+        assert!(
+            start_line >= 1,
+            "(SA3) hits[{i}].start_line must be >= 1: {hit}"
+        );
+        let end_line = hit
+            .get("end_line")
+            .and_then(Value::as_i64)
+            .unwrap_or_else(|| panic!("(SA3) hits[{i}].end_line must be an integer: {hit}"));
+        assert!(
+            end_line >= start_line,
+            "(SA3) hits[{i}].end_line must be >= start_line: {hit}"
+        );
+        assert!(
+            hit.get("content").and_then(Value::as_str).is_some(),
+            "(SA3) hits[{i}].content must be a string: {hit}"
+        );
+        assert!(
+            hit.get("language").and_then(Value::as_str).is_some(),
+            "(SA3) hits[{i}].language must be a string: {hit}"
+        );
+        // symbol_name and symbol_kind are nullable (Option<String>)
+        let symbol_name_field = hit
+            .get("symbol_name")
+            .unwrap_or_else(|| panic!("(SA3) hits[{i}].symbol_name field must be present: {hit}"));
+        assert!(
+            symbol_name_field.is_string() || symbol_name_field.is_null(),
+            "(SA3) hits[{i}].symbol_name must be string or null: {hit}"
+        );
+        let symbol_kind_field = hit
+            .get("symbol_kind")
+            .unwrap_or_else(|| panic!("(SA3) hits[{i}].symbol_kind field must be present: {hit}"));
+        assert!(
+            symbol_kind_field.is_string() || symbol_kind_field.is_null(),
+            "(SA3) hits[{i}].symbol_kind must be string or null: {hit}"
+        );
+        assert!(
+            hit.get("similarity_score")
+                .and_then(Value::as_f64)
+                .is_some(),
+            "(SA3) hits[{i}].similarity_score must be a number: {hit}"
+        );
+    }
+
+    // ── SA4 — IDENTITY query: top hit is baz.rs ────────────────────
+    //
+    // The chunker emits chunk content unchanged from the source slice,
+    // so the identical input produces an identical content string AND
+    // therefore — under TestEmbeddingSource's deterministic
+    // Sha256-derived vectors — an identical 768-d embedding, hence
+    // distance ≈ 0 to that chunk and the largest similarity_score.
+    let top_file_path = hits[0]
+        .get("file_path")
+        .and_then(Value::as_str)
+        .expect("(SA4) hits[0].file_path must be a string");
+    assert!(
+        top_file_path.ends_with("baz.rs"),
+        "(SA4) hits[0].file_path must end with \"baz.rs\" (the file holding the \
+         identical-content chunk under TestEmbeddingSource's Sha256-derived \
+         deterministic embedding); got {top_file_path:?}; response={response}"
+    );
+
+    // ── SA5 — similarity ordering monotonically descending ─────────
+    for i in 0..hits.len().saturating_sub(1) {
+        let s_i = hits[i]
+            .get("similarity_score")
+            .and_then(Value::as_f64)
+            .unwrap_or_else(|| panic!("(SA5) hits[{i}].similarity_score: {}", hits[i]));
+        let s_next = hits[i + 1]
+            .get("similarity_score")
+            .and_then(Value::as_f64)
+            .unwrap_or_else(|| panic!("(SA5) hits[{}].similarity_score: {}", i + 1, hits[i + 1]));
+        assert!(
+            s_i >= s_next,
+            "(SA5) hits[{i}].similarity_score ({s_i}) must be >= \
+             hits[{}].similarity_score ({s_next}); response={response}",
+            i + 1,
+        );
+    }
+
+    // ── SA6 — error path: missing arguments.snippet ────────────────
+    let request_missing_snippet = json!({
+        "jsonrpc": JSONRPC_VERSION,
+        "id": 402,
+        "method": "tools/call",
+        "params": {
+            "name": "find_similar",
+            "arguments": {}
+        }
+    })
+    .to_string();
+    let response_missing_snippet = server.handle_line(&request_missing_snippet).await;
+    let err_missing = response_missing_snippet
+        .get("error")
+        .expect("(SA6) missing snippet must produce a JSON-RPC error envelope");
+    assert_eq!(
+        err_missing.get("code").and_then(Value::as_i64),
+        Some(-32602),
+        "(SA6) missing-snippet error code must be -32602 (Invalid params): \
+         {response_missing_snippet}"
+    );
+    let err_message = err_missing
+        .get("message")
+        .and_then(Value::as_str)
+        .expect("(SA6) error.message must be a string");
+    assert!(
+        err_message.contains("snippet"),
+        "(SA6) error.message must mention `snippet`; got {err_message:?}; \
+         response={response_missing_snippet}"
+    );
+
+    // ── SA7 — error path: nonexistent branch ───────────────────────
+    let request_nonexistent_branch = json!({
+        "jsonrpc": JSONRPC_VERSION,
+        "id": 403,
+        "method": "tools/call",
+        "params": {
+            "name": "find_similar",
+            "arguments": {
+                "snippet": "anything",
+                "branch": "nonexistent-branch"
+            }
+        }
+    })
+    .to_string();
+    let response_nonexistent_branch = server.handle_line(&request_nonexistent_branch).await;
+    assert!(
+        response_nonexistent_branch.get("error").is_none(),
+        "(SA7) nonexistent-branch must NOT produce a JSON-RPC error envelope \
+         (per master-plan §3.2 UX: runtime failures are isError=true, NOT \
+         JSON-RPC error); got {response_nonexistent_branch}"
+    );
+    assert_eq!(
+        response_nonexistent_branch
+            .pointer("/result/isError")
+            .and_then(Value::as_bool),
+        Some(true),
+        "(SA7) result.isError must be true on nonexistent-branch: \
+         {response_nonexistent_branch}"
+    );
+    let error_kind = response_nonexistent_branch
+        .pointer("/result/_meta/error_kind")
+        .and_then(Value::as_str)
+        .expect("(SA7) _meta.error_kind must be present on nonexistent-branch");
+    assert!(
+        matches!(error_kind, "branch_not_found" | "table_not_found"),
+        "(SA7) _meta.error_kind must be \"branch_not_found\" OR \
+         \"table_not_found\" for a nonexistent branch dir; got {error_kind:?}; \
+         response={response_nonexistent_branch}"
+    );
+
+    // ── SA8 — fall-through path when no executor attached ──────────
+    let server_no_executor = McpServer::new();
+    let request_no_executor = json!({
+        "jsonrpc": JSONRPC_VERSION,
+        "id": 404,
+        "method": "tools/call",
+        "params": {
+            "name": "find_similar",
+            "arguments": {
+                "snippet": "anything"
+            }
+        }
+    })
+    .to_string();
+    let response_no_executor = server_no_executor.handle_line(&request_no_executor).await;
+    assert!(
+        response_no_executor.get("error").is_none(),
+        "(SA8) no-executor stub path must not return a JSON-RPC error: \
+         {response_no_executor}"
+    );
+    assert_eq!(
+        response_no_executor
+            .pointer("/result/_meta/not_yet_implemented")
+            .and_then(Value::as_bool),
+        Some(true),
+        "(SA8) no-executor call must return _meta.not_yet_implemented == true \
+         (phase-1 invariant #9): {response_no_executor}"
+    );
+    assert_eq!(
+        response_no_executor
+            .pointer("/result/_meta/tool")
+            .and_then(Value::as_str),
+        Some("find_similar"),
+        "(SA8) stub envelope must echo tool name: {response_no_executor}"
     );
 }

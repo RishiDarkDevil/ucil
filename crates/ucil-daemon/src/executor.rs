@@ -2670,8 +2670,14 @@ pub async fn test_g1_result_fusion() {
 /// equals the number of whitespace-separated words.  Built via the
 /// real `tokenizers` crate API per `DEC-0008` carve-out — distinct
 /// from the prohibited critical-dep substitution layers.
+///
+/// **Visibility**: `pub(crate)` per `WO-0066`'s second-consumer
+/// carve-out — `crate::server::test_find_similar_tool` reuses the
+/// same fixture-builder pattern as
+/// [`test_lancedb_incremental_indexing`] and needs to construct an
+/// in-process synthetic chunker without re-defining the JSON literal.
 #[cfg(test)]
-const SYNTHETIC_TOKENIZER_JSON_FOR_LANCEDB_F04: &str = r#"{
+pub(crate) const SYNTHETIC_TOKENIZER_JSON_FOR_LANCEDB_F04: &str = r#"{
     "version": "1.0",
     "truncation": null,
     "padding": null,
@@ -2696,9 +2702,16 @@ const SYNTHETIC_TOKENIZER_JSON_FOR_LANCEDB_F04: &str = r#"{
 /// Returns a `Vec<f32>` of length `dim` derived from a `Sha256`
 /// hash of the input — deterministic, non-trivial, and depends on
 /// input so different chunks produce different vectors.
+///
+/// **Visibility**: `pub(crate)` per `WO-0066`'s second-consumer
+/// carve-out — `crate::server::test_find_similar_tool` reuses the
+/// same fixture-builder pattern as
+/// [`test_lancedb_incremental_indexing`].  Per `WO-0048` line 363
+/// the `Test*` trait-impl naming is exempt from the production-code
+/// `mock|fake|stub` word-ban.
 #[cfg(test)]
-struct TestEmbeddingSource {
-    dim: usize,
+pub(crate) struct TestEmbeddingSource {
+    pub(crate) dim: usize,
 }
 
 #[cfg(test)]
@@ -2729,8 +2742,13 @@ impl crate::lancedb_indexer::EmbeddingSource for TestEmbeddingSource {
 /// in-process synthetic tokenizer (no on-disk model artefact
 /// required).  The resulting chunker is owned by the caller; tests
 /// wrap it in `Arc<tokio::sync::Mutex<_>>` for the indexer.
+///
+/// **Visibility**: `pub(crate)` per `WO-0066`'s second-consumer
+/// carve-out — `crate::server::test_find_similar_tool` reuses this
+/// helper to seed the per-branch `code_chunks` table for the
+/// `find_similar` MCP tool's frozen acceptance test.
 #[cfg(test)]
-fn build_synthetic_chunker_for_lancedb_f04() -> ucil_embeddings::EmbeddingChunker {
+pub(crate) fn build_synthetic_chunker_for_lancedb_f04() -> ucil_embeddings::EmbeddingChunker {
     let tokenizer: tokenizers::Tokenizer = SYNTHETIC_TOKENIZER_JSON_FOR_LANCEDB_F04
         .parse()
         .expect("synthetic tokenizer parses");
@@ -2742,8 +2760,12 @@ fn build_synthetic_chunker_for_lancedb_f04() -> ucil_embeddings::EmbeddingChunke
 /// count.  Used by `SA2`, `SA4`, and the handle test to inspect
 /// the post-pass state of the table without depending on the
 /// in-memory `IndexerStats`.
+///
+/// **Visibility**: `pub(crate)` per `WO-0066`'s second-consumer
+/// carve-out — `crate::server::test_find_similar_tool` reuses this
+/// helper to verify the `LanceDB` table is populated post-`index_paths`.
 #[cfg(test)]
-async fn read_table_rows_for_lancedb_f04(
+pub(crate) async fn read_table_rows_for_lancedb_f04(
     branches_root: &Path,
     branch_sanitised: &str,
 ) -> (Vec<(String, String)>, usize) {
