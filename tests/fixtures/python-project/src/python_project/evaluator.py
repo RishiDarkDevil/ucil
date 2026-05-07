@@ -186,6 +186,30 @@ def _builtin_sum(args: list[Value]) -> Value:
     return total
 
 
+def _builtin_compute_score(args: list[Value]) -> Value:
+    """Builtin wrapper around :func:`scoring.compute_score`.
+
+    Expects two list arguments: values and weights. Both must be lists of
+    numeric values (ints or floats). Returns the weighted mean.
+    """
+    from python_project.scoring import compute_score
+
+    if len(args) != 2:
+        raise EvalError(f"compute_score() takes 2 arguments, got {len(args)}")
+    values, weights = args[0], args[1]
+    if not isinstance(values, list):
+        raise EvalError(
+            f"compute_score() values must be a list, got {type_name(values)}"
+        )
+    if not isinstance(weights, list):
+        raise EvalError(
+            f"compute_score() weights must be a list, got {type_name(weights)}"
+        )
+    coerced_values = [coerce_to_number(v, "compute_score()") for v in values]
+    coerced_weights = [coerce_to_number(w, "compute_score()") for w in weights]
+    return compute_score(coerced_values, coerced_weights)
+
+
 def _builtin_len(args: list[Value]) -> Value:
     """Return the length of a string or list."""
     if len(args) != 1:
@@ -647,6 +671,8 @@ def _make_global_env() -> Environment:
         "max": _builtin_max,
         "min": _builtin_min,
         "sum": _builtin_sum,
+        # Scoring (added per ADR DEC-0017)
+        "compute_score": _builtin_compute_score,
         # Type conversion
         "int": _builtin_int,
         "float": _builtin_float,
