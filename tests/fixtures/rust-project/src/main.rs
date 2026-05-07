@@ -5,12 +5,14 @@
 //! symbol extraction and quality analysis tools have meaningful input.
 
 mod eval_ctx;
+mod http_client;
 mod parser;
 mod transform;
 mod util;
 
 use std::io::{self, BufRead};
 
+use http_client::fetch_startup_banner;
 use parser::Parser;
 use transform::Transformer;
 
@@ -19,7 +21,8 @@ fn main() {
     let mut total_lines = 0usize;
     let mut errors = 0usize;
 
-    println!("rust-project expression evaluator — enter expressions, one per line.");
+    let banner = fetch_startup_banner().unwrap_or("rust-project");
+    println!("{banner} expression evaluator — enter expressions, one per line.");
     println!("Type 'quit' or 'exit' to stop.\n");
 
     for line_result in stdin.lock().lines() {
