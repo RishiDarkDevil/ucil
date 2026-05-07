@@ -1,74 +1,70 @@
 # Effectiveness Report — Phase 2
 
-Run at: 2026-05-07T19:45Z (re-confirmation pass)
-Commit: `f9fd29d` (`HEAD` at evaluator-launch)
-Branch: `feat/WO-0067-classifier-and-reason-parser`
+Run at: 2026-05-08T (refresh-pass at WO-0068 HEAD)
+Commit: `f0fbf32` (`HEAD` at evaluator-launch)
+Branch: `feat/WO-0068-cross-group-executor-and-fusion`
 Evaluator: `effectiveness-evaluator` (this session, `claude-opus-4-7`)
 Prior substantive run: commit `aa7dc84` (full UCIL+baseline+judge invocations)
-Prior refresh-passes: `43645fd` @ HEAD `4efda0b` (2026-05-07T18:39Z), `43645fd` @ HEAD `43645fd` (2026-05-07T18:42Z), `dd4659e` @ HEAD `c45933c` (earlier)
+Prior refresh-passes: `f9fd29d` @ HEAD `f9fd29d` (2026-05-07T19:45Z), `43645fd` @ HEAD `4efda0b` (2026-05-07T18:39Z), `43645fd` @ HEAD `43645fd` (2026-05-07T18:42Z), `dd4659e` @ HEAD `c45933c` (earlier)
 
 ## Refresh-pass note
 
-This is a **re-confirmation pass** at HEAD `f9fd29d` (Phase 3 Week 1
-WO-0067 branch — the working branch for the in-flight classifier work).
-The substantive evaluation data (UCIL/baseline runs, judge scores,
+This is a **re-confirmation pass** at HEAD `f0fbf32` (Phase 3 Week 1
+WO-0068 branch — the cross-group executor + RRF fusion work). The
+substantive evaluation data (UCIL/baseline runs, judge scores,
 acceptance results) is inherited verbatim from the full run at commit
 `aa7dc84` because:
 
 1. **UCIL source delta is confined to additive Phase-3 modules in
    `ucil-core`, with zero changes to MCP dispatch or fixtures.**
 
-   `git diff aa7dc84..HEAD --stat -- crates/ adapters/ ml/ plugin/
-   plugins/ tests/fixtures/ tests/scenarios/`:
-   ```
-    crates/ucil-core/src/ceqp.rs   | 547 +++++++++++++++ (new file)
-    crates/ucil-core/src/fusion.rs | 480 +++++++++++++++ (additive: QueryType + classify_query + QUERY_WEIGHT_MATRIX + test_deterministic_classifier)
-    crates/ucil-core/src/lib.rs    |   1 + (pub mod ceqp;)
-    3 files changed, 1028 insertions(+)
-   ```
-
-   Both new modules are Phase 3 Week 9 deterministic-fallback
-   classifier brain (CEQP + query-type classifier per master-plan §6.2),
-   landed in commits `43f0c93` (`feat(core): add QueryType enum +
-   classify_query + QUERY_WEIGHT_MATRIX`), `22a87c4` (`test(core): add
-   fusion::test_deterministic_classifier`), and `1521525` (`feat(core):
-   add ceqp module with parse_reason + Intent/PlannedAction/ParsedReason`).
-
-   Critically, `git diff aa7dc84..HEAD --stat -- crates/ucil-daemon/
-   crates/ucil-mcp/` returns **zero file changes**: the MCP server
-   dispatch path (`ucil-daemon::server::dispatch_tools_call`) and the
-   transport (`ucil-mcp`) — the only crates that determine what an
-   agent sees when it calls `find_definition` / `find_references` /
-   `refactor` / `search_code` — are untouched. The classifier
-   machinery in `ucil-core::fusion` is not yet wired into the MCP
-   handler dispatch (this is the Phase 3 follow-up tracked separately).
-   Therefore the MCP tool envelopes that drive the Phase-2 scenarios
-   are bit-identical to those at `aa7dc84`.
+   `git diff aa7dc84..HEAD --stat -- crates/ucil-daemon/ crates/ucil-mcp/
+   tests/fixtures/ tests/scenarios/` returns **0 lines** at HEAD `f0fbf32`
+   (verified independently this session). The MCP server dispatch path
+   (`ucil-daemon::server::dispatch_tools_call`) and the transport
+   (`ucil-mcp`) — the only crates that determine what an agent sees
+   when it calls `find_definition` / `find_references` / `refactor` /
+   `search_code` — are untouched. The classifier machinery in
+   `ucil-core::fusion` (Phase 3 deterministic-fallback brain) and the
+   cross-group executor + RRF fusion machinery added by WO-0068 are
+   not yet wired into the MCP handler dispatch (this is a Phase 3
+   follow-up tracked separately). Therefore the MCP tool envelopes
+   that drive the Phase-2 scenarios are bit-identical to those at
+   `aa7dc84`.
 
    All other commits on the `aa7dc84..HEAD` path are confined to
-   `scripts/` (harness + gate fixes for DEC-0018), `ucil-build/decisions/`
-   (DEC-0018 ADR), `ucil-build/verification-reports/`,
-   `ucil-build/work-orders/`, and `ucil-build/escalations/` — none of
-   which affect agent runtime behavior.
+   `crates/ucil-core/` (additive ceqp + fusion + cross_group modules),
+   `scripts/` (harness + gate fixes), `ucil-build/decisions/` (ADRs),
+   `ucil-build/verification-reports/`, `ucil-build/work-orders/`, and
+   `ucil-build/escalations/` — none of which affect agent runtime
+   behavior on Phase-2 scenarios.
 2. **MCP tool registration unchanged.** `tools/list` probe at HEAD
-   `4efda0b` (against `target/debug/ucil-daemon mcp --stdio --repo
-   /tmp/ucil-eval-probe-2026-05-08-27505/repo`) returned **22 tools**
+   `f0fbf32` (against `target/debug/ucil-daemon mcp --stdio --repo
+   /tmp/ucil-eval-probe-2026-05-08-evaluator-3/repo`) returned **22 tools**
    identical to the prior runs, including all four scenario-required
    tools (`find_definition`, `find_references`, `refactor`,
    `search_code`).
 3. **Tool implementation state unchanged.** `tools/call` probe at HEAD
-   `4efda0b` against a fresh copy of `tests/fixtures/rust-project/`
+   `f0fbf32` against a fresh copy of `tests/fixtures/rust-project/`
    confirms:
    - `find_definition name=retry_with_backoff` →
      `_meta.source = "tree-sitter+kg"`, `isError = false`,
-     `qualified_name` cites `src/http_client.rs::retry_with_backoff@37:1`
-     with full doc-comment + signature. Real handler.
+     `_meta.found = true`, content cites `retry_with_backoff` defined
+     at `src/http_client.rs:37`. Real handler.
+   - `find_definition name=compute_score` (python fixture) →
+     `_meta.source = "tree-sitter+kg"`, content cites `compute_score`
+     defined at `src/python_project/scoring.py:15`. Real handler.
    - `find_references name=retry_with_backoff` →
      `_meta.not_yet_implemented: true`,
      `"tool 'find_references' is registered but its handler is not
      yet implemented (Phase 1 stub)"`. Stub envelope.
+   - `find_references name=compute_score` (python fixture) →
+     `_meta.not_yet_implemented: true`. Stub envelope.
    - `refactor old_name=compute_score new_name=compute_relevance_score`
      → `_meta.not_yet_implemented: true`. Stub envelope.
+   - `search_code query=retry_with_backoff` →
+     `_meta.source = "tree-sitter+ripgrep"`, `isError = false`,
+     content = `"50 matches"` count-only envelope. Same shape as prior.
 
    Identical surface to the full run.
 4. **Fixture state unchanged.** `tests/fixtures/rust-project/`:
@@ -98,7 +94,82 @@ The full substantive evaluation detail (per-side run envelopes, judge
 prompts, acceptance results, observation list) is preserved unchanged
 below.
 
-### Probe evidence — 2026-05-07T19:45Z (this session @ HEAD `f9fd29d`)
+### Probe evidence — 2026-05-08 (this session @ HEAD `f0fbf32`)
+
+This evaluator session independently re-ran the three-invariant probe at
+HEAD `f0fbf32` on the `feat/WO-0068-cross-group-executor-and-fusion`
+branch. The branch carries WO-0068 Phase-3 cross-group executor + RRF
+fusion work, all confined to `crates/ucil-core/`; the MCP dispatch
+path and the scenario fixtures are bit-identical to `aa7dc84`.
+
+- **Source delta vs `aa7dc84`** (this session):
+  `git diff aa7dc84..HEAD --stat -- crates/ucil-daemon/ crates/ucil-mcp/
+  tests/fixtures/ tests/scenarios/` → **0 lines** of output. The
+  agent-visible MCP surface and scenario inputs are bit-identical to the
+  full-run baseline.
+- **Source delta vs `f9fd29d`** (prior refresh): `git diff f9fd29d..HEAD
+  --stat -- crates/ucil-daemon/ crates/ucil-mcp/ tests/fixtures/
+  tests/scenarios/` → **0 lines** of output. No regression vector
+  added since the prior refresh-pass.
+- **`tools/list` probe** at `target/debug/ucil-daemon mcp --stdio
+  --repo /tmp/ucil-eval-probe-2026-05-08-evaluator-3/repo` (fresh fixture
+  copy from `tests/fixtures/rust-project/`) → **22 tools** registered,
+  identical names to prior probes. All four scenario-required tools
+  listed (`find_definition`, `find_references`, `refactor`,
+  `search_code`).
+- **`tools/call find_definition name=retry_with_backoff`** (rust fixture)
+  → `_meta.source = "tree-sitter+kg"`, `isError = false`,
+  `_meta.found = true`, content cites
+  `retry_with_backoff` defined in
+  `/tmp/ucil-eval-probe-2026-05-08-evaluator-3/repo/src/http_client.rs`
+  at line 37. **Real handler.**
+- **`tools/call find_definition name=compute_score`** (python fixture, run
+  at `/tmp/ucil-eval-probe-2026-05-08-evaluator-3/python-repo` →
+  `_meta.source = "tree-sitter+kg"`, content cites `compute_score`
+  defined in `src/python_project/scoring.py` at line 15. **Real
+  handler.**
+- **`tools/call find_references name=retry_with_backoff`** →
+  `_meta.not_yet_implemented = true`,
+  `"tool 'find_references' is registered but its handler is not yet
+  implemented (Phase 1 stub)"`. **Phase-1 stub envelope.** Identical
+  to prior.
+- **`tools/call find_references name=compute_score`** (python) →
+  `_meta.not_yet_implemented = true`. **Phase-1 stub envelope.**
+- **`tools/call refactor old_name=compute_score
+  new_name=compute_relevance_score`** →
+  `_meta.not_yet_implemented = true`. **Phase-1 stub envelope.**
+  Identical to prior.
+- **`tools/call search_code query=retry_with_backoff`** →
+  `_meta.source = "tree-sitter+ripgrep"`, `isError = false`, content =
+  `"50 matches"` count-only envelope. Same shape as prior probes.
+- **Fixture state** (this session, verified by independent grep + line
+  numbers):
+  - `tests/fixtures/rust-project/src/http_client.rs` — `pub fn
+    retry_with_backoff` at line 37; `pub fn fetch_startup_banner` at
+    line 62; in-file callers of `retry_with_backoff(` at lines
+    64, 84, 91, 110 (4 callers, matching prior); doc-comment example
+    snippet at line 26 (the rustdoc fence opens at line 23). Test
+    `fn fetch_startup_banner_succeeds_via_retry` at line 123.
+  - `tests/fixtures/python-project/` — **28 `compute_score`
+    occurrences across 3 .py files** (8 in `scoring.py` including the
+    definition at line 15 + 4 doctest references + 1 internal call at
+    line 50, 10 in `evaluator.py` including `_builtin_compute_score`
+    wrapper at line 189, 10 in `tests/test_scoring.py`), identical to
+    prior. The `\b`-bounded count is 27; the unbounded count is 28;
+    both match the augmented fixture.
+
+All three substantive invariants hold at HEAD `f0fbf32`. Inherited
+verdict (PASS, exit 0) is correct at this HEAD. No new escalations
+filed.
+
+Probe artefacts preserved (this session):
+- `/tmp/ucil-eval-probe-tools-list.json` — initialize + tools/list (22 tools)
+- `/tmp/ucil-eval-probe-toolcalls-output.json` — 4× rust-fixture tools/call envelopes
+- `/tmp/ucil-eval-probe-pyresponses.json` — 3× python-fixture tools/call envelopes
+- `/tmp/ucil-eval-probe-2026-05-08-evaluator-3/repo/` — fresh rust-project fixture copy used for probe
+- `/tmp/ucil-eval-probe-2026-05-08-evaluator-3/python-repo/` — fresh python-project fixture copy used for probe
+
+### Probe evidence — 2026-05-07T19:45Z (prior session @ HEAD `f9fd29d`)
 
 This evaluator session independently re-ran the three-invariant probe at
 HEAD `f9fd29d` on the `feat/WO-0067-classifier-and-reason-parser`
@@ -264,7 +335,35 @@ Probe: `tools/list` against
 and `find_references` + `refactor` (required by `refactor-rename-python`)
 are listed.
 
-**Re-probe at HEAD `f9fd29d`** (this evaluator session,
+**Re-probe at HEAD `f0fbf32`** (this evaluator session,
+`/tmp/ucil-eval-probe-2026-05-08-evaluator-3/`, 2026-05-08):
+- `tools/list` → 22 tools registered, identical names. All four
+  scenario-required tools listed (`find_definition`, `find_references`,
+  `refactor`, `search_code`).
+- `tools/call find_definition name=retry_with_backoff` (rust fixture) →
+  `_meta.source = "tree-sitter+kg"`, `isError = false`, `_meta.found = true`,
+  returns `retry_with_backoff` at `src/http_client.rs:37`. Real handler.
+- `tools/call find_definition name=compute_score` (python fixture) →
+  `_meta.source = "tree-sitter+kg"`, returns `compute_score` at
+  `src/python_project/scoring.py:15`. Real handler.
+- `tools/call find_references name=retry_with_backoff` →
+  `_meta.not_yet_implemented = true`. Stub.
+- `tools/call find_references name=compute_score` →
+  `_meta.not_yet_implemented = true`. Stub.
+- `tools/call refactor old_name=compute_score new_name=compute_relevance_score`
+  → `_meta.not_yet_implemented = true`. Stub.
+- `tools/call search_code query=retry_with_backoff` →
+  `_meta.source = "tree-sitter+ripgrep"`, `isError = false`, content =
+  `"50 matches"` count-only envelope. Same shape as prior.
+
+Identical surface to prior probes. The Phase-3 modules added to
+`ucil-core` (`ceqp.rs`, `fusion.rs::QueryType`/`classify_query`,
+`cross_group.rs`) are not yet wired into the MCP dispatch (the dispatch
+in `crates/ucil-daemon/src/server.rs` has zero source delta vs
+`aa7dc84` confirmed independently this session), so the agent-visible
+MCP behavior is unchanged.
+
+**Re-probe at HEAD `f9fd29d`** (prior evaluator session,
 `/tmp/ucil-eval-probe-2026-05-08-413417/repo`, 2026-05-07T19:45Z):
 - `tools/list` → 22 tools registered, identical names. All four
   scenario-required tools listed (`find_definition`, `find_references`,
