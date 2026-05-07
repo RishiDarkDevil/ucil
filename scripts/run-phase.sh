@@ -303,6 +303,36 @@ EOF
     scripts/run-root-cause-finder.sh "$WO_ID" >/tmp/ucil-rcf.log 2>&1 || true
     safe_git_pull
 
+    # Stale post-merge re-dispatch guard.
+    #
+    # If the loop reaches this point but ALL feature_ids in the WO are already
+    # passes=true on main AND there is no rejection or root-cause-finder
+    # artefact on disk, the rejection branch was entered spuriously (e.g. the
+    # verifier flipped on the feat branch and the post-merge re-verify loop
+    # took the long path). Dispatching the executor/critic against a non-
+    # existent rejection burns ~3 LLM turns producing zero work — agents
+    # correctly refuse to fabricate diffs and write *-stale-rejection-prompt
+    # escalations instead. Recurrence documented in:
+    #   ucil-build/escalations/20260506T2358Z-wo-0063-stale-rejection-prompt-recurrence.md
+    #   ucil-build/escalations/20260507T0156Z-wo-0064-stale-rejection-prompt-post-merge.md
+    _rejection_file="ucil-build/rejections/${WO_ID}.md"
+    _rcf_file="ucil-build/verification-reports/root-cause-${WO_ID}.md"
+    _all_features_pass=1
+    for _fid in $WO_FEATURES; do
+      _p=$(jq -r --arg id "$_fid" '.features[] | select(.id==$id) | .passes' \
+           ucil-build/feature-list.json 2>/dev/null)
+      if [[ "$_p" != "true" ]]; then
+        _all_features_pass=0
+        break
+      fi
+    done
+    if [[ "$_all_features_pass" -eq 1 ]] \
+         && [[ ! -f "$_rejection_file" ]] \
+         && [[ ! -f "$_rcf_file" ]]; then
+      echo "[run-phase] ${WO_ID}: all feature_ids passes=true on main and no rejection/RCF artefact present — stale post-merge re-dispatch detected, breaking retry loop."
+      break
+    fi
+
     echo "[run-phase] Re-running executor with RCF context (attempt $((vattempt+1)))"
     RETRY_PROMPT="You are the UCIL executor. Implement work-order at $LATEST_WO.
 A PRIOR verifier attempt rejected your work. Read:
