@@ -1,10 +1,10 @@
 # Phase 2 Integration Report
 
-**Tester session**: itg-81147d7a-8f09-40d7-9899-9cb15d50a459
-**Started at**:     2026-05-07T17:10:17Z
-**Verified at**:    2026-05-07T17:10:56Z
+**Tester session**: itg-6a50e703-f181-4668-9d4f-3442f68eef60
+**Started at**:     2026-05-07T17:39:12Z
+**Verified at**:    2026-05-07T17:39:45Z
 **Phase**:          2 (Week 1, per `ucil-build/progress.json`)
-**HEAD commit**:    ec72521d5b09694509d117a383944f90c66bfcf7
+**HEAD commit**:    0d058647dc000aca8fe4cd4205b85899f24ba6e1
 **Verdict**:        PASS
 
 ## Summary
@@ -14,33 +14,39 @@ LSP, or the UCIL daemon) and adds a "LanceDB / ONNX availability"
 sanity check on top. All three Phase-1 scripts pass on this run; the
 Phase-2 vector-stack collaborators (LanceDB and ONNX Runtime) are
 linked into the workspace as cargo crates and resolve cleanly from
-`Cargo.lock` (`lancedb 0.16.0`, `ort 2.0.0-rc.12`, with `ucil-embeddings
-0.1.0` referencing `lancedb ^0.16` and `ort =2.0.0-rc.12` via
-`workspace = true`). Detailed per-feature embedding/recall benches
-(`bench-embed.sh`, `recall-at-10.sh`, `golden-fusion.sh`) are run by
+`Cargo.lock` (`lancedb 0.16.0`, `ort 2.0.0-rc.12`, with
+`ucil-embeddings 0.1.0` referencing both via `workspace = true`).
+Detailed per-feature embedding/recall benches (`bench-embed.sh`,
+`recall-at-10.sh`, `golden-fusion.sh`) are run by
 `scripts/gate/phase-2.sh`, not by this integration-tester pass — this
-pass is the agent-visible black-box wrapper.
+pass is the agent-visible black-box wrapper. There is zero source-code
+delta between this run's HEAD `0d05864` and the prior integration
+HEAD `ec72521`: every commit since the last pass has been a
+`chore(verification-reports)` / `chore(escalation)` / `wip(...)` touch
+under `ucil-build/`, leaving the daemon, Serena adapter, and pyright
+bridge bit-for-bit identical.
 
-- `scripts/verify/e2e-mcp-smoke.sh` — **exit 0** (PASS, 397 ms).
+- `scripts/verify/e2e-mcp-smoke.sh` — **exit 0** (PASS, 433 ms).
   `cargo build -p ucil-daemon` served from a fully warm incremental
-  cache (HEAD `ec72521` is a test-report commit with no source delta
-  versus the prior verification HEAD `6bd7e46`); the daemon answered
-  `initialize` and `tools/list` over `ucil-daemon mcp --stdio`. All 22
-  frozen MCP tools advertise the four CEQP universal params.
-- `scripts/verify/serena-live.sh` — **exit 0** (PASS, 3 218 ms).
+  cache (no source delta versus the prior verification HEAD
+  `ec72521`); the daemon answered `initialize` and `tools/list` over
+  `ucil-daemon mcp --stdio`. All 22 frozen MCP tools advertise the
+  four CEQP universal params.
+- `scripts/verify/serena-live.sh` — **exit 0** (PASS, 3 221 ms).
   Serena v1.0.0 spawned via `uvx` and advertised 20 tools, including
   the three required by G1 structural (`find_symbol`,
   `find_referencing_symbols`, `get_symbols_overview`).
-- `scripts/verify/diagnostics-bridge.sh` — **exit 0** (PASS, 318 ms).
+- `scripts/verify/diagnostics-bridge.sh` — **exit 0** (PASS, 420 ms).
   `pyright` v1.1.409 on PATH at
   `/home/rishidarkdevil/.nvm/versions/node/v22.22.2/bin/pyright`; the
   script ran `pyright --outputjson __diagnostics_probe.py` against a
   copy of `tests/fixtures/python-project/` and parsed
   `generalDiagnostics`, finding one `error`-severity diagnostic for
-  the deliberate `int → str` mismatch in the probe. Fifth consecutive
+  the deliberate `int → str` mismatch in the probe. Sixth consecutive
   passing run for this script (prior passes: itg-607e685c on HEAD
   `7d89ca9`, itg-4f3a1070 on HEAD `267746a`, itg-c8f4c58f on HEAD
-  `c84f996`, itg-473712f4 on HEAD `6bd7e46`).
+  `c84f996`, itg-473712f4 on HEAD `6bd7e46`, itg-81147d7a on HEAD
+  `ec72521`).
 
 Because all gate scripts pass, the overall verdict is **PASS**.
 
@@ -76,9 +82,9 @@ was attempted — also unnecessary for Phase 2.
 
 | Suite                                    | Passed | Failed | Skipped | Duration | Exit |
 |------------------------------------------|--------|--------|---------|----------|------|
-| scripts/verify/e2e-mcp-smoke.sh          | 1      | 0      | 0       | 397ms    | 0    |
-| scripts/verify/serena-live.sh            | 1      | 0      | 0       | 3218ms   | 0    |
-| scripts/verify/diagnostics-bridge.sh     | 1      | 0      | 0       | 318ms    | 0    |
+| scripts/verify/e2e-mcp-smoke.sh          | 1      | 0      | 0       | 433ms    | 0    |
+| scripts/verify/serena-live.sh            | 1      | 0      | 0       | 3221ms   | 0    |
+| scripts/verify/diagnostics-bridge.sh     | 1      | 0      | 0       | 420ms    | 0    |
 | cargo nextest integration (deferred)     | —      | —      | —       | —        | —    |
 | pnpm adapters integration (deferred)     | —      | —      | —       | —        | —    |
 | pytest integration (deferred)            | —      | —      | —       | —        | —    |
@@ -94,7 +100,7 @@ invocation.
 
 ## Passes
 
-### 1. `scripts/verify/e2e-mcp-smoke.sh` — exit 0 (397 ms)
+### 1. `scripts/verify/e2e-mcp-smoke.sh` — exit 0 (433 ms)
 
 ```
 [e2e-mcp-smoke] building ucil-daemon...
@@ -103,16 +109,16 @@ invocation.
 
 The 0.4s wall-time reflects a fully warm incremental cargo build (the
 `target/debug/ucil-daemon` link survived from the prior session at
-`6bd7e46`; HEAD `ec72521` adds only the previous integration report
-under `ucil-build/verification-reports/`, no source delta, so the
-cache hit was complete) plus the MCP handshake round-trip itself. The
-22 frozen tool names from master-plan §3 are all present and every
-tool advertises the four CEQP universal params (`reason`,
-`current_task`, `files_in_context`, `token_budget`).
+`ec72521`; HEAD `0d05864` adds only chore commits under
+`ucil-build/`, no source delta, so the cache hit was complete) plus
+the MCP handshake round-trip itself. The 22 frozen tool names from
+master-plan §3 are all present and every tool advertises the four
+CEQP universal params (`reason`, `current_task`, `files_in_context`,
+`token_budget`).
 
 Full logs: `phase-2-integration-logs/e2e-mcp-smoke.{stdout,stderr,rc,dur}`.
 
-### 2. `scripts/verify/serena-live.sh` — exit 0 (3 218 ms)
+### 2. `scripts/verify/serena-live.sh` — exit 0 (3 221 ms)
 
 ```
 [serena-live] spawning Serena via uvx (pinned v1.0.0)...
@@ -124,11 +130,11 @@ Serena was spawned via
 and answered the MCP handshake plus a `tools/list` with 20 tools,
 including the three required by G1 structural. uvx hit its cached
 checkout (no git fetch required), so this run matches the same wall
-time as the prior pass at `6bd7e46`.
+time as the prior pass at `ec72521`.
 
 Full logs: `phase-2-integration-logs/serena-live.{stdout,stderr,rc,dur}`.
 
-### 3. `scripts/verify/diagnostics-bridge.sh` — exit 0 (318 ms)
+### 3. `scripts/verify/diagnostics-bridge.sh` — exit 0 (420 ms)
 
 ```
 [diagnostics-bridge] OK — pyright returned 1 diagnostic(s) for the probe (severity=error).
@@ -139,11 +145,12 @@ Full logs: `phase-2-integration-logs/serena-live.{stdout,stderr,rc,dur}`.
 `pyright --outputjson __diagnostics_probe.py` invocation, run inside
 a tmp copy of `tests/fixtures/python-project/`, returned a single
 `generalDiagnostics` entry at `severity=error` for the deliberate
-`int → str` mismatch in the probe file. Fifth consecutive passing
+`int → str` mismatch in the probe file. Sixth consecutive passing
 run (prior passes: itg-607e685c on HEAD `7d89ca9`, itg-4f3a1070 on
 HEAD `267746a`, itg-c8f4c58f on HEAD `c84f996`, itg-473712f4 on HEAD
-`6bd7e46`); the earlier eight phase-1 reports recorded the same FAIL
-shape until pyright was installed on PATH.
+`6bd7e46`, itg-81147d7a on HEAD `ec72521`); the earlier eight
+phase-1 reports recorded the same FAIL shape until pyright was
+installed on PATH.
 
 Full logs: `phase-2-integration-logs/diagnostics-bridge.{stdout,stderr,rc,dur}`.
 
