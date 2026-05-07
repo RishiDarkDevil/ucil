@@ -200,3 +200,17 @@ that authorises the fixture/scenario edit. Until then, treat scenario
 `nav-rust-symbol` PASS/FAIL on `rust-project` as advisory only.
 
 resolved: true
+
+## Superseded by ADR DEC-0017 (2026-05-07T16:55Z)
+
+The "deferred to Phase-8 audit" disposition above is now superseded.
+Per ADR DEC-0017 (with explicit user authorisation 2026-05-07T16:48Z),
+the rust-project fixture has been augmented with a real
+`retry_with_backoff` helper at `tests/fixtures/rust-project/src/http_client.rs`
+plus a call site in `src/main.rs` (commit `1c42c77`). The
+nav-rust-symbol scenario now has positive ground truth — the agent has
+exactly one qualifying function to find and cite by file:line. The
+next effectiveness run is expected to PASS this scenario
+deterministically.
+
+resolved: true

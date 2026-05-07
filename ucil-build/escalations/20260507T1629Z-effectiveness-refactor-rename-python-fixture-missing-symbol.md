@@ -109,3 +109,17 @@ A planner triage pass should: (a) mark this escalation `resolved: true` once
 either remediation A/B/C is selected, and (b) update `tests/scenarios/README.md`
 with a sentence stating that scenarios MUST cite at least one identifier that
 `grep -q` finds in the named fixture.
+
+## Resolved by ADR DEC-0017 (2026-05-07T16:55Z)
+
+Per ADR DEC-0017 (with explicit user authorisation 2026-05-07T16:48Z),
+the python-project fixture has been augmented with a real
+`compute_score` helper at
+`tests/fixtures/python-project/src/python_project/scoring.py`, with 13
+pytest cases and a builtin registration in `evaluator.py` (commit
+`14bbace`). The refactor-rename-python scenario now has positive ground
+truth — the agent has the function to rename and at least one call site
+in the evaluator builtin dict. Next effectiveness run is expected to
+PASS deterministically.
+
+resolved: true
