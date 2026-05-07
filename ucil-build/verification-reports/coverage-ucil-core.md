@@ -3,7 +3,7 @@
 - **Verdict**: PASS
 - **Min line coverage**: 85%
 - **Min branch coverage**: 75%
-- **Generated**: 2026-05-07T21:39:22Z
+- **Generated**: 2026-05-07T21:49:57Z
 
 ## Summary
 
@@ -28,9 +28,9 @@
     "percent": 94.35897435897435
   },
   "instantiations": {
-    "count": 316,
-    "covered": 199,
-    "percent": 62.9746835443038
+    "count": 534,
+    "covered": 249,
+    "percent": 46.62921348314607
   },
   "lines": {
     "count": 2641,
