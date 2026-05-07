@@ -1,6 +1,4 @@
 === Cargo.lock entries (lancedb, ort, ucil-embeddings) ===
-
-=== full block matches ===
 3619:name = "lancedb"
 3620-version = "0.16.0"
 3621-source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -16,7 +14,7 @@
 6680-dependencies = [
 6681- "arrow-array",
 
-=== ucil-embeddings Cargo.toml ===
+=== ucil-embeddings Cargo.toml (head) ===
 [package]
 name = "ucil-embeddings"
 version.workspace = true
