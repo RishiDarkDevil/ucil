@@ -2,7 +2,7 @@
 
 - **Feature**: P2-W8-F08 — `find_similar` MCP tool
 - **Branch**: `feat/WO-0066-find-similar-mcp-tool`
-- **Final commit sha**: `5499b2d461b6799bc9699c93beef0a5931f3b15f`
+- **Final commit sha**: `931eea4` (RFR landed at `34b0ef5`; gate-side coverage report refresh at `931eea4`)
 - **Frozen acceptance selector**: `cargo nextest run -p ucil-daemon server::test_find_similar_tool`
 - **Verify script**: `bash scripts/verify/P2-W8-F08.sh`
 - **Master plan citations**: §3.2 line 219 (find_similar tool listing) + §18 Phase 2 Week 8 line 1791 ("Vector search works") — closes Phase 2 Week 8 and the entire Phase 2 envelope.
@@ -111,9 +111,11 @@ Mutations not applied in-line per WO scope_in 22 (delegated to verifier per WO-0
 
 7. **Phase-1 effectiveness-gate failure**: the effectiveness re-run produced `Δ weighted = -0.0769` (UCIL 4.8462 vs baseline 4.9231) — within noise. The strict-letter FAIL on UCIL acceptance #3 + formatting Δ = -1.0 is downstream of the same `.rs:LINE` narrative coin flip already escalated and resolved-as-deferred. Three runs at three commits have produced PASS/PASS, FAIL/FAIL, FAIL/PASS verdicts — definitive evidence of a structural fixture flake, not a UCIL regression.
 
-## Commits in this WO (7)
+## Commits in this WO (9)
 
 ```
+931eea4 chore(verification-reports): refresh coverage-*.md gate-side artefacts
+34b0ef5 docs(work-orders): add 0066-ready-for-review.md (P2-W8-F08 closes Phase 2)
 5499b2d chore(effectiveness): re-run phase-1 nav-rust-symbol at 762bd5d
 762bd5d chore(scripts): add verify/P2-W8-F08.sh (find_similar acceptance)
 8e3ff40 test(daemon): add server::test_find_similar_tool with 8 sub-assertions
@@ -123,7 +125,7 @@ Mutations not applied in-line per WO scope_in 22 (delegated to verifier per WO-0
 4c6f1fe plan(p2-w8): emit WO-0066 find-similar MCP tool (closes Phase 2)  ← (planner, on main)
 ```
 
-Six executor commits + one effectiveness-gate-side commit; soft-target was 6 per estimated_commits.
+Six executor commits + one RFR commit + one effectiveness-gate-side commit + one coverage-report-refresh gate-side commit; soft-target was 6 per estimated_commits.
 
 ## Closes
 
