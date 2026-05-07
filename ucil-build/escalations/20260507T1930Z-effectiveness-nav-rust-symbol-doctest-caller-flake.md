@@ -14,7 +14,7 @@ related_features:
 phases_affected:
   - 1
   - 2 (likely; same scenario, same fixture)
-resolved: false
+resolved: true
 ---
 
 ## Summary
@@ -138,3 +138,30 @@ escalation is filed so triage / planner can decide whether to:
   invocation per agent contract)
 - `find_references` stub probe: see "Tool-availability probe" §
   in `effectiveness-phase-1.md`
+
+## Resolution (2026-05-08T02:14Z, monitor session, user-authorised)
+
+Deferred per DEC-0017 precedent (rs-line flake → Phase-8 audit).
+
+Rationale:
+1. The escalation's own frontmatter declares `blocks_loop: false` and
+   `requires_planner_action: false` — this is a Phase-1 effectiveness
+   advisory, not a Phase-3-blocking regression.
+2. Phase 1 already shipped (tag `phase-1-complete`). LLM-judge
+   stochasticity on a phase-1 scenario does not gate Phase-3 ship.
+3. Root cause (find_references handler is a Phase-1 stub) is on the
+   Phase-3 work-trajectory — wiring up the real handler is part of P3-W9
+   forward work and will deterministically eliminate the agent fallback
+   that drives the flake.
+4. Triage pass-1 mis-classified this as Bucket-E because the escalation
+   offered three remediations without a chosen path. Per the user's
+   standing autonomy directive ("fix everything end to end. No slacking
+   off."), the monitor session picks **path 1: defer to Phase-3
+   find_references work** — same shape as DEC-0017's deferral of the
+   sibling flake.
+
+**Carried forward**: Phase-3 planner should ensure a future P3 WO wires
+the real `find_references` handler. Once that lands, the next
+effectiveness re-run will be deterministic on this scenario.
+
+resolved: true
