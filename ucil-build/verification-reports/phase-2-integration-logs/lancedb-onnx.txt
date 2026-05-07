@@ -1,115 +1,18 @@
-==== LanceDB / ONNX availability probe — 2026-05-07T17:39:41Z ====
+=== LanceDB / ONNX linkage probe ===
+2026-05-07T17:59:51Z
+HEAD: f9b0a696262425a95bc03ff3180ff36e3c975e3a
 
--- Cargo.lock entries (lancedb, ort, ucil-embeddings) --
 name = "lancedb"
 version = "0.16.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2cd402d7e32b63681c60235ba68a124af5a6fd39c64eaf24284b9f2105b53f56"
-dependencies = [
- "arrow",
- "arrow-array",
- "arrow-cast",
- "arrow-data",
- "arrow-ipc",
- "arrow-ord",
- "arrow-schema",
- "async-trait",
- "bytes",
- "chrono",
- "crunchy",
- "datafusion-catalog",
- "datafusion-common",
- "datafusion-execution",
- "datafusion-expr",
- "datafusion-physical-plan",
- "futures",
- "half",
- "lance",
- "lance-datafusion",
- "lance-encoding",
- "lance-index",
- "lance-io",
- "lance-linalg",
- "lance-table",
- "lance-testing",
- "lazy_static",
- "log",
- "moka",
- "num-traits",
- "object_store 0.10.2",
- "pin-project",
- "regex",
- "serde",
- "serde_json",
- "serde_with",
- "snafu 0.7.5",
- "tokio",
- "url",
-]
-
+--
 name = "ort"
 version = "2.0.0-rc.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d7de3af33d24a745ffb8fab904b13478438d1cd52868e6f17735ef6e1f8bf133"
-dependencies = [
- "ndarray 0.17.2",
- "ort-sys",
- "smallvec",
- "tracing",
- "ureq",
-]
-
+--
 name = "ucil-embeddings"
 version = "0.1.0"
-dependencies = [
- "arrow-array",
- "arrow-schema",
- "criterion",
- "lancedb",
- "ndarray 0.16.1",
- "ort",
- "rand 0.8.5",
- "serde",
- "tempfile",
- "thiserror 2.0.18",
- "tokenizers",
- "tokio",
- "toml",
- "tracing",
- "ucil-core",
- "ucil-treesitter",
-]
 
-
--- ucil-embeddings/Cargo.toml relevant deps --
-3:version.workspace = true
-4:edition.workspace = true
-5:authors.workspace = true
-6:license.workspace = true
-7:repository.workspace = true
-11:ndarray.workspace = true
-12:ort.workspace = true
-13:serde.workspace = true
-14:thiserror.workspace = true
-15:tokenizers.workspace = true
-16:toml.workspace = true
-17:tokio.workspace = true
-18:tracing.workspace = true
-23:criterion.workspace = true
-24:tempfile.workspace = true
-28:# `WO-0065`).  Already a workspace dep (used by `ucil-daemon` for the
-29:# per-branch `code_chunks` table); reusing the same workspace pin keeps
-30:# the arrow-stack ABI tier identical (`lancedb 0.16` → `lance 0.23` →
-33:lancedb = { workspace = true }
-36:# bench's corpus assembly.  Pinned via the workspace `53` line that
-37:# `lancedb 0.16` transitively depends on.
-38:arrow-array = { workspace = true }
-47:arrow-schema = { workspace = true }
-
--- workspace dep declarations --
-194:ort = { version = "=2.0.0-rc.12", default-features = false, features = ["std", "download-binaries", "tls-rustls"] }
-230:# `chrono` 0.4.44+, and (b) lance 0.29 (pulled by lancedb 0.20+) trips
-238:lancedb = { version = "0.16", default-features = false }
-243:# `Field`, `DataType`.  Pinned to the `53` line that lancedb 0.16
-251:# `crates/ucil-daemon/src/lancedb_indexer.rs` (P2-W8-F04, WO-0064) to
-258:# `lancedb::Table::query().execute().await?` streams into a
+-- ucil-embeddings dependency declaration --
+ort.workspace = true
+# the arrow-stack ABI tier identical (`lancedb 0.16` → `lance 0.23` →
+lancedb = { workspace = true }
+# `lancedb 0.16` transitively depends on.
