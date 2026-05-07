@@ -82,6 +82,18 @@ tempfile.workspace = true
 # in its `ProtobufDecode` variant.
 scip = { workspace = true }
 protobuf = { workspace = true }
+# `ucil-embeddings` provides `CodeRankEmbed` (default 137M Int8-quantised
+# embedding model, P2-W8-F02, WO-0059) and `EmbeddingChunker` (real-tokenizer
+# chunker, P2-W8-F05, WO-0060) consumed by `lancedb_indexer.rs`
+# (P2-W8-F04, WO-0064).  This is the FIRST consumer of `ucil-embeddings`
+# from `ucil-daemon`.  The dep transitively pulls `ort 2.x` with the
+# `download-binaries` CPU EP per WO-0058 — first-build cargo wall-time
+# inflation by 30-90s is expected per WO-0058 lessons line 565.
+ucil-embeddings = { path = "../ucil-embeddings" }
+# `sha2` provides `Sha256` for the `file_hash` column of `code_chunks`
+# (master-plan §12.2 line 1335).  Used by `lancedb_indexer.rs` (P2-W8-F04,
+# WO-0064) to compute the content-addressed delta key.
+sha2.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

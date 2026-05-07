@@ -246,6 +246,13 @@ lancedb = { version = "0.16", default-features = false }
 arrow-array = "53"
 arrow-schema = "53"
 
+# `sha2` provides `Sha256` for the `file_hash` column of `code_chunks`
+# (master-plan §12.2 line 1335).  Used ONLY by
+# `crates/ucil-daemon/src/lancedb_indexer.rs` (P2-W8-F04, WO-0064) to
+# compute the content-addressed delta key that drives incremental
+# re-indexing.  Pin `0.10` (current stable line as of 2026-05-07).
+sha2 = "0.10"
+
 [profile.dev]
 opt-level = 0
 
