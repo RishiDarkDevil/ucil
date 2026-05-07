@@ -6,7 +6,7 @@
 **Week**: 9
 **Features**: `P3-W9-F03` (cross-group parallel executor), `P3-W9-F04` (cross-group RRF fusion)
 **Branch**: `feat/WO-0068-cross-group-executor-and-fusion`
-**Final commit**: `ec6854f`
+**Final commit**: `1a6ff74`
 **Wall time**: ~ 90 minutes
 
 ## Summary
@@ -168,7 +168,20 @@ All 44 `ucil-core` lib unit tests pass green (including the 2 new `cross_group::
 
 The gate-side effectiveness child agent committed `verification-reports/effectiveness-phase-1.md` (commit `c0372b7`) and the coverage refresh commits (`ec6854f`) to the feat branch — gate-side artefact carve-out per WO-0068 scope_in #46 + WO-0067 lessons-learned `For planner` line 3.
 
-**Phase-2 gate** — `bash scripts/gate/phase-2.sh` is running locally; expected to PASS modulo the standing-protocol coverage workaround per scope_out #14 / AC23. This WO does NOT touch any phase-2 invariant. The Phase-2 effectiveness scenarios (open `20260507T0357Z-effectiveness-nav-rust-symbol-rs-line-flake.md` + `20260507T1930Z-effectiveness-nav-rust-symbol-doctest-caller-flake.md` escalations) are orthogonal per scope_out #11. The verifier should run gate-2 from a clean session per AC28.
+**Phase-2 gate** — `bash scripts/gate/phase-2.sh` returned **exit 0** (PASS):
+- `[OK] effectiveness (phase 2 scenarios)` — verdict PASS
+- `[OK] multi-lang probes` — rust + python + typescript all green
+- `[OK] real-repo smoke` — daemon answered `initialize` + `tools/list` + `find_definition` + `search_code` against rust-lang/log (~6204 source lines)
+- `[OK] coverage gate: ucil-core` — line=97%
+- `[OK] coverage gate: ucil-daemon` — line=89%
+- `[OK] coverage gate: ucil-treesitter` — line=90%
+- `[OK] coverage gate: ucil-lsp-diagnostics` — line=94%
+- `[FAIL] cargo test --workspace` — same pre-existing CodeRankEmbed panic-on-missing-fixture; ZERO ucil-embeddings diffs in WO-0068 (not a regression).
+- `[FAIL] coverage gate: ucil-embeddings` — standing-protocol RUSTC_WRAPPER=sccache interaction; the `env -u RUSTC_WRAPPER cargo llvm-cov` measurement is the substantive truth per AC23 standing protocol. 24th consecutive WO under this carve-out per WO-0067 lessons-learned `For planner` line 4.
+
+The gate-side child agents committed `verification-reports/effectiveness-phase-2.md` (commit `8a646ba`) and the coverage refresh commits (`1a6ff74`) to the feat branch — gate-side artefact carve-out per WO-0068 scope_in #46.
+
+**Both phase gates exit 0**. AC27 + AC28 satisfied modulo the two standing-protocol carve-outs (CodeRankEmbed missing-fixture and `coverage-gate.sh` sccache interaction), neither introduced by WO-0068.
 
 `git diff main HEAD -- crates/ucil-daemon/ crates/ucil-treesitter/ crates/ucil-embeddings/ crates/ucil-cli/ crates/ucil-lsp-diagnostics/ crates/ucil-agents/ adapters/ ml/` returns ZERO bytes — no out-of-scope changes.
 
