@@ -156,7 +156,7 @@ pub mod watcher;
 #[cfg(test)] mod test_support;
 
 #[rustfmt::skip]
-pub use branch_manager::{BranchManager, BranchManagerError, BranchTableInfo, code_chunks_schema, ARCHIVE_DIR_NAME};
+pub use branch_manager::{BranchManager, BranchManagerError, BranchTableInfo, code_chunks_schema, sanitise_branch_name, ARCHIVE_DIR_NAME};
 #[rustfmt::skip]
 pub use executor::{enrich_find_definition, execute_g1, fuse_g1, Caller, EnrichedFindDefinition, ExecutorError, G1Conflict, G1FusedEntry, G1FusedLocation, G1FusedOutcome, G1FusionEntry, G1Outcome, G1Query, G1Source, G1ToolKind, G1ToolOutput, G1ToolStatus, HoverDoc, HoverFetchError, HoverSource, IngestPipeline, SerenaHoverClient, G1_MASTER_DEADLINE, G1_PER_SOURCE_DEADLINE, SOURCE_TOOL, TREE_SITTER_VALID_FROM};
 #[rustfmt::skip]
