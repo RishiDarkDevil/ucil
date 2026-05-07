@@ -52,7 +52,9 @@ use tokio::{
 };
 use ucil_core::KnowledgeGraph;
 
+use crate::branch_manager::BranchManager;
 use crate::g2_search::G2SourceFactory;
+use crate::lancedb_indexer::EmbeddingSource;
 use crate::text_search::{self, TextMatch, TextSearchError};
 use ucil_core::{fuse_g2_rrf, G2FusedOutcome, G2SourceResults};
 
@@ -114,6 +116,35 @@ pub const G2_MASTER_DEADLINE: Duration = Duration::from_secs(5);
 /// the caller's request at this ceiling and emits `tracing::warn!` so
 /// the agent can see the clamp in its own logs.
 pub const SEARCH_CODE_MAX_RESULTS: usize = 500;
+
+/// Default value for `find_similar`'s `arguments.max_results`.
+///
+/// Ten covers the common "show me the closest semantic matches" use
+/// case while keeping the response envelope under typical context
+/// budgets.  Paired with [`FIND_SIMILAR_MAX_RESULTS_CAP`], which
+/// caps whatever the caller asks for so a pathological request
+/// cannot drain the LanceDB query (master-plan §3.2 line 219).
+pub const FIND_SIMILAR_DEFAULT_MAX_RESULTS: u64 = 10;
+
+/// Saturating cap on `find_similar`'s `arguments.max_results`.
+///
+/// LanceDB's flat-scan `nearest_to(...)` cost grows linearly in the
+/// table's row count when no ANN index has been created (the small
+/// fixture tables this WO exercises do not need an index per the
+/// `scope_out` carve-out); we cap the per-call result count at 100
+/// to keep the response envelope finite.
+pub const FIND_SIMILAR_MAX_RESULTS_CAP: u64 = 100;
+
+/// Per-call deadline for the embedding + `LanceDB` `nearest_to`
+/// + `RecordBatch` drain combined.  Wraps every `.await` in
+/// `handle_find_similar` per `.claude/rules/rust-style.md` "every
+/// `.await` that touches IO is wrapped in `tokio::time::timeout`".
+///
+/// Five seconds is generous for the test corpus's ≤10 chunks and
+/// tight enough to bound a wedged LanceDB call.  Production-side
+/// tuning is deferred to a follow-up WO once the daemon's startup
+/// orchestrator wires in the production embedder.
+pub const FIND_SIMILAR_QUERY_TIMEOUT: Duration = Duration::from_secs(5);
 
 // ── Errors ───────────────────────────────────────────────────────────────────
 
@@ -336,6 +367,74 @@ pub fn ucil_tools() -> Vec<ToolDescriptor> {
 
 // ── Server ──────────────────────────────────────────────────────────────────
 
+/// Per-branch `find_similar` executor — bundles the dependencies the
+/// `handle_find_similar` MCP handler needs to embed a query snippet
+/// and run a `LanceDB` `nearest_to` query against the per-branch
+/// `code_chunks` table.
+///
+/// Master-plan §3.2 line 219 freezes the `find_similar` tool's
+/// contract ("Find code similar to a given snippet or pattern").
+/// Master-plan §18 Phase 2 Week 8 line 1791 frames the deliverable
+/// as "Vector search works" — `P2-W8-F08` closes Phase 2 Week 8 and
+/// the entire Phase 2 envelope.  Master-plan §12.2 lines 1321-1346
+/// freezes the per-branch `code_chunks` table the executor queries.
+///
+/// The executor wraps three injected collaborators:
+///
+/// * [`BranchManager`] — resolves the per-branch `vectors/`
+///   directory via [`BranchManager::branch_vectors_dir`] (see
+///   `WO-0064` line 660-672 for the canonical connect/open pattern).
+/// * [`EmbeddingSource`] — `UCIL`-internal trait seam per `DEC-0008`
+///   §4 (production `CodeRankEmbeddingSource` from `WO-0059`; tests
+///   inject a deterministic `TestEmbeddingSource`).
+/// * `default_branch` — fall-back branch name when
+///   `arguments.branch` is omitted from the MCP request.
+///
+/// Production wiring of the executor into the daemon's startup
+/// orchestrator is deferred to a follow-up `WO` per the
+/// `WO-0066` `scope_out`.
+pub struct FindSimilarExecutor {
+    branch_manager: Arc<BranchManager>,
+    embedding_source: Arc<dyn EmbeddingSource>,
+    default_branch: String,
+}
+
+impl std::fmt::Debug for FindSimilarExecutor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FindSimilarExecutor")
+            .field("branch_manager", &self.branch_manager)
+            .field("embedding_source", &self.embedding_source.name())
+            .field("default_branch", &self.default_branch)
+            .finish()
+    }
+}
+
+impl FindSimilarExecutor {
+    /// Build a new executor from the three injected collaborators.
+    ///
+    /// `default_branch` is the branch name the
+    /// [`McpServer::handle_find_similar`] handler falls back to when
+    /// the inbound request omits `arguments.branch`.
+    pub fn new(
+        branch_manager: Arc<BranchManager>,
+        embedding_source: Arc<dyn EmbeddingSource>,
+        default_branch: impl Into<String>,
+    ) -> Self {
+        Self {
+            branch_manager,
+            embedding_source,
+            default_branch: default_branch.into(),
+        }
+    }
+
+    /// Read-only accessor for the fall-back branch name.  Used by
+    /// the handler when `arguments.branch` is omitted.
+    #[must_use]
+    pub fn default_branch(&self) -> &str {
+        &self.default_branch
+    }
+}
+
 /// UCIL's MCP server over newline-delimited JSON-RPC 2.0.
 ///
 /// Tool *dispatch* is still a Phase-2 concern (G1/G2 fusion) — every
@@ -368,6 +467,17 @@ pub struct McpServer {
     /// handler returns the legacy `P1-W5-F09` KG+ripgrep merge envelope
     /// byte-identically per `DEC-0015` D1.
     pub g2_sources: Option<Arc<G2SourceFactory>>,
+    /// Optional `find_similar` executor (`P2-W8-F08`, master-plan §3.2
+    /// row 5 / §18 Phase 2 Week 8 line 1791).  When present,
+    /// `tools/call name == "find_similar"` is dispatched to
+    /// [`McpServer::handle_find_similar`], which embeds the inbound
+    /// snippet, runs a `LanceDB` `nearest_to` query against the
+    /// per-branch `code_chunks` table, and returns the top-N
+    /// semantically similar code chunks ranked by similarity score.
+    /// When absent, the tool falls through to the phase-1
+    /// `_meta.not_yet_implemented: true` stub path so phase-1
+    /// invariant #9 stays preserved for the unwired case.
+    pub find_similar: Option<Arc<FindSimilarExecutor>>,
 }
 
 impl Default for McpServer {
@@ -391,6 +501,7 @@ impl McpServer {
             tools: ucil_tools(),
             kg: None,
             g2_sources: None,
+            find_similar: None,
         }
     }
 
@@ -422,6 +533,7 @@ impl McpServer {
             tools: ucil_tools(),
             kg: Some(kg),
             g2_sources: None,
+            find_similar: None,
         }
     }
 
@@ -440,6 +552,29 @@ impl McpServer {
     #[must_use]
     pub fn with_g2_sources(mut self, factory: Arc<G2SourceFactory>) -> Self {
         self.g2_sources = Some(factory);
+        self
+    }
+
+    /// Attach a [`FindSimilarExecutor`] so `tools/call name ==
+    /// "find_similar"` is dispatched to
+    /// [`McpServer::handle_find_similar`] (`P2-W8-F08`,
+    /// master-plan §3.2 row 5 / §18 Phase 2 Week 8 line 1791).
+    ///
+    /// Builder method: chains off [`Self::new`],
+    /// [`Self::with_knowledge_graph`], or
+    /// [`Self::with_g2_sources`] so the daemon's startup
+    /// orchestrator can attach the executor after wiring the KG /
+    /// G2 layers.  When this builder is **not** called, the
+    /// `find_similar` tool falls through to the phase-1
+    /// `_meta.not_yet_implemented: true` stub path so phase-1
+    /// invariant #9 stays preserved (and `WO-0010`'s
+    /// `test_all_22_tools_registered` selector remains
+    /// wire-compatible).  See `DEC-0008` for the
+    /// `UCIL`-internal-trait boundary the executor's
+    /// [`EmbeddingSource`] dependency leans on.
+    #[must_use]
+    pub fn with_find_similar_executor(mut self, executor: Arc<FindSimilarExecutor>) -> Self {
+        self.find_similar = Some(executor);
         self
     }
 
