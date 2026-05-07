@@ -343,11 +343,18 @@ pub fn code_chunks_schema() -> SchemaRef {
 
 /// Replace `/` in a branch name with `-` so the per-branch directory
 /// stays flat under `<base>/branches/`.  Mirror of
-/// `storage::sanitise_branch` (private; intentional duplication so
+/// `storage::sanitise_branch` (private to that module).
+///
+/// Promoted to `pub` in `WO-0064` (`P2-W8-F04`) per the carve-out at
+/// lines 347-349 of the prior revision: "intentional duplication so
 /// `branch_manager.rs` is self-contained — a shared helper would
 /// require a new public symbol surface and is deferred to a follow-up
-/// ADR if a third caller materialises).
-fn sanitise_branch_name(name: &str) -> String {
+/// ADR if a third caller materialises".  `lancedb_indexer.rs` IS the
+/// third caller (the first two being [`BranchManager::create_branch_table`]
+/// and [`BranchManager::archive_branch_table`]) so the visibility is
+/// promoted here without an ADR per the explicit carve-out.
+#[must_use]
+pub fn sanitise_branch_name(name: &str) -> String {
     name.replace('/', "-")
 }
 

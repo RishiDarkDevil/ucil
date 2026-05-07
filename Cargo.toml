@@ -246,6 +246,23 @@ lancedb = { version = "0.16", default-features = false }
 arrow-array = "53"
 arrow-schema = "53"
 
+# `sha2` provides `Sha256` for the `file_hash` column of `code_chunks`
+# (master-plan §12.2 line 1335).  Used ONLY by
+# `crates/ucil-daemon/src/lancedb_indexer.rs` (P2-W8-F04, WO-0064) to
+# compute the content-addressed delta key that drives incremental
+# re-indexing.  Pin `0.10` (current stable line as of 2026-05-07).
+sha2 = "0.10"
+
+# `futures` provides `TryStreamExt::try_collect` used by the WO-0064
+# / P2-W8-F04 frozen acceptance tests to drain
+# `lancedb::Table::query().execute().await?` streams into a
+# `Vec<RecordBatch>` for inspection.  Test-only consumer in
+# `crates/ucil-daemon/src/executor.rs`.  `default-features = false`
+# avoids the `executor` / `thread-pool` transitive bloat — the
+# `std` and `async-await` features are sufficient for the trait
+# extensions used.
+futures = { version = "0.3", default-features = false, features = ["std", "async-await"] }
+
 [profile.dev]
 opt-level = 0
 

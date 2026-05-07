@@ -82,6 +82,39 @@ tempfile.workspace = true
 # in its `ProtobufDecode` variant.
 scip = { workspace = true }
 protobuf = { workspace = true }
+# `ucil-embeddings` provides `CodeRankEmbed` (default 137M Int8-quantised
+# embedding model, P2-W8-F02, WO-0059) and `EmbeddingChunker` (real-tokenizer
+# chunker, P2-W8-F05, WO-0060) consumed by `lancedb_indexer.rs`
+# (P2-W8-F04, WO-0064).  This is the FIRST consumer of `ucil-embeddings`
+# from `ucil-daemon`.  The dep transitively pulls `ort 2.x` with the
+# `download-binaries` CPU EP per WO-0058 — first-build cargo wall-time
+# inflation by 30-90s is expected per WO-0058 lessons line 565.
+ucil-embeddings = { path = "../ucil-embeddings" }
+# `sha2` provides `Sha256` for the `file_hash` column of `code_chunks`
+# (master-plan §12.2 line 1335).  Used by `lancedb_indexer.rs` (P2-W8-F04,
+# WO-0064) to compute the content-addressed delta key.
+sha2.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+# `futures::TryStreamExt` is needed by the WO-0064 / P2-W8-F04 frozen
+# acceptance tests in `executor.rs` to drain the
+# `lancedb::Table::query().execute().await?` stream into a `Vec<RecordBatch>`
+# for inspection of `(file_path, file_hash)` rows.  Test-only — no
+# production code consumes `futures`.
+futures.workspace = true
+# `tokenizers` is needed by the WO-0064 / P2-W8-F04 frozen acceptance
+# tests in `executor.rs` to construct a synthetic `WordLevel` tokenizer
+# inline (no on-disk model artefact required).  Test-only — production
+# code reaches the tokenizer transitively via `ucil-embeddings`.
+tokenizers.workspace = true
+# `sha2::Digest::digest` is needed by the WO-0064 / P2-W8-F04 frozen
+# acceptance tests' `TestEmbeddingSource` impl to derive deterministic
+# 768-dim vectors from a content hash.  Production code uses `sha2`
+# already via the `[dependencies]` `sha2.workspace = true` line —
+# `[dependencies]` deps are visible to tests too, so no duplicate
+# dev-dep entry is required.
+#
+# `async-trait` is needed by the `TestEmbeddingSource` `EmbeddingSource`
+# trait impl in `executor.rs`'s test-only block.  Production code uses
+# `async-trait` already via the existing `[dependencies]` line.

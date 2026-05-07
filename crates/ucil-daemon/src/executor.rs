@@ -2651,3 +2651,442 @@ pub async fn test_g1_result_fusion() {
         entry_at_30_35.conflicts
     );
 }
+
+// ── WO-0064 / P2-W8-F04 frozen acceptance tests ────────────────────────────
+//
+// `executor::test_lancedb_incremental_indexing` and
+// `executor::test_lancedb_indexer_handle_processes_events` live at MODULE
+// ROOT (NOT inside `mod tests {}`) per `DEC-0007` (frozen-selector
+// module-root placement).  The selectors resolve to
+// `ucil_daemon::executor::test_lancedb_incremental_indexing` and
+// `ucil_daemon::executor::test_lancedb_indexer_handle_processes_events`
+// respectively, which only matches when the fns are at column 0 in this
+// file.
+
+/// Synthetic-tokenizer JSON used by the WO-0064 acceptance tests.
+///
+/// Single-vocab `WordLevel` + `WhitespaceSplit` pre-tokenizer; every
+/// word maps to the `<unk>` id, so the encoded id stream's length
+/// equals the number of whitespace-separated words.  Built via the
+/// real `tokenizers` crate API per `DEC-0008` carve-out — distinct
+/// from the prohibited critical-dep substitution layers.
+#[cfg(test)]
+const SYNTHETIC_TOKENIZER_JSON_FOR_LANCEDB_F04: &str = r#"{
+    "version": "1.0",
+    "truncation": null,
+    "padding": null,
+    "added_tokens": [],
+    "normalizer": null,
+    "pre_tokenizer": {"type": "WhitespaceSplit"},
+    "post_processor": null,
+    "decoder": null,
+    "model": {
+        "type": "WordLevel",
+        "vocab": {"<unk>": 0},
+        "unk_token": "<unk>"
+    }
+}"#;
+
+/// Deterministic [`crate::lancedb_indexer::EmbeddingSource`] used by
+/// the WO-0064 acceptance tests.
+///
+/// Per `DEC-0008` §4 carve-out, this is a `UCIL`-internal trait
+/// impl — distinct from the prohibited critical-dep substitution
+/// layers for `Serena` / `LSP` / `SQLite` / `LanceDB` / `Docker`.
+/// Returns a `Vec<f32>` of length `dim` derived from a `Sha256`
+/// hash of the input — deterministic, non-trivial, and depends on
+/// input so different chunks produce different vectors.
+#[cfg(test)]
+struct TestEmbeddingSource {
+    dim: usize,
+}
+
+#[cfg(test)]
+#[async_trait::async_trait]
+impl crate::lancedb_indexer::EmbeddingSource for TestEmbeddingSource {
+    fn name(&self) -> &'static str {
+        "test"
+    }
+
+    fn dim(&self) -> usize {
+        self.dim
+    }
+
+    async fn embed(
+        &self,
+        code: &str,
+    ) -> Result<Vec<f32>, crate::lancedb_indexer::EmbeddingSourceError> {
+        use sha2::Digest as _;
+        let h = sha2::Sha256::digest(code.as_bytes());
+        let v = (0..self.dim)
+            .map(|i| f32::from(h[i % 32]) / 255.0)
+            .collect();
+        Ok(v)
+    }
+}
+
+/// Build an [`ucil_embeddings::EmbeddingChunker`] from the
+/// in-process synthetic tokenizer (no on-disk model artefact
+/// required).  The resulting chunker is owned by the caller; tests
+/// wrap it in `Arc<tokio::sync::Mutex<_>>` for the indexer.
+#[cfg(test)]
+fn build_synthetic_chunker_for_lancedb_f04() -> ucil_embeddings::EmbeddingChunker {
+    let tokenizer: tokenizers::Tokenizer = SYNTHETIC_TOKENIZER_JSON_FOR_LANCEDB_F04
+        .parse()
+        .expect("synthetic tokenizer parses");
+    ucil_embeddings::EmbeddingChunker::from_tokenizer(tokenizer)
+}
+
+/// Helper — open the per-branch `code_chunks` `LanceDB` table and
+/// return a vector of `(file_path, file_hash)` rows, plus the row
+/// count.  Used by `SA2`, `SA4`, and the handle test to inspect
+/// the post-pass state of the table without depending on the
+/// in-memory `IndexerStats`.
+#[cfg(test)]
+async fn read_table_rows_for_lancedb_f04(
+    branches_root: &Path,
+    branch_sanitised: &str,
+) -> (Vec<(String, String)>, usize) {
+    use arrow_array::cast::AsArray;
+    use futures::TryStreamExt as _;
+    use lancedb::query::{ExecutableQuery as _, QueryBase as _};
+    let vectors_dir = branches_root.join(branch_sanitised).join("vectors");
+    let conn = lancedb::connect(vectors_dir.to_str().expect("utf8 vectors"))
+        .execute()
+        .await
+        .expect("lancedb connect");
+    let table = conn
+        .open_table("code_chunks")
+        .execute()
+        .await
+        .expect("open code_chunks");
+    let count = table.count_rows(None).await.expect("count_rows");
+    let stream = table.query().limit(100_000).execute().await.expect("query");
+    let batches: Vec<_> = stream.try_collect().await.expect("collect");
+    let mut rows: Vec<(String, String)> = Vec::new();
+    for batch in batches {
+        let file_paths = batch
+            .column_by_name("file_path")
+            .expect("file_path col")
+            .as_string::<i32>();
+        let file_hashes = batch
+            .column_by_name("file_hash")
+            .expect("file_hash col")
+            .as_string::<i32>();
+        for i in 0..batch.num_rows() {
+            rows.push((
+                file_paths.value(i).to_owned(),
+                file_hashes.value(i).to_owned(),
+            ));
+        }
+    }
+    (rows, count)
+}
+
+/// Frozen acceptance test for `P2-W8-F04` per `WO-0064`.
+///
+/// Six sub-assertions (SA1-SA6) per the WO scope:
+/// 1. first pass indexes all paths;
+/// 2. second pass over unchanged files skips them;
+/// 3. touching one file reindexes only the touched file;
+/// 4. `file_hash` differs across the touched file's pre/post rows;
+/// 5. persisted `indexer-state.json` round-trips through
+///    `IndexerState::load_or_default`;
+/// 6. `code_chunks.embedding` schema is
+///    `FixedSizeList<Float32, 768>`.
+///
+/// # Panics
+///
+/// Panics on any sub-assertion failure (test-only).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::too_many_lines)]
+pub async fn test_lancedb_incremental_indexing() {
+    use std::sync::Arc;
+
+    use crate::branch_manager::BranchManager;
+    use crate::lancedb_indexer::{IndexerState, LancedbChunkIndexer};
+
+    let repo = tempfile::tempdir().expect("tmp repo");
+    let branches_root = repo.path().join(".ucil/branches");
+    tokio::fs::create_dir_all(&branches_root)
+        .await
+        .expect("mkdir branches");
+
+    // BranchManager + create_branch_table("main", None) creates the
+    // `code_chunks` table this test exercises.
+    let mgr = Arc::new(BranchManager::new(&branches_root));
+    mgr.create_branch_table("main", None)
+        .await
+        .expect("create main");
+
+    // Synthetic chunker via the WO-0060-established pattern (no
+    // on-disk tokenizer.json artefact required).
+    let chunker = Arc::new(tokio::sync::Mutex::new(
+        build_synthetic_chunker_for_lancedb_f04(),
+    ));
+
+    // TestEmbeddingSource — deterministic Sha256-derived 768-dim
+    // vectors per chunk content.
+    let source = Arc::new(TestEmbeddingSource { dim: 768 });
+
+    // Source files — multi-statement bodies so the chunker emits ≥1
+    // chunk per file under the WordLevel synthetic tokenizer.
+    let foo_path = repo.path().join("src/foo.rs");
+    let bar_path = repo.path().join("src/bar.rs");
+    tokio::fs::create_dir_all(foo_path.parent().expect("foo parent"))
+        .await
+        .expect("mkdir src");
+    let foo_original = "pub fn foo() { let x = 1; let y = 2; let z = x + y; }";
+    let bar_original = "pub fn bar() -> i32 { 42 }";
+    tokio::fs::write(&foo_path, foo_original)
+        .await
+        .expect("write foo.rs");
+    tokio::fs::write(&bar_path, bar_original)
+        .await
+        .expect("write bar.rs");
+
+    let mut indexer =
+        LancedbChunkIndexer::new(mgr.clone(), "main", chunker.clone(), source.clone());
+
+    // ── SA1 — first pass indexes all ──────────────────────────────
+    let stats1 = indexer
+        .index_paths(repo.path(), &[foo_path.clone(), bar_path.clone()])
+        .await
+        .expect("first pass");
+    assert_eq!(
+        stats1.files_scanned, 2,
+        "SA1: files_scanned=2; got stats={stats1:?}"
+    );
+    assert_eq!(
+        stats1.files_skipped_unchanged, 0,
+        "SA1: files_skipped_unchanged=0; got stats={stats1:?}"
+    );
+    assert_eq!(
+        stats1.files_indexed, 2,
+        "SA1: files_indexed=2; got stats={stats1:?}"
+    );
+    assert!(
+        stats1.chunks_inserted >= 2,
+        "SA1: chunks_inserted >= 2; got stats={stats1:?}"
+    );
+    assert_eq!(
+        stats1.chunks_failed, 0,
+        "SA1: chunks_failed=0; got stats={stats1:?}"
+    );
+
+    // Capture post-pass-1 row count for SA2's no-duplicate-inserts
+    // assertion.
+    let (_rows1, count1) = read_table_rows_for_lancedb_f04(&branches_root, "main").await;
+
+    // ── SA2 — second pass over unchanged files skips them ─────────
+    let stats2 = indexer
+        .index_paths(repo.path(), &[foo_path.clone(), bar_path.clone()])
+        .await
+        .expect("second pass");
+    assert_eq!(
+        stats2.files_scanned, 2,
+        "SA2: files_scanned=2; got stats={stats2:?}"
+    );
+    assert_eq!(
+        stats2.files_skipped_unchanged, 2,
+        "SA2: files_skipped_unchanged=2; got stats={stats2:?}"
+    );
+    assert_eq!(
+        stats2.files_indexed, 0,
+        "SA2: files_indexed=0; got stats={stats2:?}"
+    );
+    assert_eq!(
+        stats2.chunks_inserted, 0,
+        "SA2: chunks_inserted=0; got stats={stats2:?}"
+    );
+    let (_rows2, count2) = read_table_rows_for_lancedb_f04(&branches_root, "main").await;
+    assert_eq!(
+        count1, count2,
+        "SA2: row count must not grow across no-op pass; got {count1}, {count2}"
+    );
+
+    // ── SA3 — touch one file then re-index ────────────────────────
+    // Write NEW contents to bump mtime (and produce a different
+    // file_hash for SA4).  Sleep ≥1 sec so seconds-resolution mtime
+    // actually changes (Linux mtime resolution can be <1s but write
+    // semantics may collapse same-second writes — the seconds
+    // granularity in IndexerState requires a >=1s gap).
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    let foo_modified = format!("{foo_original}\nfn extra() {{}}\n");
+    tokio::fs::write(&foo_path, &foo_modified)
+        .await
+        .expect("touch foo.rs");
+
+    let stats3 = indexer
+        .index_paths(repo.path(), &[foo_path.clone(), bar_path.clone()])
+        .await
+        .expect("third pass");
+    assert_eq!(
+        stats3.files_scanned, 2,
+        "SA3: files_scanned=2; got stats={stats3:?}"
+    );
+    assert_eq!(
+        stats3.files_skipped_unchanged, 1,
+        "SA3: files_skipped_unchanged=1 (bar.rs); got stats={stats3:?}"
+    );
+    assert_eq!(
+        stats3.files_indexed, 1,
+        "SA3: files_indexed=1 (foo.rs); got stats={stats3:?}"
+    );
+    assert!(
+        stats3.chunks_inserted >= 1,
+        "SA3: chunks_inserted >= 1; got stats={stats3:?}"
+    );
+
+    // ── SA4 — file_hash differs across foo.rs's pre/post rows ─────
+    let (rows3, _count3) = read_table_rows_for_lancedb_f04(&branches_root, "main").await;
+    let foo_hashes: std::collections::BTreeSet<String> = rows3
+        .iter()
+        .filter(|(p, _)| p == "src/foo.rs")
+        .map(|(_, h)| h.clone())
+        .collect();
+    let bar_hashes: std::collections::BTreeSet<String> = rows3
+        .iter()
+        .filter(|(p, _)| p == "src/bar.rs")
+        .map(|(_, h)| h.clone())
+        .collect();
+    assert!(
+        foo_hashes.len() > 1,
+        "SA4: src/foo.rs must contain >1 distinct file_hash (pre+post touch); \
+         got {foo_hashes:?} from rows {rows3:?}"
+    );
+    assert_eq!(
+        bar_hashes.len(),
+        1,
+        "SA4: src/bar.rs must contain exactly 1 distinct file_hash (untouched); \
+         got {bar_hashes:?} from rows {rows3:?}"
+    );
+
+    // ── SA5 — persisted state JSON round-trips ────────────────────
+    let state_path = indexer.state_path();
+    let raw = tokio::fs::read_to_string(&state_path)
+        .await
+        .expect("indexer-state.json must exist post-pass-1");
+    let parsed: IndexerState = serde_json::from_str(&raw).expect("indexer-state.json parses");
+    assert!(
+        parsed
+            .file_mtimes
+            .contains_key(&PathBuf::from("src/foo.rs")),
+        "SA5: parsed state must contain src/foo.rs entry; got {parsed:?}"
+    );
+    assert!(
+        parsed
+            .file_mtimes
+            .contains_key(&PathBuf::from("src/bar.rs")),
+        "SA5: parsed state must contain src/bar.rs entry; got {parsed:?}"
+    );
+    assert_eq!(
+        parsed.schema_version,
+        IndexerState::schema_version_current(),
+        "SA5: schema_version must match current; got {parsed:?}"
+    );
+
+    // ── SA6 — embedding column schema is FixedSizeList<Float32, 768> ─
+    let vectors_dir = branches_root.join("main/vectors");
+    let conn = lancedb::connect(vectors_dir.to_str().expect("utf8"))
+        .execute()
+        .await
+        .expect("lancedb connect for SA6");
+    let table = conn
+        .open_table("code_chunks")
+        .execute()
+        .await
+        .expect("open table for SA6");
+    let schema = table.schema().await.expect("schema");
+    let embedding_field = schema
+        .field_with_name("embedding")
+        .expect("embedding column present");
+    match embedding_field.data_type() {
+        arrow_schema::DataType::FixedSizeList(inner, 768) => {
+            assert_eq!(
+                inner.data_type(),
+                &arrow_schema::DataType::Float32,
+                "SA6: embedding inner type Float32; got {:?}",
+                inner.data_type()
+            );
+        }
+        other => panic!("SA6: embedding column must be FixedSizeList<Float32, 768>; got {other:?}"),
+    }
+}
+
+/// Companion frozen test for `P2-W8-F04`.
+///
+/// Proves the
+/// [`crate::lancedb_indexer::IndexerHandle::spawn`] watcher → indexer
+/// dispatch wiring actually invokes
+/// [`crate::lancedb_indexer::LancedbChunkIndexer::index_paths`]
+/// (not just compiles).
+///
+/// # Panics
+///
+/// Panics if the spawned handle does not produce ≥1 row in the
+/// `code_chunks` table after a `Created` event is sent (test-only).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+pub async fn test_lancedb_indexer_handle_processes_events() {
+    use std::sync::Arc;
+
+    use crate::branch_manager::BranchManager;
+    use crate::lancedb_indexer::{IndexerHandle, LancedbChunkIndexer};
+    use crate::watcher::{EventSource, FileEvent, FileEventKind};
+
+    let repo = tempfile::tempdir().expect("tmp repo");
+    let branches_root = repo.path().join(".ucil/branches");
+    tokio::fs::create_dir_all(&branches_root)
+        .await
+        .expect("mkdir branches");
+
+    let mgr = Arc::new(BranchManager::new(&branches_root));
+    mgr.create_branch_table("main", None)
+        .await
+        .expect("create main");
+
+    let chunker = Arc::new(tokio::sync::Mutex::new(
+        build_synthetic_chunker_for_lancedb_f04(),
+    ));
+    let source = Arc::new(TestEmbeddingSource { dim: 768 });
+
+    // Single source file the spawned handle will process.
+    let foo_path = repo.path().join("src/foo.rs");
+    tokio::fs::create_dir_all(foo_path.parent().expect("foo parent"))
+        .await
+        .expect("mkdir src");
+    tokio::fs::write(
+        &foo_path,
+        "pub fn foo() { let x = 1; let y = 2; let z = x + y; }",
+    )
+    .await
+    .expect("write foo.rs");
+
+    let indexer = Arc::new(tokio::sync::Mutex::new(LancedbChunkIndexer::new(
+        mgr.clone(),
+        "main",
+        chunker.clone(),
+        source.clone(),
+    )));
+
+    let (tx, rx) = tokio::sync::mpsc::channel::<FileEvent>(8);
+    let handle = IndexerHandle::spawn(indexer.clone(), repo.path().to_owned(), rx);
+
+    tx.send(FileEvent {
+        path: foo_path.clone(),
+        kind: FileEventKind::Created,
+        source: EventSource::PostToolUseHook,
+    })
+    .await
+    .expect("send create event");
+
+    drop(tx);
+    handle.shutdown().await.expect("join handle");
+
+    let (_rows, count) = read_table_rows_for_lancedb_f04(&branches_root, "main").await;
+    assert!(
+        count >= 1,
+        "indexer-handle must dispatch the Created event \
+         to index_paths and produce ≥1 row; got {count}"
+    );
+}
