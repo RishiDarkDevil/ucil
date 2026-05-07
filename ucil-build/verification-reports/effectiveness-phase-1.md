@@ -1,8 +1,8 @@
 # Effectiveness Report — Phase 1
 
-Run at: 2026-05-07T06:07:39Z
-Commit: 1f20c3bac6348cfb50d2ffd008ad0a1e6282a7fb
-Branch: feat/WO-0066-find-similar-mcp-tool
+Run at: 2026-05-08T00:55:00Z
+Commit: fc50ef0426f0ed2001e7654e42113203c833deaa
+Branch: feat/WO-0067-classifier-and-reason-parser
 Evaluator: effectiveness-evaluator (fresh session, `claude-opus-4-7`)
 
 ## Summary
@@ -13,53 +13,37 @@ Evaluator: effectiveness-evaluator (fresh session, `claude-opus-4-7`)
 | Scenarios run | 1 |
 | Scenarios skipped (tool_not_ready) | 0 |
 | Scenarios skipped (defect) | 0 |
-| Scenarios PASS | 0 |
+| Scenarios PASS | 1 |
 | Scenarios WIN | 0 |
-| Scenarios FAIL | 1 |
+| Scenarios FAIL | 0 |
 
-**Gate verdict: FAIL (per strict contract reading)** — the single
-phase-1-eligible scenario (`nav-rust-symbol`) was executed end-to-end. Both
-UCIL and baseline produced substantively-correct answers ("no qualifying
-functions exist", matching ground truth). LLM judges scored UCIL 5/5/5/3 and
-baseline 5/5/5/4 across `correctness / caller_completeness / precision /
-formatting`. Weighted means: UCIL **4.8462**, baseline **4.9231**, **Δ
-weighted = −0.0769** (UCIL ≈ baseline within judge noise).
+**Gate verdict: PASS** — the single phase-1-eligible scenario
+(`nav-rust-symbol`) was executed end-to-end on the augmented `rust-project`
+fixture (per ADR DEC-0017). Both UCIL and baseline produced
+substantively-correct answers. All three acceptance checks passed on both
+sides. LLM judges scored UCIL 5/5/5/5 and baseline 5/4/5/5 across
+`correctness / caller_completeness / precision / formatting`.
+Weighted means: UCIL **5.0000**, baseline **4.6923**, **Δ weighted =
++0.3077** (UCIL beats baseline within the WIN threshold of +1.0 → PASS but
+not WIN).
 
-**Why FAIL:**
-1. Acceptance check #3 (`cites at least one .rs:LINE`) was RED on the **UCIL**
-   side. Per `.claude/agents/effectiveness-evaluator.md`
-   §6 ("FAIL: acceptance_checks red on UCIL run"), this triggers a per-scenario
-   FAIL. (Baseline also RED on this run — see historical table below.)
-2. The UCIL judge gave `formatting = 3` while baseline got `formatting = 4`
-   (Δ = −1.0, exceeds the 0.5 tolerance window). Per the same §6 ("OR UCIL
-   underperforms baseline by > 0.5 on any criterion"), this is a second
-   independent FAIL trigger.
+Per `.claude/agents/effectiveness-evaluator.md` §6 "Per-scenario verdict":
+- PASS: `acceptance_checks` green AND `ucil_score >= baseline_score - 0.5`
+  on every criterion. **Both conditions hold for this run.**
 
-Both fail-triggers are **driven by a single root cause**: the truthful
-answer to this task on this fixture ("no qualifying functions") naturally
-contains no `.rs:LINE` tokens. Whether either side incidentally emits one
-in evidence prose is stochastic LLM narrative style. On this run *neither*
-side emitted, but the UCIL judge tied a one-point formatting deduction
-explicitly to the missing token, while the baseline judge granted formatting
-the benefit of the doubt for the same null-result adaptation. The judges
-ran on independent fresh sessions; the asymmetry sits inside known judge
-noise.
-
-This is the same **structural / scenario-fixture-alignment issue** already
-escalated and resolved-as-deferred in
-`ucil-build/escalations/20260507T0357Z-effectiveness-nav-rust-symbol-rs-line-flake.md`.
-The UCIL surface (`find_definition` real KG-backed, `find_references`
-Phase-1 stub awaiting `P2-W7-F05`) is unchanged from the prior runs; the
-diff from the previous evaluation commit (`762bd5d`) to this commit
-(`1f20c3b`) touches **only** docs / verification-report / coverage files
-— no UCIL source changes. See **Advisory** below.
+The recurrent rs-line acceptance flake documented in
+`ucil-build/escalations/20260507T0357Z-effectiveness-nav-rust-symbol-rs-line-flake.md`
+is no longer load-bearing: with the augmented fixture having a real
+`retry_with_backoff` helper, both sides naturally cite `.rs:LINE`
+references. The flake mode that drove three prior FAILs on this scenario
+is closed by ADR DEC-0017's fixture augmentation.
 
 ## Tool-availability probe
 
-`tools/list` against
-`ucil-daemon mcp --stdio --repo /tmp/ucil-mcp-probe/repo` reported all 22
-§3.2 tools registered. The two tools required by the scenario
-(`find_definition`, `find_references`) were both present.
+`tools/list` against `target/debug/ucil-daemon mcp --stdio --repo
+/tmp/ucil-eval-nav-rust-symbol/ucil` reported all 22 §3.2 tools registered.
+The two tools required by the scenario (`find_definition`,
+`find_references`) were both present.
 
 | tool | listed? | tools/call returns real data? |
 |---|---|---|
@@ -71,29 +55,36 @@ the probe is `tools/list`, and a tool is "operational" if registered +
 responsive. `find_references` is registered and the call returns a
 well-formed JSON-RPC `result` envelope (no transport error). The scenario
 therefore runs (rather than being marked `skipped_tool_not_ready`); the
-consequences of the stub for this scenario are inert here because the
-ground-truth answer requires no `find_references` calls (nothing to
-cross-reference when nothing exists).
+consequences of the stub for this scenario are mitigated because UCIL's
+`search_code` + `find_definition` together provide enough information for
+the agent to enumerate callers (UCIL did exactly this, see "UCIL run"
+below).
 
 ## Scenarios
 
-| scenario | tools_present | tools_real | UCIL pass? | UCIL score | Baseline score | Δ weighted | verdict |
+| scenario | tools_present | tools_real | UCIL acceptance | UCIL weighted | Baseline weighted | Δ weighted | verdict |
 |---|---|---|---|---|---|---|---|
-| nav-rust-symbol | find_definition, find_references | find_definition (real); find_references (stub — `_meta.not_yet_implemented: true`) | **acceptance partial: 2 of 3 checks PASS, `cites file:line` FAIL on UCIL (and baseline)** | 4.8462 | 4.9231 | −0.0769 | **FAIL** |
+| nav-rust-symbol | find_definition, find_references | find_definition (real); find_references (stub) | 3/3 PASS | 5.0000 | 4.6923 | +0.3077 | **PASS** |
 
 ## Per-scenario detail
 
 ### nav-rust-symbol
 
-**Fixture**: `tests/fixtures/rust-project` — a self-contained expression
-parser/evaluator. `Cargo.toml` declares zero dependencies;
-`grep -rE "retry|backoff|exponential|http|reqwest|hyper|async"` across the
-fixture returns zero matches.
+**Fixture**: `tests/fixtures/rust-project` (augmented per ADR DEC-0017 with
+`src/http_client.rs` containing real `retry_with_backoff` +
+`fetch_startup_banner`, plus a call site at `src/main.rs:24`).
+Per-file SHA-256 inventory at
+`/tmp/ucil-eval-nav-rust-symbol/fixture-checksum.txt`.
 
-**Ground truth**: "no HTTP-retry exponential-backoff functions exist".
-Confirmed by independent grep of the fixture (per-file SHA-256 inventory at
-`/tmp/ucil-eval-nav-rust-symbol/fixture-checksum.txt`, byte-for-byte
-identical to the prior run at commit `762bd5d`).
+**Ground truth**: exactly one helper function directly implements the
+exponential-backoff retry loop —
+`rust_project::http_client::retry_with_backoff` at
+`src/http_client.rs:37`, with one production caller at
+`src/http_client.rs:64` (inside `fetch_startup_banner`), one doctest
+caller at `src/http_client.rs:26`, and three unit-test callers at
+`src/http_client.rs:84`, `91`, `110`. Whether `fetch_startup_banner`
+itself qualifies (as a delegating wrapper) is interpretation-dependent;
+both readings are admissible per the scenario task wording.
 
 **Setup**
 - `/tmp/ucil-eval-nav-rust-symbol/ucil/` — fresh fixture copy for UCIL run
@@ -102,224 +93,140 @@ identical to the prior run at commit `762bd5d`).
 - Identical task prompt for both sides, captured in `task.md`
 
 **UCIL run**
-- Transport: `ucil-daemon mcp --stdio --repo /tmp/ucil-eval-nav-rust-symbol/ucil`
+- Transport: `target/debug/ucil-daemon mcp --stdio --repo /tmp/ucil-eval-nav-rust-symbol/ucil`
 - MCP config: `--mcp-config mcp-ucil.json --strict-mcp-config`
 - Settings: `--setting-sources ""` (no project / user / local settings)
-- Session: `90fc8187-ea02-43d9-ac36-d5841e347dae` (fresh, deterministic UUID)
+- Session: `6f40178b-3373-438c-9c70-ed2322a9f0ef` (fresh, deterministic UUID)
 - Model: `claude-opus-4-7`
-- `duration_ms`: 68 381 (≈ 68 s)
-- `num_turns`: 13
-- `total_cost_usd`: 0.3361
-- `usage.input_tokens`: 18
-- `usage.cache_read_input_tokens`: 325 472
-- `usage.cache_creation_input_tokens`: 13 569
-- `usage.output_tokens`: 3 517
-- `is_error`: false
-- Output: 42 lines, written to `/tmp/ucil-eval-out/nav-rust-symbol.md`
+- `duration_ms`: 198 616 (≈ 199 s)
+- `num_turns`: 31 (max_turns capped at 30; agent was thorough — used `find_definition`,
+  `search_code`, `understand_code`, `understand_code` per file etc.)
+- `total_cost_usd`: 1.3091
+- `usage.input_tokens`: 70
+- `usage.cache_read_input_tokens`: 1 020 973
+- `usage.cache_creation_input_tokens`: 75 594
+- `usage.output_tokens`: 13 008
+- `is_error`: true (`error_max_turns`) — but the output file was written and
+  fully formed before the cap was reached. The cap fired during a final
+  verification turn (UCIL was double-checking its caller list). Output is
+  substantively complete and acceptance-passing.
+- Output: 14 lines, written to `/tmp/ucil-eval-out/nav-rust-symbol.md`,
+  preserved at `ucil-output.md`
 
 **Baseline run**
 - Transport: no MCP servers (`mcp-empty.json` with empty `mcpServers`)
 - MCP config: `--mcp-config mcp-empty.json --strict-mcp-config`
 - Settings: `--setting-sources ""` (no project / user / local settings)
-- Session: `c50960b9-0857-4798-a2c7-156bafe9ae87` (fresh, deterministic UUID)
+- Session: `c3dfd64c-d531-43ae-beb5-3c0a6ec6bc8b` (fresh, deterministic UUID)
 - Model: `claude-opus-4-7`
-- `duration_ms`: 57 983 (≈ 58 s)
+- `duration_ms`: 91 763 (≈ 92 s)
 - `num_turns`: 16
-- `total_cost_usd`: 0.3656
+- `total_cost_usd`: 0.4914
 - `usage.input_tokens`: 21
-- `usage.cache_read_input_tokens`: 394 544
-- `usage.cache_creation_input_tokens`: 12 757
-- `usage.output_tokens`: 3 514
-- `is_error`: false
-- Output: 28 lines, written to `/tmp/ucil-eval-out/nav-rust-symbol.md`
+- `usage.cache_read_input_tokens`: 468 104
+- `usage.cache_creation_input_tokens`: 19 107
+- `usage.output_tokens`: 5 486
+- `is_error`: false (`success`)
+- Output: 23 lines, written to `/tmp/ucil-eval-out/nav-rust-symbol.md`,
+  preserved at `baseline-output.md`
 
 **Acceptance checks** (run after copying each side's output to `/tmp/ucil-eval-out/nav-rust-symbol.md`)
 
 | check | UCIL | Baseline |
 |---|---|---|
 | `test -f /tmp/ucil-eval-out/nav-rust-symbol.md` | PASS | PASS |
-| `test $(wc -l < /tmp/ucil-eval-out/nav-rust-symbol.md) -ge 5` | PASS (42) | PASS (28) |
-| `grep -qE "\.rs:[0-9]+" /tmp/ucil-eval-out/nav-rust-symbol.md` | **FAIL** | **FAIL** |
+| `test $(wc -l < ...) -ge 5` | PASS (14) | PASS (23) |
+| `grep -qE "\.rs:[0-9]+" ...` | PASS | PASS |
 
-The UCIL output cites parser line numbers as "`src/parser.rs at lines 581,
-892, 914`" (prose form, not `<file>.rs:<line>` token form). The baseline
-output enumerates the crate layout (`lib.rs`, `main.rs`, `eval_ctx.rs`,
-…) without any line-number citation. Neither side produced a literal
-`.rs:NUMBER` token because both correctly concluded "no qualifying
-functions exist" and there was nothing to cite. This is the same flake
-mode documented in
-`ucil-build/escalations/20260507T0357Z-effectiveness-nav-rust-symbol-rs-line-flake.md`,
-and matches the f4adc41 case in the historical record below.
+The augmented fixture's positive ground truth cleanly drives both sides to
+emit `.rs:LINE` citations naturally (UCIL: `src/http_client.rs:37`,
+`src/http_client.rs:64`, etc.; baseline: same set + `src/main.rs:24`,
+`src/http_client.rs:124`).
 
-**Judge scoring** (fresh `claude -p` session per side, run from `/tmp` so
-the repo's project hooks/settings cannot interfere; `--setting-sources ""`,
-`--strict-mcp-config` with empty server map; rubric copied verbatim from
-the scenario yaml; ground truth disclosed to the judge so it can score
-correctness against the truth, not against the agent's own claims)
+**Judge scoring** (fresh `claude -p` session per side, run from `/tmp` with
+`--setting-sources ""` and `--strict-mcp-config` against an empty server
+map; rubric copied verbatim from the scenario yaml; ground truth disclosed
+to the judge so it can score correctness against the truth, not against
+the agent's own claims)
 
 | criterion | weight | UCIL | Baseline |
 |---|---|---|---|
 | correctness         | 3.0 | 5 | 5 |
-| caller_completeness | 2.0 | 5 | 5 |
+| caller_completeness | 2.0 | **5** | **4** |
 | precision           | 1.0 | 5 | 5 |
-| formatting          | 0.5 | **3** | **4** |
-| **weighted mean**   |     | **4.8462** | **4.9231** |
+| formatting          | 0.5 | 5 | 5 |
+| **weighted mean**   |     | **5.0000** | **4.6923** |
 
-UCIL judge: "Correctly identifies the truthful empty result with thorough
-negative evidence (Cargo.toml inspection, dependency check, exhaustive
-keyword scan). No fabricated functions or callers. Formatting deviates
-from the prescribed H2-per-function structure (uses Summary/Evidence
-sections instead) and writes line references as 'parser.rs at lines 581,
-892, 914' rather than the canonical file.rs:line token, which is why the
-acceptance grep failed."
+UCIL judge: "The solution correctly identifies
+`rust_project::http_client::retry_with_backoff` as the qualifying function
+with the exact definition line (src/http_client.rs:37) and explicitly
+justifies treating `fetch_startup_banner` as a caller rather than a
+separate qualifying function — an interpretation explicitly allowed by
+the ground truth. All five callers from the ground truth are listed with
+correct file:line references (26 doctest, 64 fetch_startup_banner, 84/91/110
+tests), with no fabricated or stdlib callers. The H2-per-function
+structure with a bulleted caller list is followed cleanly, and the
+explanatory note adds clarity without violating the format."
 
-Baseline judge: "The solution correctly identifies that no qualifying
-functions exist, matching the ground truth, and provides strong evidence
-(crate layout, dependency list, exhaustive keyword grep). The acceptance
-check for `.rs:<line>` tokens is inapplicable to the correct answer.
-Formatting is slightly docked because the spec called for H2-per-function
-structure; with no functions, the document reasonably uses an H2 for the
-search summary instead, which is a sensible adaptation."
+Baseline judge: "Both qualifying functions are correctly identified with
+accurate definition lines (`retry_with_backoff` at `src/http_client.rs:37`
+and `fetch_startup_banner` at `src/http_client.rs:62`)…The one omission is
+the doctest caller at `src/http_client.rs:26`, which the task's 'every
+place it is CALLED FROM' phrasing would include, costing a point on
+caller_completeness. Formatting follows the required H2-per-function with
+bulleted caller lists, and the extra intro paragraph does not violate the
+structure."
 
-**Verdict: FAIL** (per strict contract: UCIL acceptance_checks contain a
-red AND UCIL formatting underperforms baseline by 1.0 — both same
-narrative-style coin flip on `.rs:LINE` token emission).
+**Verdict: PASS.** Acceptance checks all green on UCIL. UCIL >= baseline
+on every criterion (UCIL beats baseline by +1 on `caller_completeness`,
+ties on the other three). UCIL weighted mean (5.0000) exceeds baseline
+(4.6923) by +0.3077, comfortably above the −0.5 PASS floor but below the
++1.0 WIN threshold — a clean PASS, not a WIN.
 
 ## Observations
 
-- **Substantive parity, structural fail.** The UCIL surface is unchanged
-  from the prior runs (no source diff between `762bd5d` and `1f20c3b`
-  touches UCIL crates). Both UCIL and baseline correctly identified the
-  negative ground truth ("no qualifying functions"). All three weighted
-  criteria with weight ≥ 1.0 scored 5/5 on both sides. The only
-  differentiator is the 0.5-weighted `formatting` criterion (UCIL 3,
-  baseline 4) — judge noise, with the deduction explicitly anchored to the
-  missing `.rs:LINE` token (the same coin flip that drives the acceptance
-  check). Net Δ-weighted = −0.0769, well within judge noise.
-
-- **Cost-edge to baseline (informational).** UCIL was ~1.18× slower
-  (68 s vs 58 s) and used ~83 % of the baseline's cache-read tokens
-  (325 K vs 395 K). When the task happens to be solvable by
-  `Glob`/`Grep`/`Read` alone, the MCP tool-schema overhead is real time.
-  For a positive-match task (real HTTP retry code to discover and
-  cross-reference), the advantage shape would flip. UCIL's total_cost_usd
-  was actually slightly lower this run (0.3361 vs 0.3656) — cost is
-  driven primarily by output tokens, which were near-identical
-  (3517 vs 3514).
-
-- **Stochastic acceptance-check satisfaction (recurrent).** Across the
-  four known runs at four commits:
-
-  | commit | UCIL acceptance #3 | Baseline acceptance #3 |
-  |---|---|---|
-  | `70aa72e` | PASS | PASS |
-  | `f4adc41` | FAIL | FAIL |
-  | `762bd5d` | FAIL | PASS |
-  | `1f20c3b` (this run) | FAIL | FAIL |
-
-  Same fixture, same scenario, same UCIL surface, four different
-  acceptance-check pairs. **This is definitive evidence that the rs-line
-  check on the negative-ground-truth `rust-project` × `nav-rust-symbol`
-  pairing is a flake.** This run is the third instance of the
-  documented flake mode.
-
-- **`find_references` stub did not bite this scenario.** The ground-truth
-  answer requires no `find_references` call (nothing to cross-reference
-  when nothing exists). When `P2-W7-F05` lands, a follow-up run at that
-  commit will exercise the positive-match path and the stub will become
-  load-bearing.
-
-- **Both sides disambiguated the `**` exponentiation operator from
-  exponential backoff.** The fixture's `BinOp::Pow` arms in `parser.rs`,
-  `util.rs`, `eval_ctx.rs`, and `transform.rs` implement `aᵇ` for the toy
-  expression language, not retry-delay computation. UCIL explicitly
-  noted that the only `loop` matches are tokenizer/parser inner loops in
-  `parser.rs`; baseline's grep set explicitly excluded math operators
-  and ran negative on every retry/backoff/HTTP keyword.
-
-- **Reproducibility note.** Judge sessions ran from `cd /tmp` with
-  explicit `--setting-sources ""` to avoid the repo Stop-hook hijacking
-  documented in the prior reports. Both judges returned clean JSON on
-  first attempt.
-
-## Advisory — scenario-fixture alignment defect (recurrent)
-
-This run records a **strict-letter FAIL** that is not driven by a UCIL
-regression. The mechanism is the one already escalated and
-resolved-as-deferred in
-`ucil-build/escalations/20260507T0357Z-effectiveness-nav-rust-symbol-rs-line-flake.md`:
-
-1. The scenario `nav-rust-symbol` task asks for "file:line of [each
-   function's] definition" and "file:line of every caller".
-2. The fixture `rust-project` contains zero qualifying functions (an
-   expression parser/evaluator with no HTTP, no async, no retry).
-3. A truthful answer ("no qualifying functions exist") therefore contains
-   no file:line citations naturally.
-4. Acceptance check #3 (`grep -qE "\.rs:[0-9]+"`) requires at least one
-   `.rs:LINE` token in the output.
-5. Whether the agent produces a `.rs:LINE` token incidentally (in module
-   summaries, file inventories, etc.) is **stochastic LLM narrative
-   style**. Four runs at four commits have produced four different
-   acceptance-check pair verdicts on this single check.
-
-**Recommended scenario-fixture remediations** (to be triaged by user; see
-the existing escalation): (a) augment the `rust-project` fixture with a
-`http_client.rs` containing a real exponential-backoff function and at
-least one caller, so the scenario has a positive ground truth and the
-acceptance checks are naturally satisfied; or (b) split the rs-line check
-so it only applies when the agent actually claims to have found a
-function (e.g., gate it on `grep -q "^## " /tmp/ucil-eval-out/nav-rust-symbol.md`);
-or (c) accept that this scenario-fixture pairing is a noisy-PASS / noisy-
-FAIL and document that callers should not gate on this single check
-unconditionally.
-
-The existing escalation explicitly defers all three options to a Phase-8
-release-prep effectiveness audit (gated on planner / ADR approval, since
-both `tests/fixtures/**` and `tests/scenarios/**` are protected by root
-CLAUDE.md). **No new escalation is filed for this run** — the defect class
-is unchanged, and the prior escalation's resolution note specifies that
-"the autonomous loop should not treat a FAIL on this scenario as a UCIL
-regression without checking the report's Substantive judge-tie line".
-
-## Substantive judge-tie line
-
-Per-criterion deltas (UCIL − Baseline):
-- correctness: 0
-- caller_completeness: 0
-- precision: 0
-- formatting: −1 (entirely attributable to the missing `.rs:LINE` token,
-  which is the same coin flip as acceptance check #3)
-
-Weighted-mean delta: **−0.0769** (UCIL 4.8462 vs baseline 4.9231).
-
-UCIL did not regress on any substantive criterion. The single-point
-formatting gap is a downstream symptom of the same narrative-style flake
-that drives acceptance check #3. The substantive UCIL behaviour is
-**indistinguishable from baseline** on this negative-ground-truth scenario.
-
-## Gate contract (why this run is FAIL)
-
-Per `.claude/agents/effectiveness-evaluator.md` §6 "Per-scenario verdict":
-
-> **PASS**: `acceptance_checks` green AND `ucil_score >= baseline_score - 0.5` on every criterion.
-> **WIN**: UCIL outperforms baseline by at least 1.0 on the weighted-average score.
-> **FAIL**: `acceptance_checks` red on UCIL run, OR UCIL underperforms baseline by > 0.5 on any criterion.
-
-Two FAIL triggers fire on this run:
-1. UCIL acceptance_check `cites at least one file:line` is RED (baseline
-   also RED on this run, but the rubric reads UCIL acceptance independently).
-2. UCIL `formatting` = 3 vs baseline `formatting` = 4 (Δ = −1.0 > 0.5).
-
-Both triggers are downstream of the same narrative-style coin flip
-documented above and in the existing escalation. The substantive tie at
-4.8462 / 4.9231 weighted-mean (Δ = −0.0769) is recorded but does not
-override the strict-letter verdict.
-
-Per `.claude/agents/effectiveness-evaluator.md` §"Exit code":
-
-> 0 if gate passes, 1 if any scenario FAIL, 2 on evaluator-internal error.
-
-One scenario FAIL recorded → **exit 1**.
+- **Fixture augmentation worked as designed.** The DEC-0017 fixture
+  augmentation closes out the recurrent rs-line flake. Across the four
+  prior runs (commits `70aa72e` → `f4adc41` → `762bd5d` → `1f20c3b`),
+  acceptance check #3 produced four different verdict pairs because both
+  sides were guessing-at-citations on a negative-ground-truth fixture.
+  This run, with one positive ground-truth function to cite, both sides
+  trivially satisfied the check. The flake mode is closed for this
+  scenario × fixture pairing.
+- **UCIL hit max_turns=30 but produced complete output.** The
+  `error_max_turns` is cosmetic for this run — the output file was
+  written and fully formed before the cap. UCIL ran `find_definition`
+  on `retry_with_backoff` (got `src/http_client.rs:37` via tree-sitter+kg),
+  then leaned on `search_code` to enumerate callers (since `find_references`
+  is a Phase-1 stub). The agent then verified each caller line with
+  `understand_code`. A future run after `P2-W7-F05` lands `find_references`
+  should converge in 10–15 turns instead.
+- **UCIL won caller_completeness by catching the doctest caller
+  (line 26).** This is a real signal: UCIL's `search_code` returned the
+  doc-comment example match, and the agent included it. Baseline's
+  `grep -rn "retry_with_backoff"` would have surfaced the same match,
+  but the baseline agent narrated only the production + test callers,
+  not the doctest. Net: +1 caller_completeness for UCIL → +0.3077
+  weighted, the only material delta.
+- **Cost-edge favors baseline (informational).** UCIL was ~2.16× slower
+  (199 s vs 92 s) and consumed ~2.4× the tokens (1.10M vs 487K
+  cache_read; 13K vs 5.5K output) and ~2.7× the cost ($1.31 vs $0.49).
+  The slowdown is concentrated in the max_turns cap fight (`find_references`
+  stub forces UCIL to fall back to `search_code` + `understand_code`,
+  which UCIL then verifies twice). When `find_references` lands proper, the
+  cost shape should narrow significantly. Substantive accuracy still
+  favored UCIL (+1 on caller_completeness with no precision regression).
+- **`find_references` stub mitigation.** UCIL successfully worked around
+  the stub by calling `search_code` (which returns real text-search hits
+  including the doctest) and then using `understand_code` for line-level
+  context. This is the "graceful degradation" path documented in the
+  ucil-daemon design — the scenario didn't have to be skipped.
+- **Token cost shape.** UCIL output_tokens (13 008) was 2.37× baseline
+  (5 486), driven by UCIL's verbose thinking traces. UCIL cache_read was
+  2.18× baseline. UCIL's larger input footprint reflects the MCP tool
+  schemas being attached (22 tool definitions vs 0). When a task is
+  symbol-heavy (positive matches found), this overhead amortises; when
+  it's text-search-only, baseline can be cheaper (as on this run).
 
 ## Reproducibility
 
@@ -341,8 +248,26 @@ All artefacts of this run are preserved under
 - `judge-ucil.json`, `judge-baseline.json` — extracted scoring JSON
 - `ucil-session-id`, `baseline-session-id`, `judge-ucil-session-id`,
   `judge-baseline-session-id` — session UUIDs
-- `fixture-checksum.txt` — per-file SHA-256 of the fixture (9 files)
+- `fixture-checksum.txt` — per-file SHA-256 of the fixture (10 files)
 
-Tempdirs are cleaned by the evaluator's `find -delete` step on exit (per
-agent §"Exit cleanly"); the artefacts above must be collected before
-the cleanup if a future operator wants to inspect a specific run by hand.
+## Gate contract (why this run is PASS)
+
+Per `.claude/agents/effectiveness-evaluator.md` §6 "Per-scenario verdict":
+
+> **PASS**: `acceptance_checks` green AND `ucil_score >= baseline_score - 0.5` on every criterion.
+> **WIN**: UCIL outperforms baseline by at least 1.0 on the weighted-average score.
+> **FAIL**: `acceptance_checks` red on UCIL run, OR UCIL underperforms baseline by > 0.5 on any criterion.
+
+PASS conditions both hold:
+1. All three UCIL acceptance_checks GREEN.
+2. Per-criterion deltas (UCIL − Baseline): correctness 0, caller_completeness +1, precision 0, formatting 0.
+   No criterion shows UCIL underperforming. The minimum criterion delta is 0; the maximum is +1.
+
+WIN condition does NOT hold (Δ weighted = +0.3077, below the +1.0
+threshold). Verdict is PASS.
+
+Per `.claude/agents/effectiveness-evaluator.md` §"Exit code":
+
+> 0 if gate passes, 1 if any scenario FAIL, 2 on evaluator-internal error.
+
+Zero scenarios FAIL → **exit 0**.
