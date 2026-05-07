@@ -111,9 +111,10 @@ tokenizers.workspace = true
 # `sha2::Digest::digest` is needed by the WO-0064 / P2-W8-F04 frozen
 # acceptance tests' `TestEmbeddingSource` impl to derive deterministic
 # 768-dim vectors from a content hash.  Production code uses `sha2`
-# transitively via the `[dependencies]` `sha2.workspace = true` line.
-sha2.workspace = true
+# already via the `[dependencies]` `sha2.workspace = true` line —
+# `[dependencies]` deps are visible to tests too, so no duplicate
+# dev-dep entry is required.
+#
 # `async-trait` is needed by the `TestEmbeddingSource` `EmbeddingSource`
 # trait impl in `executor.rs`'s test-only block.  Production code uses
-# `async-trait` via the existing `[dependencies]` line.
-async-trait.workspace = true
+# `async-trait` already via the existing `[dependencies]` line.
