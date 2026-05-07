@@ -6678,9 +6678,13 @@ dependencies = [
 name = "ucil-embeddings"
 version = "0.1.0"
 dependencies = [
+ "arrow-array",
+ "arrow-schema",
  "criterion",
+ "lancedb",
  "ndarray 0.16.1",
  "ort",
+ "rand 0.8.5",
  "serde",
  "tempfile",
  "thiserror 2.0.18",
