@@ -119,31 +119,35 @@ pub const SEARCH_CODE_MAX_RESULTS: usize = 500;
 
 /// Default value for `find_similar`'s `arguments.max_results`.
 ///
-/// Ten covers the common "show me the closest semantic matches" use
-/// case while keeping the response envelope under typical context
-/// budgets.  Paired with [`FIND_SIMILAR_MAX_RESULTS_CAP`], which
-/// caps whatever the caller asks for so a pathological request
-/// cannot drain the LanceDB query (master-plan §3.2 line 219).
+/// Ten covers the common "show me the closest semantic matches"
+/// use case while keeping the response envelope under typical
+/// context budgets.  Paired with
+/// [`FIND_SIMILAR_MAX_RESULTS_CAP`], which caps whatever the caller
+/// asks for so a pathological request cannot drain the `LanceDB`
+/// query (master-plan §3.2 line 219).
 pub const FIND_SIMILAR_DEFAULT_MAX_RESULTS: u64 = 10;
 
 /// Saturating cap on `find_similar`'s `arguments.max_results`.
 ///
-/// LanceDB's flat-scan `nearest_to(...)` cost grows linearly in the
-/// table's row count when no ANN index has been created (the small
-/// fixture tables this WO exercises do not need an index per the
-/// `scope_out` carve-out); we cap the per-call result count at 100
-/// to keep the response envelope finite.
+/// `LanceDB`'s flat-scan `nearest_to(...)` cost grows linearly in
+/// the table's row count when no ANN index has been created (the
+/// small fixture tables this WO exercises do not need an index per
+/// the `scope_out` carve-out); we cap the per-call result count
+/// at 100 to keep the response envelope finite.
 pub const FIND_SIMILAR_MAX_RESULTS_CAP: u64 = 100;
 
-/// Per-call deadline for the embedding + `LanceDB` `nearest_to`
-/// + `RecordBatch` drain combined.  Wraps every `.await` in
-/// `handle_find_similar` per `.claude/rules/rust-style.md` "every
-/// `.await` that touches IO is wrapped in `tokio::time::timeout`".
+/// Per-call deadline for `find_similar`'s `LanceDB` query path.
+///
+/// Combined budget for the embedding + `LanceDB` `nearest_to` +
+/// `RecordBatch` drain.  Wraps every `.await` in
+/// `handle_find_similar` per `.claude/rules/rust-style.md`'s
+/// invariant that every `.await` touching IO is wrapped in
+/// `tokio::time::timeout` with a named const.
 ///
 /// Five seconds is generous for the test corpus's ≤10 chunks and
-/// tight enough to bound a wedged LanceDB call.  Production-side
-/// tuning is deferred to a follow-up WO once the daemon's startup
-/// orchestrator wires in the production embedder.
+/// tight enough to bound a wedged `LanceDB` call.  Production-side
+/// tuning is deferred to a follow-up `WO` once the daemon's
+/// startup orchestrator wires in the production embedder.
 pub const FIND_SIMILAR_QUERY_TIMEOUT: Duration = Duration::from_secs(5);
 
 // ── Errors ───────────────────────────────────────────────────────────────────
@@ -367,10 +371,11 @@ pub fn ucil_tools() -> Vec<ToolDescriptor> {
 
 // ── Server ──────────────────────────────────────────────────────────────────
 
-/// Per-branch `find_similar` executor — bundles the dependencies the
-/// `handle_find_similar` MCP handler needs to embed a query snippet
-/// and run a `LanceDB` `nearest_to` query against the per-branch
-/// `code_chunks` table.
+/// Per-branch `find_similar` executor.
+///
+/// Bundles the dependencies the `handle_find_similar` MCP handler
+/// needs to embed a query snippet and run a `LanceDB` `nearest_to`
+/// query against the per-branch `code_chunks` table.
 ///
 /// Master-plan §3.2 line 219 freezes the `find_similar` tool's
 /// contract ("Find code similar to a given snippet or pattern").
@@ -722,6 +727,11 @@ impl McpServer {
                 return crate::understand_code::handle_understand_code(id, params, kg);
             }
         }
+        if name == "find_similar" {
+            if let Some(exec) = self.find_similar.as_ref() {
+                return Self::handle_find_similar(id, params, exec).await;
+            }
+        }
 
         // Phase-1 invariant #9: every tool handler is a stub that
         // returns `_meta.not_yet_implemented: true`.  Downstream phases
@@ -1015,6 +1025,553 @@ impl McpServer {
 
         envelope
     }
+
+    /// Handle the `find_similar` MCP tool (`P2-W8-F08`,
+    /// master-plan §3.2 row 5 / §18 Phase 2 Week 8 line 1791).
+    ///
+    /// Embeds the inbound `arguments.snippet` via the injected
+    /// [`EmbeddingSource`], opens the per-branch `code_chunks`
+    /// `LanceDB` table (master-plan §12.2 lines 1321-1346) via
+    /// [`BranchManager::branch_vectors_dir`] (the same connect /
+    /// `open_table` pattern `LancedbChunkIndexer::index_paths`
+    /// uses at `lancedb_indexer.rs:660-672` per `WO-0064`), runs
+    /// `Table::query().nearest_to(query_vec).limit(N).execute()`
+    /// (the `WO-0065` bench precedent at
+    /// `crates/ucil-embeddings/benches/vector_query.rs:300-307`),
+    /// drains the result `RecordBatchStream`, and projects the
+    /// 12-column rows + the synthetic `_distance` column onto
+    /// `_meta.hits[]` ranked by similarity.
+    ///
+    /// Per `DEC-0008` the [`EmbeddingSource`] is a UCIL-internal
+    /// trait seam; `LanceDB` is exercised end-to-end (no mocking).
+    ///
+    /// # Arguments
+    ///
+    /// * `arguments.snippet` — REQUIRED string.  Missing / non-string
+    ///   yields JSON-RPC `-32602` (Invalid params).
+    /// * `arguments.max_results` — OPTIONAL `u64`, default
+    ///   [`FIND_SIMILAR_DEFAULT_MAX_RESULTS`] (10), clamped to
+    ///   `[1, FIND_SIMILAR_MAX_RESULTS_CAP]`.
+    /// * `arguments.branch` — OPTIONAL string, defaults to the
+    ///   executor's [`FindSimilarExecutor::default_branch`].
+    ///
+    /// # Result envelope
+    ///
+    /// `result.isError == false` on the happy path.  `result._meta`
+    /// carries `tool == "find_similar"`, `source ==
+    /// "lancedb+coderankembed"`, `branch`, `query_dim`,
+    /// `hits_count`, and `hits[]` sorted by `similarity_score`
+    /// descending.  Each hit projects 8 fields:
+    /// `{file_path, start_line, end_line, content, language,
+    /// symbol_name, symbol_kind, similarity_score}`.
+    ///
+    /// # Error envelopes
+    ///
+    /// Runtime failures surface as `result.isError == true` with
+    /// `_meta.error_kind` per master-plan §3.2 UX contract:
+    ///
+    /// * `embedding_failed` — the injected source returned an
+    ///   error.
+    /// * `dim_mismatch` — the returned vector's length disagreed
+    ///   with the source's declared dimension.
+    /// * `branch_not_found` — the per-branch `vectors/` directory
+    ///   was missing or `lancedb::connect` failed.
+    /// * `table_not_found` — `code_chunks` table did not exist on
+    ///   the branch.
+    /// * `query_failed` — the `LanceDB` `nearest_to` query or
+    ///   stream drain failed.
+    /// * `query_timeout` — exceeded
+    ///   [`FIND_SIMILAR_QUERY_TIMEOUT`].
+    ///
+    /// Protocol violations (missing `arguments.snippet`, non-string
+    /// `arguments.snippet`, non-string `arguments.branch`) surface
+    /// as JSON-RPC `error.code == -32602`.
+    #[tracing::instrument(
+        name = "ucil.daemon.find_similar",
+        level = "debug",
+        skip(id, params, executor)
+    )]
+    async fn handle_find_similar(
+        id: &Value,
+        params: &Value,
+        executor: &FindSimilarExecutor,
+    ) -> Value {
+        let args = params
+            .get("arguments")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+
+        let snippet = match args.get("snippet") {
+            Some(Value::String(s)) => s.clone(),
+            Some(_) => {
+                return jsonrpc_error(
+                    id,
+                    -32602,
+                    "find_similar: `arguments.snippet` must be a string",
+                );
+            }
+            None => {
+                return jsonrpc_error(
+                    id,
+                    -32602,
+                    "find_similar: `arguments.snippet` is required and must be a string",
+                );
+            }
+        };
+
+        let max_results = parse_find_similar_max_results(&args);
+        let branch = match parse_find_similar_branch(&args, executor.default_branch()) {
+            Ok(b) => b,
+            Err(e) => return jsonrpc_error(id, e.code, &e.message),
+        };
+
+        let span = tracing::info_span!(
+            "ucil.daemon.find_similar",
+            branch = %branch,
+            max_results = max_results,
+            query_dim = executor.embedding_source.dim(),
+        );
+        let _enter = span.enter();
+
+        let Ok(outcome) = timeout(
+            FIND_SIMILAR_QUERY_TIMEOUT,
+            execute_find_similar(&snippet, &branch, max_results, executor),
+        )
+        .await
+        else {
+            tracing::warn!(
+                branch = %branch,
+                error_kind = "query_timeout",
+                "find_similar timed out after {:?}",
+                FIND_SIMILAR_QUERY_TIMEOUT,
+            );
+            return find_similar_error_envelope(
+                id,
+                &branch,
+                executor.embedding_source.dim(),
+                "query_timeout",
+                &format!(
+                    "find_similar exceeded {} ms",
+                    FIND_SIMILAR_QUERY_TIMEOUT.as_millis()
+                ),
+            );
+        };
+
+        match outcome {
+            Ok(hits) => {
+                find_similar_success_envelope(id, &branch, executor.embedding_source.dim(), hits)
+            }
+            Err(err) => {
+                tracing::warn!(
+                    branch = %branch,
+                    error_kind = err.kind,
+                    "find_similar failed: {}",
+                    err.message,
+                );
+                find_similar_error_envelope(
+                    id,
+                    &branch,
+                    executor.embedding_source.dim(),
+                    err.kind,
+                    &err.message,
+                )
+            }
+        }
+    }
+}
+
+// ── find_similar helpers (P2-W8-F08) ────────────────────────────────────────
+
+/// Projection of a single `LanceDB` row onto the JSON shape the
+/// `find_similar` MCP envelope advertises in `_meta.hits[]`.
+///
+/// The 12-column `code_chunks` table (master-plan §12.2 lines
+/// 1321-1346) is reduced to 8 user-facing fields plus a derived
+/// `similarity_score`.  The raw `embedding` / `token_count` /
+/// `file_hash` / `indexed_at` columns are storage-internal and
+/// dropped from the projection.
+#[derive(Debug)]
+struct FindSimilarHit {
+    file_path: String,
+    start_line: i32,
+    end_line: i32,
+    content: String,
+    language: String,
+    symbol_name: Option<String>,
+    symbol_kind: Option<String>,
+    similarity_score: f64,
+}
+
+/// Internal failure shape for [`execute_find_similar`].  Threads the
+/// human-readable error message + the stable `error_kind` discriminant
+/// up to the handler so the envelope encoder can build a typed
+/// `result.isError = true` response without re-classifying the cause.
+#[derive(Debug)]
+struct FindSimilarError {
+    kind: &'static str,
+    message: String,
+}
+
+/// Parse `arguments.max_results` for `find_similar`.
+///
+/// Optional `u64`, defaults to [`FIND_SIMILAR_DEFAULT_MAX_RESULTS`].
+/// Clamped to `[1, FIND_SIMILAR_MAX_RESULTS_CAP]` so a pathological
+/// request cannot drain the `LanceDB` query; out-of-range or
+/// non-numeric values fall back to the default.
+fn parse_find_similar_max_results(args: &Value) -> u64 {
+    let raw = args
+        .get("max_results")
+        .and_then(Value::as_u64)
+        .unwrap_or(FIND_SIMILAR_DEFAULT_MAX_RESULTS);
+    raw.clamp(1, FIND_SIMILAR_MAX_RESULTS_CAP)
+}
+
+/// Internal error shape for the `find_similar` argument-parsing
+/// stage — for the JSON-RPC `error` envelope (protocol violations
+/// only; runtime failures use [`FindSimilarError`] +
+/// `result.isError` instead).
+#[derive(Debug)]
+struct FindSimilarArgError {
+    code: i64,
+    message: String,
+}
+
+/// Parse `arguments.branch` for `find_similar`.
+///
+/// Optional string, defaults to the executor's
+/// [`FindSimilarExecutor::default_branch`].  Non-string yields
+/// JSON-RPC `-32602`.
+fn parse_find_similar_branch(
+    args: &Value,
+    default_branch: &str,
+) -> Result<String, FindSimilarArgError> {
+    match args.get("branch") {
+        Some(Value::String(s)) => Ok(s.clone()),
+        Some(Value::Null) | None => Ok(default_branch.to_owned()),
+        Some(_) => Err(FindSimilarArgError {
+            code: -32602,
+            message: "find_similar: `arguments.branch` must be a string".to_owned(),
+        }),
+    }
+}
+
+/// Embed the snippet, open the per-branch `code_chunks` table, run
+/// `nearest_to(...).limit(N).execute()`, drain the
+/// `RecordBatchStream`, and project rows onto [`FindSimilarHit`].
+///
+/// All `.await`s are bounded by [`FIND_SIMILAR_QUERY_TIMEOUT`] via
+/// the outer `tokio::time::timeout` wrapper in
+/// [`McpServer::handle_find_similar`] per language-agnostic
+/// invariant "every async IO await is wrapped in
+/// `tokio::time::timeout`".
+async fn execute_find_similar(
+    snippet: &str,
+    branch: &str,
+    max_results: u64,
+    executor: &FindSimilarExecutor,
+) -> Result<Vec<FindSimilarHit>, FindSimilarError> {
+    use futures::TryStreamExt as _;
+    use lancedb::query::{ExecutableQuery as _, QueryBase as _};
+
+    // ── (a) embed snippet ──────────────────────────────────────────
+    let query_vec = match executor.embedding_source.embed(snippet).await {
+        Ok(v) => v,
+        Err(e) => {
+            return Err(FindSimilarError {
+                kind: "embedding_failed",
+                message: format!("embedding failed: {e}"),
+            });
+        }
+    };
+
+    // ── (b) dim mismatch guard ─────────────────────────────────────
+    let dim = executor.embedding_source.dim();
+    if query_vec.len() != dim {
+        return Err(FindSimilarError {
+            kind: "dim_mismatch",
+            message: format!(
+                "embedding source returned vector of length {} but declared dim {}",
+                query_vec.len(),
+                dim,
+            ),
+        });
+    }
+
+    // ── (c) resolve per-branch vectors dir ─────────────────────────
+    let vectors_dir = executor.branch_manager.branch_vectors_dir(branch);
+    if !vectors_dir.exists() {
+        return Err(FindSimilarError {
+            kind: "branch_not_found",
+            message: format!(
+                "branch `{branch}` has no vectors directory at {}",
+                vectors_dir.display(),
+            ),
+        });
+    }
+    let Some(uri) = vectors_dir.to_str() else {
+        return Err(FindSimilarError {
+            kind: "branch_not_found",
+            message: format!(
+                "branch `{branch}` vectors path is not valid UTF-8: {}",
+                vectors_dir.display(),
+            ),
+        });
+    };
+
+    // ── (d) connect ────────────────────────────────────────────────
+    let conn = match lancedb::connect(uri).execute().await {
+        Ok(c) => c,
+        Err(e) => {
+            return Err(FindSimilarError {
+                kind: "branch_not_found",
+                message: format!("lancedb connect failed for `{branch}`: {e}"),
+            });
+        }
+    };
+
+    // ── (e) open code_chunks table ─────────────────────────────────
+    let table = match conn.open_table("code_chunks").execute().await {
+        Ok(t) => t,
+        Err(e) => {
+            return Err(FindSimilarError {
+                kind: "table_not_found",
+                message: format!("code_chunks table missing for `{branch}`: {e}"),
+            });
+        }
+    };
+
+    // ── (f) nearest_to(query_vec).limit(N).execute() ───────────────
+    let limit = usize::try_from(max_results).unwrap_or(usize::MAX);
+    let stream = match table
+        .query()
+        .nearest_to(query_vec.as_slice())
+        .map_err(|e| FindSimilarError {
+            kind: "query_failed",
+            message: format!("nearest_to failed: {e}"),
+        })?
+        .limit(limit)
+        .execute()
+        .await
+    {
+        Ok(s) => s,
+        Err(e) => {
+            return Err(FindSimilarError {
+                kind: "query_failed",
+                message: format!("execute failed: {e}"),
+            });
+        }
+    };
+
+    let batches: Vec<arrow_array::RecordBatch> = match stream.try_collect().await {
+        Ok(b) => b,
+        Err(e) => {
+            return Err(FindSimilarError {
+                kind: "query_failed",
+                message: format!("RecordBatchStream drain failed: {e}"),
+            });
+        }
+    };
+
+    // ── (g) project rows onto FindSimilarHit ───────────────────────
+    let mut hits = project_find_similar_rows(&batches);
+
+    // ── (h) defence-in-depth sort by similarity DESC ───────────────
+    // Per AC13 / AC35: LanceDB's `nearest_to` results are typically
+    // already distance-ordered, but this is not contractually
+    // guaranteed across versions; the explicit sort here is
+    // load-bearing — `WO-0066` mutation `M3` proves SA5 fails when
+    // this line is removed.
+    hits.sort_by(|a, b| {
+        b.similarity_score
+            .partial_cmp(&a.similarity_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    Ok(hits)
+}
+
+/// Project a vector of `RecordBatch`es from the `LanceDB`
+/// `nearest_to` stream onto [`FindSimilarHit`].
+///
+/// The `_distance` column `LanceDB` appends to `nearest_to`
+/// results is `Float32` per the upstream impl convention.  The
+/// synthetic `similarity_score = 1.0 / (1.0 + f64::from(_distance))`
+/// is monotonic descending in distance — top hit (smallest
+/// distance) has the largest score.
+fn project_find_similar_rows(batches: &[arrow_array::RecordBatch]) -> Vec<FindSimilarHit> {
+    use arrow_array::Array as _;
+
+    let mut hits: Vec<FindSimilarHit> = Vec::new();
+    for batch in batches {
+        let file_paths = batch
+            .column_by_name("file_path")
+            .map(arrow_array::cast::AsArray::as_string::<i32>);
+        let start_lines = batch
+            .column_by_name("start_line")
+            .and_then(|a| a.as_any().downcast_ref::<arrow_array::Int32Array>());
+        let end_lines = batch
+            .column_by_name("end_line")
+            .and_then(|a| a.as_any().downcast_ref::<arrow_array::Int32Array>());
+        let contents = batch
+            .column_by_name("content")
+            .map(arrow_array::cast::AsArray::as_string::<i32>);
+        let languages = batch
+            .column_by_name("language")
+            .map(arrow_array::cast::AsArray::as_string::<i32>);
+        let symbol_names = batch
+            .column_by_name("symbol_name")
+            .map(arrow_array::cast::AsArray::as_string::<i32>);
+        let symbol_kinds = batch
+            .column_by_name("symbol_kind")
+            .map(arrow_array::cast::AsArray::as_string::<i32>);
+        let distances = batch
+            .column_by_name("_distance")
+            .and_then(|a| a.as_any().downcast_ref::<arrow_array::Float32Array>());
+
+        let (
+            Some(file_paths),
+            Some(start_lines),
+            Some(end_lines),
+            Some(contents),
+            Some(languages),
+            Some(symbol_names),
+            Some(symbol_kinds),
+            Some(distances),
+        ) = (
+            file_paths,
+            start_lines,
+            end_lines,
+            contents,
+            languages,
+            symbol_names,
+            symbol_kinds,
+            distances,
+        )
+        else {
+            tracing::warn!(
+                "find_similar: skipping RecordBatch with unexpected schema (missing required column or _distance)"
+            );
+            continue;
+        };
+
+        for i in 0..batch.num_rows() {
+            let dist_f32 = distances.value(i);
+            let similarity_score = 1.0_f64 / (1.0_f64 + f64::from(dist_f32));
+            let symbol_name_val = if symbol_names.is_null(i) {
+                None
+            } else {
+                let raw = symbol_names.value(i).to_owned();
+                if raw.is_empty() {
+                    None
+                } else {
+                    Some(raw)
+                }
+            };
+            let symbol_kind_val = if symbol_kinds.is_null(i) {
+                None
+            } else {
+                let raw = symbol_kinds.value(i).to_owned();
+                if raw.is_empty() {
+                    None
+                } else {
+                    Some(raw)
+                }
+            };
+            hits.push(FindSimilarHit {
+                file_path: file_paths.value(i).to_owned(),
+                start_line: start_lines.value(i),
+                end_line: end_lines.value(i),
+                content: contents.value(i).to_owned(),
+                language: languages.value(i).to_owned(),
+                symbol_name: symbol_name_val,
+                symbol_kind: symbol_kind_val,
+                similarity_score,
+            });
+        }
+    }
+    hits
+}
+
+/// Build the JSON-RPC happy-path response envelope for
+/// `find_similar`.  `result.isError = false`; `_meta` carries the
+/// per-master-plan §3.2 row 5 contract fields.
+fn find_similar_success_envelope(
+    id: &Value,
+    branch: &str,
+    query_dim: usize,
+    hits: Vec<FindSimilarHit>,
+) -> Value {
+    let hits_count = hits.len();
+    let hits_json: Vec<Value> = hits
+        .into_iter()
+        .map(|h| {
+            json!({
+                "file_path": h.file_path,
+                "start_line": h.start_line,
+                "end_line": h.end_line,
+                "content": h.content,
+                "language": h.language,
+                "symbol_name": h.symbol_name,
+                "symbol_kind": h.symbol_kind,
+                "similarity_score": h.similarity_score,
+            })
+        })
+        .collect();
+    let text = format!(
+        "found {hits_count} similar code chunk{} on branch `{branch}`",
+        if hits_count == 1 { "" } else { "s" },
+    );
+    json!({
+        "jsonrpc": JSONRPC_VERSION,
+        "id": id.clone(),
+        "result": {
+            "_meta": {
+                "tool": "find_similar",
+                "source": "lancedb+coderankembed",
+                "branch": branch,
+                "query_dim": query_dim,
+                "hits_count": hits_count,
+                "hits": hits_json,
+            },
+            "content": [
+                { "type": "text", "text": text }
+            ],
+            "isError": false
+        }
+    })
+}
+
+/// Build the JSON-RPC user-facing error envelope for `find_similar`
+/// (per master-plan §3.2 UX contract: runtime failures surface as
+/// `result.isError = true` with `_meta.error_kind`, NOT as JSON-RPC
+/// `error` envelopes).
+fn find_similar_error_envelope(
+    id: &Value,
+    branch: &str,
+    query_dim: usize,
+    error_kind: &str,
+    error_message: &str,
+) -> Value {
+    json!({
+        "jsonrpc": JSONRPC_VERSION,
+        "id": id.clone(),
+        "result": {
+            "_meta": {
+                "tool": "find_similar",
+                "source": "lancedb+coderankembed",
+                "branch": branch,
+                "query_dim": query_dim,
+                "error_kind": error_kind,
+                "error_message": error_message,
+            },
+            "content": [
+                {
+                    "type": "text",
+                    "text": format!("find_similar failed ({error_kind}): {error_message}")
+                }
+            ],
+            "isError": true
+        }
+    })
 }
 
 /// Internal error shape for the `find_definition` read pipeline —

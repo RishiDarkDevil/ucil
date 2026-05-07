@@ -94,15 +94,22 @@ ucil-embeddings = { path = "../ucil-embeddings" }
 # (master-plan §12.2 line 1335).  Used by `lancedb_indexer.rs` (P2-W8-F04,
 # WO-0064) to compute the content-addressed delta key.
 sha2.workspace = true
+# `futures::TryStreamExt` drains the `lancedb::Table::query().execute().await?`
+# `RecordBatchStream` into a `Vec<RecordBatch>` for the `find_similar` MCP
+# tool's per-call query path (`P2-W8-F08`, WO-0066, master-plan §3.2 line
+# 219 + §18 Phase 2 Week 8 line 1791).  The WO-0064 frozen acceptance test
+# (`executor::test_lancedb_incremental_indexing`) also consumes
+# `TryStreamExt` (the dep was previously in `[dev-dependencies]`); the WO-0066
+# handler is the FIRST production consumer, so the dep is hoisted from
+# `[dev-dependencies]` to `[dependencies]` — `[dependencies]` deps are visible
+# to tests too, so the dev-dep entry is now redundant.  No new EXTERNAL
+# crate enters the dep tree (`futures` was already transitively present
+# via `lancedb` / `lance-*`); the visibility-tier hoist matches WO-0066
+# scope_in 24 ("All required deps already present").
+futures.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
-# `futures::TryStreamExt` is needed by the WO-0064 / P2-W8-F04 frozen
-# acceptance tests in `executor.rs` to drain the
-# `lancedb::Table::query().execute().await?` stream into a `Vec<RecordBatch>`
-# for inspection of `(file_path, file_hash)` rows.  Test-only — no
-# production code consumes `futures`.
-futures.workspace = true
 # `tokenizers` is needed by the WO-0064 / P2-W8-F04 frozen acceptance
 # tests in `executor.rs` to construct a synthetic `WordLevel` tokenizer
 # inline (no on-disk model artefact required).  Test-only — production
