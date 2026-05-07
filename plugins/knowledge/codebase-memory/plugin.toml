@@ -1,0 +1,90 @@
+# Codebase-Memory MCP plugin manifest (master-plan §14.1 category = "knowledge").
+#
+# pinned 2026-05-08: codebase-memory-mcp v0.6.1 (DeusData/codebase-memory-mcp)
+#   source          : https://github.com/DeusData/codebase-memory-mcp
+#   npm package     : https://www.npmjs.com/package/codebase-memory-mcp
+#   pinned tag      : 0.6.1 — npm `latest` published 2026-05-04 by deusdata.
+#                     Internal binary version reports `0.10.0`; the npm
+#                     package release tag is the immutable pin and the
+#                     binary version is whatever ships inside that tarball.
+#   binary launch   : `npx -y codebase-memory-mcp@0.6.1` — runs the stdio
+#                     MCP server bundled inside the npm package. The
+#                     binary itself IS the server (no `serve` / `mcp`
+#                     subcommand); invoking it with no args drops into
+#                     JSON-RPC 2.0 over stdio.
+#   advertised tools: index_repository, search_graph, query_graph,
+#                     trace_path, get_code_snippet, get_graph_schema,
+#                     get_architecture, search_code, list_projects,
+#                     delete_project, index_status, detect_changes,
+#                     manage_adr, ingest_traces (14 total — exactly
+#                     matches master-plan §3.1 line 311 claim. Verified
+#                     end-to-end via PluginManager::health_check; see
+#                     crates/ucil-daemon/tests/g3_plugin_manifests.rs).
+#   transport       : stdio (master-plan §13; no HTTP in Phase 3).
+#   API keys        : NONE required for `tools/list` and indexing/query
+#                     ops — processing is entirely local. No OpenAI /
+#                     Anthropic key needed.
+#
+# Disambiguation rationale: the master-plan §3.1 line 311 listing
+# ("Code knowledge graph. 66 languages, 14 tools. Sub-ms structural
+# queries.") matches DeusData/codebase-memory-mcp uniquely on the
+# `14 tools` invariant — this is the upstream's `tools/list` length and
+# it bumps version-by-version, so the assertion in the integration test
+# is pinned on a specific tool name (`search_graph`) rather than the
+# count, to allow upstream to add tools without breaking us. The
+# upstream language count has since grown to 155 (as of v0.6.1) but
+# that is a `0.10.0` binary capability — the master-plan's `66
+# languages` figure is conservative and the `[capabilities] languages`
+# list below reflects the languages exercised by F05's smoke against
+# tests/fixtures/rust-project rather than the full 155-language matrix.
+#
+# Establishing the `knowledge.*` capability namespace: parallels
+# `search.*` from probe (P2-W6-F06) and `navigate.cross-repo` from
+# scip (P2-W7-F08). G3 sources advertise capabilities under the
+# `knowledge.*` prefix; subsequent G3 plugins (mem0, graphiti,
+# arc-memory, cognee, conport — see master-plan §14.1 line 1676)
+# follow the same convention.
+#
+# G3 Knowledge source per master-plan §5.3 lines 463-475 — the G3
+# group queries all knowledge stores and merges results by entity
+# with temporal priority (per master-plan §5.3). codebase-memory is
+# the structural-query side of G3; mem0 is the agent-memory side.
+#
+# Reproducibility: a moving `latest` or branch ref is deliberately
+# avoided per .claude/rules/commit-style.md. The npm package version
+# is pinned to an immutable npm release tag so the manifest produces
+# byte-identical health checks across CI machines and operator
+# workstations. When upstream cuts a v1.x with breaking tool-surface
+# changes, supersede this manifest in a new ADR and bump the pin.
+
+[plugin]
+name = "codebase-memory"
+version = "0.6.1"
+description = "Code knowledge graph with sub-ms structural queries (G3 source per master-plan §5.3)."
+
+[capabilities]
+provides = ["knowledge.symbol_lookup", "knowledge.relation_query"]
+languages = [
+    "rust",
+    "typescript",
+    "javascript",
+    "python",
+    "go",
+    "java",
+    "c",
+    "cpp",
+    "ruby",
+    "php",
+]
+
+[transport]
+type = "stdio"
+command = "npx"
+args = [
+    "-y",
+    "codebase-memory-mcp@0.6.1",
+]
+
+[lifecycle]
+hot_cold = true
+idle_timeout_minutes = 10
