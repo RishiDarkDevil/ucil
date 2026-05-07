@@ -4,7 +4,7 @@
 **Feature(s)**: `P2-W8-F07`
 **Phase**: 2, Week 8
 **Branch**: `feat/WO-0065-vector-query-p95-bench`
-**Final commit sha**: _populated below post-RFR commit_
+**Final commit sha**: `5378bfd` (RFR commit) — superseded by the follow-up `chore(work-orders)` commit that fills this line in; see `git log feat/WO-0065-vector-query-p95-bench` HEAD for the latest sha
 
 ## Summary
 
