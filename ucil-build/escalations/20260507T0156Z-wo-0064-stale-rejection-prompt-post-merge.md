@@ -141,4 +141,24 @@ This is now the **second WO** (after WO-0063) hit by the same bug. A
   - `ucil-build/escalations/20260506T2358Z-wo-0063-stale-rejection-prompt-recurrence.md`
   - `ucil-build/escalations/20260507T0032Z-wo-0063-stale-prompt-respawn-r4.md`
 
+## Resolution (harness-fix landed)
+
+The pseudocode guard recommended in this escalation has now been applied
+to `scripts/run-phase.sh` at commit `c6609b9` (`fix(harness): guard
+run-phase.sh against stale post-merge rejection-retry dispatch`).
+
+The fix adds a 30-LOC precondition immediately after
+`scripts/run-root-cause-finder.sh` and before the executor-retry
+dispatch: if ALL feature_ids in the WO are `passes=true` in
+`ucil-build/feature-list.json` AND neither
+`ucil-build/rejections/${WO_ID}.md` nor
+`ucil-build/verification-reports/root-cause-${WO_ID}.md` exists on
+disk, the verifier-retry loop breaks and the outer planner-iteration
+moves on. Future post-merge re-dispatch cycles for verified+merged
+WOs (this WO, WO-0063, and any future case) will exit cleanly without
+burning the executor → critic → verifier turn triplet.
+
+Legitimate rejections still hit the dispatch path because RCF writes
+its artefact one line above the guard.
+
 resolved: true

@@ -128,4 +128,24 @@ verifier turn (≈3 LLM invocations) for zero work product.
 - `feat/WO-0063-search-code-g2-fused-refresh @ a12e97f` — feature-branch HEAD (merged into main at `1e3c4e3`)
 - `main @ 272402b` — re-verify PASS commit
 
+## Resolution (harness-fix landed)
+
+The pseudocode guard recommended in this escalation has now been applied
+to `scripts/run-phase.sh` at commit `c6609b9` (`fix(harness): guard
+run-phase.sh against stale post-merge rejection-retry dispatch`).
+
+The fix adds a 30-LOC precondition immediately after
+`scripts/run-root-cause-finder.sh` and before the executor-retry
+dispatch: if ALL feature_ids in the WO are `passes=true` in
+`ucil-build/feature-list.json` AND neither
+`ucil-build/rejections/${WO_ID}.md` nor
+`ucil-build/verification-reports/root-cause-${WO_ID}.md` exists on
+disk, the verifier-retry loop breaks and the outer planner-iteration
+moves on. Future post-merge re-dispatch cycles for verified+merged
+WOs will exit cleanly without burning the executor → critic → verifier
+turn triplet.
+
+Legitimate rejections still hit the dispatch path because RCF writes
+its artefact one line above the guard.
+
 resolved: true
