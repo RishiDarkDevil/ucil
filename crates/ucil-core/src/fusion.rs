@@ -861,3 +861,161 @@ fn test_g2_rrf_weights() {
         outcome.hits[0].contributing_sources,
     );
 }
+
+// ── Frozen acceptance test — P3-W9-F01 deterministic classifier ───────────────
+//
+// Per `DEC-0007`, the frozen selector lives at MODULE ROOT so the
+// `cargo test -p ucil-core fusion::test_deterministic_classifier`
+// selector resolves directly without traversing a `mod tests {}`
+// barrier.  Sub-assertions are inline-rustdoc-numbered SA1..SA6 so
+// failure messages map to a specific assertion-of-record.
+
+#[cfg(test)]
+#[test]
+#[allow(clippy::too_many_lines, clippy::float_cmp)]
+fn test_deterministic_classifier() {
+    // ── SA1: tool_name primary signal — all 12 §3.2 mappings ─────────
+    //
+    // Every entry in `TOOL_NAME_MAP` MUST resolve to its declared
+    // `QueryType`.  This is the load-bearing assertion against the
+    // M1 verifier mutation (bypass tool_name match to default).
+    let tool_cases: &[(&str, QueryType)] = &[
+        ("understand_code", QueryType::UnderstandCode),
+        ("find_definition", QueryType::FindDefinition),
+        ("find_references", QueryType::FindReferences),
+        ("search_code", QueryType::SearchCode),
+        ("find_similar", QueryType::SearchCode),
+        ("get_context_for_edit", QueryType::GetContextForEdit),
+        ("get_conventions", QueryType::UnderstandCode),
+        ("trace_dependencies", QueryType::TraceDependencies),
+        ("blast_radius", QueryType::BlastRadius),
+        ("review_changes", QueryType::ReviewChanges),
+        ("check_quality", QueryType::CheckQuality),
+        ("remember", QueryType::Remember),
+    ];
+    for &(name, expected) in tool_cases {
+        let got = classify_query(name, &[]).query_type;
+        assert_eq!(
+            got, expected,
+            "(SA1) tool_name primary signal: classify_query({name:?}, &[]) \
+             must yield {expected:?}; got {got:?}"
+        );
+    }
+
+    // ── SA2: keyword fallback when tool_name is unknown ──────────────
+    //
+    // `find` alone matches no rule, but `references` matches the
+    // `references` rule → FindReferences.  Validates that the
+    // keyword scan runs after the tool-name miss AND that joining
+    // multi-token slices works.
+    let out = classify_query("unknown_tool", &["find", "references"]);
+    assert_eq!(
+        out.query_type,
+        QueryType::FindReferences,
+        "(SA2) keyword fallback: classify_query(\"unknown_tool\", &[\"find\", \
+         \"references\"]) must yield FindReferences; got {:?}",
+        out.query_type,
+    );
+
+    // Bonus: phrase patterns work via the space-padded join.
+    let out = classify_query("unknown_tool", &["blast", "radius"]);
+    assert_eq!(
+        out.query_type,
+        QueryType::BlastRadius,
+        "(SA2) phrase fallback: classify_query(\"unknown_tool\", &[\"blast\", \
+         \"radius\"]) must yield BlastRadius; got {:?}",
+        out.query_type,
+    );
+
+    // ── SA3: default when tool AND keywords both unknown ─────────────
+    //
+    // §8.6 lines 817-822 — most-permissive bonus-context default.
+    let out = classify_query("", &[]);
+    assert_eq!(
+        out.query_type,
+        QueryType::UnderstandCode,
+        "(SA3) default when both unknown: classify_query(\"\", &[]) must \
+         yield UnderstandCode; got {:?}",
+        out.query_type,
+    );
+    // ClassifierOutput defaults are populated correctly.
+    assert!(
+        out.intent_hint.is_none(),
+        "(SA3) intent_hint must be None from the deterministic path"
+    );
+    assert!(
+        out.domain_tags.is_empty(),
+        "(SA3) domain_tags must be empty from the deterministic path"
+    );
+    assert!(
+        out.group_weight_overrides.is_empty(),
+        "(SA3) group_weight_overrides must be empty from the deterministic path"
+    );
+
+    // ── SA4: group-weight matrix shape (4 query types) ───────────────
+    //
+    // §6.2 line 649 — UnderstandCode row.
+    assert_eq!(
+        group_weights_for(QueryType::UnderstandCode),
+        [2.0, 1.0, 2.5, 1.5, 2.0, 0.5, 1.0, 0.5],
+        "(SA4) UnderstandCode row mismatch — §6.2 line 649"
+    );
+    // §6.2 line 650 — FindDefinition row.  Load-bearing against
+    // the M2 verifier mutation (swap UnderstandCode ↔ FindDefinition
+    // rows in QUERY_WEIGHT_MATRIX).
+    assert_eq!(
+        group_weights_for(QueryType::FindDefinition),
+        [3.0, 1.5, 1.0, 0.5, 0.5, 0.0, 0.5, 0.0],
+        "(SA4) FindDefinition row mismatch — §6.2 line 650"
+    );
+    // §6.2 line 655 — BlastRadius row.
+    assert_eq!(
+        group_weights_for(QueryType::BlastRadius),
+        [1.5, 0.5, 1.5, 3.0, 0.5, 0.5, 1.0, 1.0],
+        "(SA4) BlastRadius row mismatch — §6.2 line 655"
+    );
+
+    // ── SA5: Remember row is the §6.2 sentinel ───────────────────────
+    //
+    // §6.2 line 658 — `[0, 0, 3.0, 0, 0, 0, 0, 0]` encodes the strict
+    // knowledge-only constraint.  This row is the canary for matrix-
+    // row-shift bugs (any insertion above Remember in the matrix
+    // would break this assertion).
+    assert_eq!(
+        group_weights_for(QueryType::Remember),
+        [0.0, 0.0, 3.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        "(SA5) Remember sentinel row mismatch — §6.2 line 658 \
+         (knowledge-only constraint)"
+    );
+
+    // ── SA6: JSON round-trip on QueryType ────────────────────────────
+    //
+    // Verifies serde(rename_all = "snake_case") matches the §6.2 row
+    // labels and that the wire format is stable.
+    for qt in [
+        QueryType::UnderstandCode,
+        QueryType::FindDefinition,
+        QueryType::FindReferences,
+        QueryType::SearchCode,
+        QueryType::GetContextForEdit,
+        QueryType::TraceDependencies,
+        QueryType::BlastRadius,
+        QueryType::ReviewChanges,
+        QueryType::CheckQuality,
+        QueryType::Remember,
+    ] {
+        let json = serde_json::to_string(&qt).expect("serialize QueryType");
+        let back: QueryType = serde_json::from_str(&json).expect("deserialize QueryType");
+        assert_eq!(
+            qt, back,
+            "(SA6) JSON round-trip mismatch for {qt:?}: serialised={json}"
+        );
+    }
+    // Wire-format spot check — §6.2 row label.
+    let wire = serde_json::to_string(&QueryType::FindDefinition).unwrap();
+    assert_eq!(
+        wire, "\"find_definition\"",
+        "(SA6) FindDefinition wire-format must equal \"find_definition\" \
+         (the §6.2 row label); got {wire}"
+    );
+}
