@@ -3,7 +3,7 @@ ts: 2026-05-07T18:45:00Z
 phase: 3
 session: monitor
 trigger: stop-hook-blocks-on-phase-3-startup-zero-features-passing
-resolved: false
+resolved: true
 blocks_loop: false
 severity: low
 auto_classify: bucket-A-admin
@@ -28,3 +28,11 @@ This advisory exists to satisfy the stop-hook's "tracked unresolved
 escalation" bypass clause (.claude/hooks/stop/gate.sh:88-96) so the
 monitor session can end cleanly. Triage will close it once the first
 P3 feature flips passes=true.
+
+## Resolution (2026-05-08T02:08Z)
+
+P3 reached 2/45 (P3-W9-F01 + P3-W9-F02 flipped via WO-0067 at HEAD
+4d81ff5). The `close_when` condition ("at least one P3 feature passes")
+is satisfied. Auto-resolved by monitor session as Bucket-A admin.
+
+resolved: true
