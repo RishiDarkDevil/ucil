@@ -102,6 +102,29 @@
 //! Phase 2 Week 8 line 1788); F09 ships the standalone API + the unit
 //! test verifying its lifecycle semantics.
 //!
+//! WO-0064 for `P2-W8-F04` lands the
+//! [`lancedb_indexer`] module owning the per-branch background
+//! chunk-indexing pipeline that consumes
+//! [`ucil_embeddings::EmbeddingChunker`] +
+//! [`ucil_embeddings::CodeRankEmbed`] (the latter behind the
+//! `UCIL`-internal [`lancedb_indexer::EmbeddingSource`] trait per
+//! `DEC-0008` §4) and writes 12-column
+//! [`branch_manager::code_chunks_schema`]-conforming
+//! [`arrow_array::RecordBatch`] rows into the per-branch
+//! `code_chunks` `LanceDB` table opened by
+//! [`branch_manager::BranchManager::create_branch_table`]
+//! (master-plan §11.2 + §12.2).  Incremental skip is driven by a
+//! `<branches_root>/<sanitised>/indexer-state.json` mtime sidecar
+//! persisted via [`lancedb_indexer::IndexerState::save_atomic`].
+//! The companion [`lancedb_indexer::IndexerHandle`] subscribes to a
+//! `tokio::sync::mpsc::Receiver<watcher::FileEvent>` and dispatches
+//! each create/modify event to the indexer — consumer wiring of the
+//! handle into [`watcher::FileWatcher`] is deferred to a follow-up
+//! `WO`.  Frozen acceptance test
+//! [`executor::test_lancedb_incremental_indexing`] (`DEC-0007`
+//! module-root) exercises 6 sub-assertions via a deterministic
+//! `TestEmbeddingSource` impl per `DEC-0008`.
+//!
 //! WO-0063 for `P2-W7-F06` lights up
 //! [`server::McpServer::with_g2_sources`] and the G2-fused half of the
 //! `search_code` MCP tool (master-plan §3.2 row 4 / §5.2 G2 fan-out):
@@ -133,6 +156,7 @@
 pub mod branch_manager;
 pub mod executor;
 pub mod g2_search;
+pub mod lancedb_indexer;
 pub mod lifecycle;
 pub mod plugin_manager;
 pub mod priority_queue;
@@ -161,6 +185,8 @@ pub use branch_manager::{BranchManager, BranchManagerError, BranchTableInfo, cod
 pub use executor::{enrich_find_definition, execute_g1, fuse_g1, Caller, EnrichedFindDefinition, ExecutorError, G1Conflict, G1FusedEntry, G1FusedLocation, G1FusedOutcome, G1FusionEntry, G1Outcome, G1Query, G1Source, G1ToolKind, G1ToolOutput, G1ToolStatus, HoverDoc, HoverFetchError, HoverSource, IngestPipeline, SerenaHoverClient, G1_MASTER_DEADLINE, G1_PER_SOURCE_DEADLINE, SOURCE_TOOL, TREE_SITTER_VALID_FROM};
 #[rustfmt::skip]
 pub use g2_search::{G2SearchError, G2SourceFactory, G2SourceProvider, LancedbProvider, ProbeProvider, RipgrepProvider};
+#[rustfmt::skip]
+pub use lancedb_indexer::{ChunkIndexerError, CodeRankEmbeddingSource, EmbeddingSource, EmbeddingSourceError, IndexerHandle, IndexerState, IndexerStats, LancedbChunkIndexer};
 #[rustfmt::skip]
 pub use lifecycle::{Checkpoint, CheckpointError, Lifecycle, PidFile, PidFileError, ShutdownReason};
 pub use plugin_manager::{
