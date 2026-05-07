@@ -17,6 +17,11 @@ rusqlite.workspace = true
 opentelemetry.workspace = true
 opentelemetry_sdk.workspace = true
 opentelemetry-stdout.workspace = true
+# Object-safe async trait macro — used by the `GroupExecutor` trait in
+# `cross_group.rs` (WO-0068, P3-W9-F03) per DEC-0008 §4 dependency-
+# inversion seam pattern. Mirrors how `G1Source` uses async-trait in
+# `ucil-daemon`. Workspace dep already declared in root Cargo.toml.
+async-trait.workspace = true
 # Timestamps for bi-temporal queries — RFC-3339 encoded `t_valid_from` /
 # `t_valid_to` so SQLite TEXT string-comparison is lexicographic.  Used
 # by `knowledge_graph::KnowledgeGraph::get_entity_as_of`.  Phase 1 Week
