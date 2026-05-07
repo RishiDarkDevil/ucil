@@ -19,3 +19,6 @@ Latest root-cause: ucil-build/verification-reports/root-cause-WO-0063.md (if pre
 If the rejection cites harness-script bugs (reality-check.sh,
 flip-feature.sh, a hook, a launcher), triage may auto-resolve this
 escalation via Bucket B before the loop halts.
+
+resolved: true
+

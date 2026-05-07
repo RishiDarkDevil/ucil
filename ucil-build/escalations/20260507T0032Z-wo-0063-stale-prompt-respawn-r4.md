@@ -121,3 +121,6 @@ has been refreshed to reflect this fourth no-op verifier session;
 `P2-W7-F06.last_verified_*` timestamps refreshed accordingly. No
 semantic change to feature-list (`passes` field is monotone and was
 already `true`).
+
+resolved: true
+
