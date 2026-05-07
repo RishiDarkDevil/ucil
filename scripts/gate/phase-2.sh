@@ -14,9 +14,12 @@ check "effectiveness (phase 2 scenarios)"  scripts/verify/effectiveness-gate.sh 
 check "multi-lang probes"                  scripts/verify/multi-lang-coverage.sh 2
 check "real-repo smoke"                    scripts/verify/real-repo-smoke.sh 2
 
-# Anti-laziness quality gates — Phase 2 lights up embeddings + agents crates
-# on top of Phase 1's four. Auto-skip any crate dir not yet present.
-for crate in ucil-core ucil-daemon ucil-treesitter ucil-lsp-diagnostics ucil-embeddings ucil-agents; do
+# Anti-laziness quality gates — Phase 2 lights up embeddings on top of
+# Phase 1's four. ucil-agents was incorrectly listed here despite being
+# a Phase-3.5 crate (zero phase-2 features per feature-list.json).
+# Removed per ADR DEC-0018; phase-3.5.sh re-adds it when its real
+# implementation lands. Auto-skip any crate dir not yet present.
+for crate in ucil-core ucil-daemon ucil-treesitter ucil-lsp-diagnostics ucil-embeddings; do
   check "coverage gate: ${crate}"          scripts/verify/coverage-gate.sh "${crate}" 85 75
 done
 exit $FAIL
