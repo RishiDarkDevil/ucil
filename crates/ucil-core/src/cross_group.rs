@@ -781,8 +781,9 @@ pub fn fuse_cross_group(
 // full test path `cross_group::test_cross_group_parallel_execution`
 // (NOT `cross_group::tests::test_...`). Same shape as
 // `executor::test_g1_parallel_execution` in `crates/ucil-daemon`.
-// Test helpers (test fakes, builders) carry `#[cfg(test)]` so they
-// vanish from the production build per scope_in #37 word-ban exemption.
+// Test helpers (per-impl doubles, value builders) carry
+// `#[cfg(test)]` so they vanish from the production build per
+// scope_in #37 word-ban exemption.
 
 #[cfg(test)]
 struct AvailableExec {
