@@ -773,3 +773,600 @@ pub fn fuse_cross_group(
     }
 }
 
+// ── Frozen tests ──────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::time::Instant;
+
+    // ── Test fakes (live inside `#[cfg(test)]` per scope_in #37
+    //    word-ban exemption) ────────────────────────────────────
+
+    struct AvailableExec {
+        group: Group,
+        hit: GroupHit,
+    }
+
+    #[async_trait::async_trait]
+    impl GroupExecutor for AvailableExec {
+        fn group(&self) -> Group {
+            self.group
+        }
+        async fn execute(&self, _query: &CrossGroupQuery) -> GroupResult {
+            GroupResult {
+                group: self.group,
+                status: GroupStatus::Available,
+                hits: vec![self.hit.clone()],
+                elapsed_ms: 5,
+                error: None,
+            }
+        }
+    }
+
+    struct SleepingExec {
+        group: Group,
+        sleep: Duration,
+    }
+
+    #[async_trait::async_trait]
+    impl GroupExecutor for SleepingExec {
+        fn group(&self) -> Group {
+            self.group
+        }
+        async fn execute(&self, _query: &CrossGroupQuery) -> GroupResult {
+            tokio::time::sleep(self.sleep).await;
+            GroupResult {
+                group: self.group,
+                status: GroupStatus::Available,
+                hits: vec![],
+                elapsed_ms: u64::try_from(self.sleep.as_millis()).unwrap_or(u64::MAX),
+                error: None,
+            }
+        }
+    }
+
+    struct ErroringExec {
+        group: Group,
+    }
+
+    #[async_trait::async_trait]
+    impl GroupExecutor for ErroringExec {
+        fn group(&self) -> Group {
+            self.group
+        }
+        async fn execute(&self, _query: &CrossGroupQuery) -> GroupResult {
+            GroupResult {
+                group: self.group,
+                status: GroupStatus::Errored,
+                hits: vec![],
+                elapsed_ms: 1,
+                error: Some("boom".to_owned()),
+            }
+        }
+    }
+
+    fn dummy_query() -> CrossGroupQuery {
+        CrossGroupQuery {
+            tool_name: "find_definition".to_owned(),
+            target: "TaskManager".to_owned(),
+            reason_keywords: vec![],
+        }
+    }
+
+    fn dummy_hit(path: &str, line: u32) -> GroupHit {
+        GroupHit {
+            file_path: PathBuf::from(path),
+            start_line: line,
+            end_line: line,
+            snippet: format!("snippet_{path}_{line}"),
+            score: 0.5,
+        }
+    }
+
+    // ── F03 frozen test ──────────────────────────────────────
+
+    /// Frozen acceptance test for P3-W9-F03 (cross-group parallel
+    /// executor). Master-plan §6.1 lines 585-641 + line 606.
+    ///
+    /// Sub-assertions (DEC-0007 SA-numbered panic messages):
+    /// - SA1: All-available fan-out — order, count, master flag,
+    ///   `degraded_groups` empty.
+    /// - SA2: One executor times out — `GroupStatus::TimedOut`,
+    ///   `degraded_groups` includes the slow group, master flag
+    ///   stays false (per-group cuts in first).
+    /// - SA3: One executor errors — `GroupStatus::Errored`,
+    ///   `degraded_groups` includes it.
+    /// - SA4: Master-deadline trip — `master_timed_out == true`,
+    ///   wall time < 2 s.
+    /// - SA5: Empty executors — empty results, no hang.
+    /// - SA6: Order preservation — `results[i].group ==
+    ///   executors[i].group()` for non-canonical input order.
+    /// - SA7: JSON round-trip — `serde_json::from_str ==
+    ///   to_string` on a `CrossGroupExecution`.
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // DEC-0005 module-coherence: SA1..SA7 are one cohesive unit.
+    async fn test_cross_group_parallel_execution() {
+        // ── SA1: all-available fan-out ──────────────────────
+        let executors: Vec<Box<dyn GroupExecutor + Send + Sync>> = vec![
+            Box::new(AvailableExec {
+                group: Group::G1,
+                hit: dummy_hit("a.rs", 1),
+            }),
+            Box::new(AvailableExec {
+                group: Group::G2,
+                hit: dummy_hit("b.rs", 2),
+            }),
+            Box::new(AvailableExec {
+                group: Group::G3,
+                hit: dummy_hit("c.rs", 3),
+            }),
+            Box::new(AvailableExec {
+                group: Group::G4,
+                hit: dummy_hit("d.rs", 4),
+            }),
+        ];
+        let outcome =
+            execute_cross_group(dummy_query(), executors, CROSS_GROUP_MASTER_DEADLINE).await;
+        assert_eq!(
+            outcome.results.len(),
+            4,
+            "(SA1) all-available results.len; left: {}; right: 4",
+            outcome.results.len()
+        );
+        assert!(
+            !outcome.master_timed_out,
+            "(SA1) all-available master_timed_out; expected false, got true"
+        );
+        assert!(
+            outcome.degraded_groups.is_empty(),
+            "(SA1) all-available degraded_groups; expected empty, got {:?}",
+            outcome.degraded_groups
+        );
+        assert_eq!(
+            outcome.results.iter().map(|r| r.group).collect::<Vec<_>>(),
+            vec![Group::G1, Group::G2, Group::G3, Group::G4],
+            "(SA1) all-available result order"
+        );
+
+        let sa1_outcome = outcome;
+
+        // ── SA2: one executor times out (per-group deadline) ──
+        let slow_executors: Vec<Box<dyn GroupExecutor + Send + Sync>> = vec![
+            Box::new(AvailableExec {
+                group: Group::G1,
+                hit: dummy_hit("a.rs", 1),
+            }),
+            Box::new(SleepingExec {
+                group: Group::G2,
+                sleep: Duration::from_secs(6),
+            }),
+            Box::new(AvailableExec {
+                group: Group::G3,
+                hit: dummy_hit("c.rs", 3),
+            }),
+        ];
+        let start = Instant::now();
+        let outcome =
+            execute_cross_group(dummy_query(), slow_executors, CROSS_GROUP_MASTER_DEADLINE).await;
+        let elapsed = start.elapsed();
+        assert_eq!(
+            outcome.results[1].status,
+            GroupStatus::TimedOut,
+            "(SA2) timeout status; left: {:?}; right: TimedOut",
+            outcome.results[1].status
+        );
+        assert_eq!(
+            outcome.results[1].group,
+            Group::G2,
+            "(SA2) timeout group ordering; left: {:?}; right: G2",
+            outcome.results[1].group
+        );
+        assert!(
+            outcome.results[1].error.is_some(),
+            "(SA2) timeout error message present"
+        );
+        assert!(
+            outcome.degraded_groups.contains(&Group::G2),
+            "(SA2) degraded_groups contains G2; got {:?}",
+            outcome.degraded_groups
+        );
+        assert!(
+            !outcome.master_timed_out,
+            "(SA2) master_timed_out stays false (per-group wins); got true"
+        );
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "(SA2) per-group cut-in time bound; elapsed {elapsed:?} >= 5 s"
+        );
+
+        // ── SA3: one executor errors ────────────────────────
+        let erroring_executors: Vec<Box<dyn GroupExecutor + Send + Sync>> = vec![
+            Box::new(AvailableExec {
+                group: Group::G1,
+                hit: dummy_hit("a.rs", 1),
+            }),
+            Box::new(ErroringExec { group: Group::G2 }),
+        ];
+        let outcome = execute_cross_group(
+            dummy_query(),
+            erroring_executors,
+            CROSS_GROUP_MASTER_DEADLINE,
+        )
+        .await;
+        assert_eq!(
+            outcome.results[1].status,
+            GroupStatus::Errored,
+            "(SA3) error status; left: {:?}; right: Errored",
+            outcome.results[1].status
+        );
+        assert!(
+            outcome.degraded_groups.contains(&Group::G2),
+            "(SA3) degraded_groups contains G2; got {:?}",
+            outcome.degraded_groups
+        );
+        assert!(
+            !outcome.master_timed_out,
+            "(SA3) master_timed_out stays false on error path; got true"
+        );
+
+        // ── SA4: master-deadline trip ───────────────────────
+        let bad_executors: Vec<Box<dyn GroupExecutor + Send + Sync>> =
+            vec![Box::new(SleepingExec {
+                group: Group::G1,
+                sleep: Duration::from_secs(7),
+            })];
+        let start = Instant::now();
+        let outcome =
+            execute_cross_group(dummy_query(), bad_executors, Duration::from_millis(100)).await;
+        let elapsed = start.elapsed();
+        assert!(
+            outcome.master_timed_out,
+            "(SA4) master_timed_out; expected true, got false"
+        );
+        assert_eq!(
+            outcome.results[0].status,
+            GroupStatus::TimedOut,
+            "(SA4) master-trip placeholder status; left: {:?}; right: TimedOut",
+            outcome.results[0].status
+        );
+        assert!(
+            outcome.degraded_groups.contains(&outcome.results[0].group),
+            "(SA4) master-trip degraded_groups contains placeholder group"
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "(SA4) master-trip wall time bound; elapsed {elapsed:?} >= 2 s"
+        );
+
+        // ── SA5: empty executors ────────────────────────────
+        let outcome = execute_cross_group(dummy_query(), vec![], CROSS_GROUP_MASTER_DEADLINE).await;
+        assert!(
+            outcome.results.is_empty(),
+            "(SA5) empty executors results; got {:?}",
+            outcome.results
+        );
+        assert!(
+            outcome.degraded_groups.is_empty(),
+            "(SA5) empty executors degraded_groups; got {:?}",
+            outcome.degraded_groups
+        );
+        assert!(
+            !outcome.master_timed_out,
+            "(SA5) empty executors master_timed_out; got true"
+        );
+
+        // ── SA6: order preservation, non-canonical input ────
+        let unordered_executors: Vec<Box<dyn GroupExecutor + Send + Sync>> = vec![
+            Box::new(AvailableExec {
+                group: Group::G3,
+                hit: dummy_hit("c.rs", 3),
+            }),
+            Box::new(AvailableExec {
+                group: Group::G1,
+                hit: dummy_hit("a.rs", 1),
+            }),
+            Box::new(AvailableExec {
+                group: Group::G4,
+                hit: dummy_hit("d.rs", 4),
+            }),
+            Box::new(AvailableExec {
+                group: Group::G2,
+                hit: dummy_hit("b.rs", 2),
+            }),
+        ];
+        let outcome = execute_cross_group(
+            dummy_query(),
+            unordered_executors,
+            CROSS_GROUP_MASTER_DEADLINE,
+        )
+        .await;
+        let order: Vec<Group> = outcome.results.iter().map(|r| r.group).collect();
+        assert_eq!(
+            order,
+            vec![Group::G3, Group::G1, Group::G4, Group::G2],
+            "(SA6) result ordering preserves input executor order"
+        );
+
+        // ── SA7: JSON round-trip on the SA1 outcome ─────────
+        let json = serde_json::to_string(&sa1_outcome).expect("(SA7) serialize");
+        let round: CrossGroupExecution = serde_json::from_str(&json).expect("(SA7) deserialize");
+        assert_eq!(
+            round, sa1_outcome,
+            "(SA7) round-trip equality; left: {round:?}; right: {sa1_outcome:?}"
+        );
+    }
+
+    // ── F04 frozen test ──────────────────────────────────────
+
+    /// Frozen acceptance test for P3-W9-F04 (cross-group RRF
+    /// fusion). Master-plan §6.2 lines 643-658 + line 645
+    /// (k = 60).
+    ///
+    /// Sub-assertions (DEC-0007 SA-numbered panic messages):
+    /// - SA1: Basic RRF math — same location at rank 1 in both
+    ///   G1 and G2 with `FindReferences` (G1=3.0, G2=2.0).
+    /// - SA2: Weighted RRF cross-location — different files at
+    ///   rank 1 with `FindDefinition` (G1=3.0, G2=1.5).
+    /// - SA3: Same hit at different ranks across groups —
+    ///   ranks (1, 2) with `FindReferences`.
+    /// - SA4: `degraded_groups` passthrough.
+    /// - SA5: Zero-weight skip — `Remember` row, G1 hit excluded.
+    /// - SA6: `used_weights` snapshot — Remember row sentinel.
+    /// - SA7: JSON round-trip on `CrossGroupFusedOutcome`.
+    #[test]
+    #[allow(clippy::too_many_lines)] // DEC-0005 module-coherence: SA1..SA7 are one cohesive unit.
+    #[allow(clippy::float_cmp)] // SA6 used_weights is the §6.2 sentinel canary; bit-exact match is the contract.
+    fn test_cross_group_rrf_fusion() {
+        // ── SA1: basic RRF math, same location ──────────────
+        let g1 = GroupResult {
+            group: Group::G1,
+            status: GroupStatus::Available,
+            hits: vec![GroupHit {
+                file_path: PathBuf::from("src/lib.rs"),
+                start_line: 10,
+                end_line: 15,
+                snippet: "g1_snippet".to_owned(),
+                score: 0.9,
+            }],
+            elapsed_ms: 5,
+            error: None,
+        };
+        let g2 = GroupResult {
+            group: Group::G2,
+            status: GroupStatus::Available,
+            hits: vec![GroupHit {
+                file_path: PathBuf::from("src/lib.rs"),
+                start_line: 10,
+                end_line: 15,
+                snippet: "g2_snippet".to_owned(),
+                score: 0.7,
+            }],
+            elapsed_ms: 5,
+            error: None,
+        };
+        let exec = CrossGroupExecution {
+            results: vec![g1, g2],
+            master_timed_out: false,
+            wall_elapsed_ms: 5,
+            degraded_groups: vec![],
+        };
+        let outcome = fuse_cross_group(&exec, QueryType::FindReferences);
+        assert_eq!(
+            outcome.hits.len(),
+            1,
+            "(SA1) basic RRF outcome.hits.len; left: {}; right: 1",
+            outcome.hits.len()
+        );
+        // §6.2 line 651: find_references → G1 = 3.0, G2 = 2.0
+        let expected = 3.0_f64 / 61.0 + 2.0_f64 / 61.0;
+        assert!(
+            (outcome.hits[0].fused_score - expected).abs() < 1e-9,
+            "(SA1) fused_score; left: {}; right: {expected}",
+            outcome.hits[0].fused_score
+        );
+        assert_eq!(
+            outcome.hits[0].contributing_groups,
+            vec![Group::G1, Group::G2],
+            "(SA1) contributing_groups order (descending weight)"
+        );
+        assert!(
+            outcome.hits[0].per_group_ranks.contains(&(Group::G1, 1)),
+            "(SA1) per_group_ranks contains (G1, 1)"
+        );
+        assert!(
+            outcome.hits[0].per_group_ranks.contains(&(Group::G2, 1)),
+            "(SA1) per_group_ranks contains (G2, 1)"
+        );
+
+        let sa1_outcome = outcome;
+
+        // ── SA2: weighted RRF, cross-location ───────────────
+        let file1 = PathBuf::from("file1.rs");
+        let file2 = PathBuf::from("file2.rs");
+        let g1 = GroupResult {
+            group: Group::G1,
+            status: GroupStatus::Available,
+            hits: vec![GroupHit {
+                file_path: file1.clone(),
+                start_line: 1,
+                end_line: 1,
+                snippet: "f1".to_owned(),
+                score: 0.9,
+            }],
+            elapsed_ms: 5,
+            error: None,
+        };
+        let g2 = GroupResult {
+            group: Group::G2,
+            status: GroupStatus::Available,
+            hits: vec![GroupHit {
+                file_path: file2.clone(),
+                start_line: 1,
+                end_line: 1,
+                snippet: "f2".to_owned(),
+                score: 0.7,
+            }],
+            elapsed_ms: 5,
+            error: None,
+        };
+        let exec = CrossGroupExecution {
+            results: vec![g1, g2],
+            master_timed_out: false,
+            wall_elapsed_ms: 5,
+            degraded_groups: vec![],
+        };
+        let outcome = fuse_cross_group(&exec, QueryType::FindDefinition);
+        assert_eq!(
+            outcome.hits.len(),
+            2,
+            "(SA2) cross-location outcome.hits.len; left: {}; right: 2",
+            outcome.hits.len()
+        );
+        // §6.2 line 650: find_definition → G1 = 3.0, G2 = 1.5
+        assert_eq!(
+            outcome.hits[0].file_path, file1,
+            "(SA2) higher-weight hit comes first; left: {:?}; right: {:?}",
+            outcome.hits[0].file_path, file1
+        );
+        assert!(
+            (outcome.hits[0].fused_score - 3.0_f64 / 61.0).abs() < 1e-9,
+            "(SA2) hits[0] fused_score; left: {}; right: {}",
+            outcome.hits[0].fused_score,
+            3.0_f64 / 61.0
+        );
+        assert_eq!(
+            outcome.hits[1].file_path, file2,
+            "(SA2) lower-weight hit comes second"
+        );
+
+        // ── SA3: same hit at different ranks across groups ──
+        let file_x = PathBuf::from("x.rs");
+        let g1 = GroupResult {
+            group: Group::G1,
+            status: GroupStatus::Available,
+            hits: vec![GroupHit {
+                file_path: file_x.clone(),
+                start_line: 1,
+                end_line: 1,
+                snippet: "x_g1".to_owned(),
+                score: 0.9,
+            }],
+            elapsed_ms: 5,
+            error: None,
+        };
+        let g2 = GroupResult {
+            group: Group::G2,
+            status: GroupStatus::Available,
+            hits: vec![
+                GroupHit {
+                    file_path: PathBuf::from("decoy.rs"),
+                    start_line: 1,
+                    end_line: 1,
+                    snippet: "decoy".to_owned(),
+                    score: 0.99,
+                },
+                GroupHit {
+                    file_path: file_x.clone(),
+                    start_line: 1,
+                    end_line: 1,
+                    snippet: "x_g2".to_owned(),
+                    score: 0.7,
+                },
+            ],
+            elapsed_ms: 5,
+            error: None,
+        };
+        let exec = CrossGroupExecution {
+            results: vec![g1, g2],
+            master_timed_out: false,
+            wall_elapsed_ms: 5,
+            degraded_groups: vec![],
+        };
+        let outcome = fuse_cross_group(&exec, QueryType::FindReferences);
+        // §6.2 line 651: G1 = 3.0, G2 = 2.0
+        let expected = 3.0_f64 / 61.0 + 2.0_f64 / 62.0;
+        // Find the file_x hit (it might not be at index 0 because
+        // the decoy at G2 rank 1 may outscore it depending on
+        // weights — we deliberately check by file_path).
+        let x_hit = outcome
+            .hits
+            .iter()
+            .find(|h| h.file_path == file_x)
+            .expect("(SA3) file_x must be present");
+        assert!(
+            (x_hit.fused_score - expected).abs() < 1e-9,
+            "(SA3) fused_score; left: {}; right: {expected}",
+            x_hit.fused_score
+        );
+        assert!(
+            x_hit.per_group_ranks.contains(&(Group::G1, 1)),
+            "(SA3) per_group_ranks contains (G1, 1)"
+        );
+        assert!(
+            x_hit.per_group_ranks.contains(&(Group::G2, 2)),
+            "(SA3) per_group_ranks contains (G2, 2)"
+        );
+
+        // ── SA4: degraded_groups passthrough ────────────────
+        let exec = CrossGroupExecution {
+            results: vec![],
+            master_timed_out: false,
+            wall_elapsed_ms: 0,
+            degraded_groups: vec![Group::G3, Group::G7],
+        };
+        let outcome = fuse_cross_group(&exec, QueryType::UnderstandCode);
+        assert_eq!(
+            outcome.degraded_groups,
+            vec![Group::G3, Group::G7],
+            "(SA4) degraded_groups passthrough verbatim"
+        );
+
+        // ── SA5: zero-weight skip (Remember sentinel row) ───
+        // §6.2 line 658: Remember = [0, 0, 3.0, 0, 0, 0, 0, 0]
+        // — G1 weight is 0.0, so the contribution is 0 and the
+        // hit is excluded per §6.3 line 667 threshold-of-zero
+        // contract.
+        let g1 = GroupResult {
+            group: Group::G1,
+            status: GroupStatus::Available,
+            hits: vec![GroupHit {
+                file_path: PathBuf::from("zero.rs"),
+                start_line: 1,
+                end_line: 1,
+                snippet: "z".to_owned(),
+                score: 0.5,
+            }],
+            elapsed_ms: 1,
+            error: None,
+        };
+        let exec = CrossGroupExecution {
+            results: vec![g1],
+            master_timed_out: false,
+            wall_elapsed_ms: 1,
+            degraded_groups: vec![],
+        };
+        let outcome = fuse_cross_group(&exec, QueryType::Remember);
+        assert!(
+            outcome.hits.is_empty(),
+            "(SA5) zero-weight hit must be excluded; got {:?}",
+            outcome.hits
+        );
+
+        // ── SA6: used_weights snapshot (Remember sentinel) ──
+        assert_eq!(
+            outcome.used_weights,
+            [0.0, 0.0, 3.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            "(SA6) used_weights Remember sentinel; left: {:?}",
+            outcome.used_weights
+        );
+
+        // ── SA7: JSON round-trip on the SA1 outcome ─────────
+        let json = serde_json::to_string(&sa1_outcome).expect("(SA7) serialize");
+        let round: CrossGroupFusedOutcome = serde_json::from_str(&json).expect("(SA7) deserialize");
+        assert_eq!(
+            round, sa1_outcome,
+            "(SA7) round-trip equality; left: {round:?}; right: {sa1_outcome:?}"
+        );
+    }
+}
