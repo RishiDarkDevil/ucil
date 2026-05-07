@@ -1,27 +1,34 @@
-=== Cargo.lock entries for lancedb / ort ===
+=== Cargo.lock LanceDB / ONNX entries ===
+3619:name = "lancedb"
+4379:name = "ort"
+6678:name = "ucil-embeddings"
+
+=== Cargo.lock LanceDB version block ===
 name = "lancedb"
 version = "0.16.0"
---
+source = "registry+https://github.com/rust-lang/crates.io-index"
+---
+
+=== Cargo.lock ort version block ===
 name = "ort"
 version = "2.0.0-rc.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+---
 
-=== ucil-embeddings/Cargo.toml dependency declarations ===
-ort.workspace = true
-# the arrow-stack ABI tier identical (`lancedb 0.16` → `lance 0.23` →
-lancedb = { workspace = true }
-# `lancedb 0.16` transitively depends on.
+=== ucil-embeddings deps on lancedb / ort ===
+12:ort.workspace = true
+30:# the arrow-stack ABI tier identical (`lancedb 0.16` → `lance 0.23` →
+33:lancedb = { workspace = true }
+37:# `lancedb 0.16` transitively depends on.
 
-=== root Cargo.toml workspace.dependencies ===
-# OpenTelemetry — stdout-only exporter for Phase 0 (invariant 8)
-# `cargo_bench_support` feature is required for `cargo bench`
-criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support", "plotters"] }
-# tree-sitter >= 0.25 (0.24.x only supports up to ABI 14).
-# crate's re-exports.  Pinned to `=3.7.2` to align with `scip = "0.7"`'s
-# `P2-W8-F01`).  `ort` 2.x is the current line; as of 2026-05-06 it is
-# `libonnxruntime.so` (DEC-0006 spirit); ort-sys also requires a TLS
-ort = { version = "=2.0.0-rc.12", default-features = false, features = ["std", "download-binaries", "tls-rustls"] }
-# `chrono` 0.4.44+, and (b) lance 0.29 (pulled by lancedb 0.20+) trips
-lancedb = { version = "0.16", default-features = false }
-# `Field`, `DataType`.  Pinned to the `53` line that lancedb 0.16
-# `crates/ucil-daemon/src/lancedb_indexer.rs` (P2-W8-F04, WO-0064) to
-# `lancedb::Table::query().execute().await?` streams into a
+=== Workspace dep declarations for lancedb / ort ===
+40:# OpenTelemetry — stdout-only exporter for Phase 0 (invariant 8)
+52:# `cargo_bench_support` feature is required for `cargo bench`
+56:criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support", "plotters"] }
+76:# tree-sitter >= 0.25 (0.24.x only supports up to ABI 14).
+165:# crate's re-exports.  Pinned to `=3.7.2` to align with `scip = "0.7"`'s
+182:# `P2-W8-F01`).  `ort` 2.x is the current line; as of 2026-05-06 it is
+188:# `libonnxruntime.so` (DEC-0006 spirit); ort-sys also requires a TLS
+194:ort = { version = "=2.0.0-rc.12", default-features = false, features = ["std", "download-binaries", "tls-rustls"] }
+230:# `chrono` 0.4.44+, and (b) lance 0.29 (pulled by lancedb 0.20+) trips
+238:lancedb = { version = "0.16", default-features = false }
