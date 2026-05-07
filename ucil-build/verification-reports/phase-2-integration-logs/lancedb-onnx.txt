@@ -1,34 +1,79 @@
-=== Cargo.lock LanceDB / ONNX entries ===
+=== Cargo.lock entries (lancedb, ort, ucil-embeddings) ===
+
+=== full block matches ===
 3619:name = "lancedb"
+3620-version = "0.16.0"
+3621-source = "registry+https://github.com/rust-lang/crates.io-index"
+3622-checksum = "2cd402d7e32b63681c60235ba68a124af5a6fd39c64eaf24284b9f2105b53f56"
+--
 4379:name = "ort"
+4380-version = "2.0.0-rc.12"
+4381-source = "registry+https://github.com/rust-lang/crates.io-index"
+4382-checksum = "d7de3af33d24a745ffb8fab904b13478438d1cd52868e6f17735ef6e1f8bf133"
+--
 6678:name = "ucil-embeddings"
+6679-version = "0.1.0"
+6680-dependencies = [
+6681- "arrow-array",
 
-=== Cargo.lock LanceDB version block ===
-name = "lancedb"
-version = "0.16.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
----
+=== ucil-embeddings Cargo.toml ===
+[package]
+name = "ucil-embeddings"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "UCIL embedding inference: ONNX Runtime integration, chunking, model management"
 
-=== Cargo.lock ort version block ===
-name = "ort"
-version = "2.0.0-rc.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
----
+[dependencies]
+ndarray.workspace = true
+ort.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokenizers.workspace = true
+toml.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+ucil-core = { path = "../ucil-core" }
+ucil-treesitter = { path = "../ucil-treesitter" }
 
-=== ucil-embeddings deps on lancedb / ort ===
-12:ort.workspace = true
-30:# the arrow-stack ABI tier identical (`lancedb 0.16` → `lance 0.23` →
-33:lancedb = { workspace = true }
-37:# `lancedb 0.16` transitively depends on.
+[dev-dependencies]
+criterion.workspace = true
+tempfile.workspace = true
+# LanceDB async Rust client — backs the synthetic 768-d corpus inserted
+# by `benches/vector_query.rs` for the IVF/HNSW query-latency
+# benchmark (master-plan §18 Phase 2 Week 8 line 1789; `P2-W8-F07` /
+# `WO-0065`).  Already a workspace dep (used by `ucil-daemon` for the
+# per-branch `code_chunks` table); reusing the same workspace pin keeps
+# the arrow-stack ABI tier identical (`lancedb 0.16` → `lance 0.23` →
+# `arrow 53`).  Cargo.lock churn is near-zero because every transitive
+# crate is already resolved on `main`.
+lancedb = { workspace = true }
+# `arrow-array` exposes `RecordBatch`, `RecordBatchIterator`,
+# `FixedSizeListArray`, and the `Float32Type` row-builder used by the
+# bench's corpus assembly.  Pinned via the workspace `53` line that
+# `lancedb 0.16` transitively depends on.
+arrow-array = { workspace = true }
+# `arrow-schema` exposes `Schema`, `Field`, `DataType` for the bench's
+# simplified 2-column schema (`id: Utf8`, `embedding:
+# FixedSizeList<Float32, 768>`).  The production 12-column
+# `code_chunks_schema()` lives in `ucil-daemon::branch_manager`
+# (master-plan §12.2 lines 1321-1346); the bench measures the embedding
+# column's IVF/HNSW query latency in isolation, so the
+# 10-column-trimmed bench schema is justified by the bench's
+# isolation contract.
+arrow-schema = { workspace = true }
+# Deterministic-seed PRNG — `StdRng::seed_from_u64(0x_C0DE_BABE)` for
+# the corpus and `StdRng::seed_from_u64(0x_FACE_FEED)` for queries
+# (`P2-W8-F07` / `WO-0065`).  `rand 0.8.5` is already in `Cargo.lock`
+# (transitive via `lance` + `tokenizers`); pinning the dev-dep to the
+# `0.8` line produces zero new-crate churn.
+rand = "0.8"
 
-=== Workspace dep declarations for lancedb / ort ===
-40:# OpenTelemetry — stdout-only exporter for Phase 0 (invariant 8)
-52:# `cargo_bench_support` feature is required for `cargo bench`
-56:criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support", "plotters"] }
-76:# tree-sitter >= 0.25 (0.24.x only supports up to ABI 14).
-165:# crate's re-exports.  Pinned to `=3.7.2` to align with `scip = "0.7"`'s
-182:# `P2-W8-F01`).  `ort` 2.x is the current line; as of 2026-05-06 it is
-188:# `libonnxruntime.so` (DEC-0006 spirit); ort-sys also requires a TLS
-194:ort = { version = "=2.0.0-rc.12", default-features = false, features = ["std", "download-binaries", "tls-rustls"] }
-230:# `chrono` 0.4.44+, and (b) lance 0.29 (pulled by lancedb 0.20+) trips
-238:lancedb = { version = "0.16", default-features = false }
+# `harness = false` tells cargo to use criterion's `main()` (declared in
+# `benches/throughput.rs` via `criterion_main!`), NOT Rust's default
+# `#[test]` harness.  Required for `cargo bench --bench throughput` to
+# pick up the criterion entry-point.  Master-plan §4.2 line 303 +
+# §18 Phase 2 Week 8 line 1789 (`P2-W8-F06` / `WO-0061`).
+[[bench]]
