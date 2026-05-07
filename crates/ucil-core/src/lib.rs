@@ -8,6 +8,7 @@
 #![deny(rustdoc::broken_intra_doc_links)]
 
 pub mod ceqp;
+pub mod cross_group;
 pub mod fusion;
 pub mod incremental;
 pub mod knowledge_graph;
@@ -25,6 +26,12 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 // returns all 8 new fusion symbols on the same line.
 #[rustfmt::skip]
 pub use fusion::{fuse_g2_rrf, rrf_weight, G2FusedHit, G2FusedOutcome, G2Hit, G2Source, G2SourceResults, G2_RRF_K};
+// Single-line per AC22 (WO-0056) — `#[rustfmt::skip]` blocks the
+// 100-col wrap so `grep -nE 'execute_cross_group|fuse_cross_group|GroupExecutor|...'`
+// returns all 14 cross-group symbols on the same line. P3-W9-F03 / F04
+// land the public surface for downstream daemon-side consumer WOs.
+#[rustfmt::skip]
+pub use cross_group::{execute_cross_group, fuse_cross_group, CrossGroupExecution, CrossGroupFusedHit, CrossGroupFusedOutcome, CrossGroupQuery, Group, GroupExecutor, GroupHit, GroupResult, GroupStatus, CROSS_GROUP_MASTER_DEADLINE, CROSS_GROUP_PER_GROUP_DEADLINE, CROSS_GROUP_RRF_K};
 pub use incremental::{dependent_metric, symbol_count, FileRevision, UcilDatabase, UcilDb};
 // Grouped onto single lines so the WO-0024 acceptance greps
 // (`pub use knowledge_graph::.*Entity` etc.) match without depending
