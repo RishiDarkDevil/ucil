@@ -22,6 +22,35 @@ ucil-treesitter = { path = "../ucil-treesitter" }
 [dev-dependencies]
 criterion.workspace = true
 tempfile.workspace = true
+# LanceDB async Rust client — backs the synthetic 768-d corpus inserted
+# by `benches/vector_query.rs` for the IVF/HNSW query-latency
+# benchmark (master-plan §18 Phase 2 Week 8 line 1789; `P2-W8-F07` /
+# `WO-0065`).  Already a workspace dep (used by `ucil-daemon` for the
+# per-branch `code_chunks` table); reusing the same workspace pin keeps
+# the arrow-stack ABI tier identical (`lancedb 0.16` → `lance 0.23` →
+# `arrow 53`).  Cargo.lock churn is near-zero because every transitive
+# crate is already resolved on `main`.
+lancedb = { workspace = true }
+# `arrow-array` exposes `RecordBatch`, `RecordBatchIterator`,
+# `FixedSizeListArray`, and the `Float32Type` row-builder used by the
+# bench's corpus assembly.  Pinned via the workspace `53` line that
+# `lancedb 0.16` transitively depends on.
+arrow-array = { workspace = true }
+# `arrow-schema` exposes `Schema`, `Field`, `DataType` for the bench's
+# simplified 2-column schema (`id: Utf8`, `embedding:
+# FixedSizeList<Float32, 768>`).  The production 12-column
+# `code_chunks_schema()` lives in `ucil-daemon::branch_manager`
+# (master-plan §12.2 lines 1321-1346); the bench measures the embedding
+# column's IVF/HNSW query latency in isolation, so the
+# 10-column-trimmed bench schema is justified by the bench's
+# isolation contract.
+arrow-schema = { workspace = true }
+# Deterministic-seed PRNG — `StdRng::seed_from_u64(0x_C0DE_BABE)` for
+# the corpus and `StdRng::seed_from_u64(0x_FACE_FEED)` for queries
+# (`P2-W8-F07` / `WO-0065`).  `rand 0.8.5` is already in `Cargo.lock`
+# (transitive via `lance` + `tokenizers`); pinning the dev-dep to the
+# `0.8` line produces zero new-crate churn.
+rand = "0.8"
 
 # `harness = false` tells cargo to use criterion's `main()` (declared in
 # `benches/throughput.rs` via `criterion_main!`), NOT Rust's default
@@ -30,4 +59,14 @@ tempfile.workspace = true
 # §18 Phase 2 Week 8 line 1789 (`P2-W8-F06` / `WO-0061`).
 [[bench]]
 name = "throughput"
+harness = false
+
+# Second criterion bench `vector_query` — measures p95 warm
+# LanceDB+IVF/HNSW vector-search latency on a synthetic 768-d corpus
+# (master-plan §18 Phase 2 Week 8 line 1789 "Benchmark: ... query
+# latency ..."; `P2-W8-F07` / `WO-0065`).  Mirrors the throughput
+# bench's `[[bench]]` shape above; `harness = false` lets criterion's
+# `criterion_main!` declare `fn main()`.
+[[bench]]
+name = "vector_query"
 harness = false
