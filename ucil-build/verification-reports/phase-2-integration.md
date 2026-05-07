@@ -142,3 +142,4 @@ handlers.
 - Tester role:          `integration-tester` (per `.claude/agents/integration-tester.md`).
 - Phase from progress:  `2` (`jq .phase ucil-build/progress.json`).
 - Toolchain probed:     docker v29.4.2 (compose v5.1.3, daemon socket unreachable); uvx 0.11.6; pyright 1.1.409; cargo 1.94.1; rustc 1.94.1.
+- Concurrency note:     a parallel integration-tester pass (session `itg-33c2b400-cb9d-4a42-8cc6-2df22c11a213`, start `2026-05-07T18:34:35Z`) was active during this report write and refreshed `phase-2-integration-logs/{e2e-mcp-smoke,serena-live,ucil-embeddings-build}.dur` to within ±20 ms of the values cited above (`e2e-mcp-smoke 401→415 ms`, `serena-live 3222→3226 ms`, `ucil-embeddings-build 165→183 ms`); `diagnostics-bridge.dur` was unchanged at 314 ms. Verdicts are identical (rc=0 across the board), so the variance does not affect this report's conclusion.
