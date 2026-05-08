@@ -157,6 +157,7 @@ pub mod branch_manager;
 pub mod executor;
 pub mod g2_search;
 pub mod g3;
+pub mod g4;
 pub mod lancedb_indexer;
 pub mod lifecycle;
 pub mod plugin_manager;
@@ -188,6 +189,8 @@ pub use executor::{enrich_find_definition, execute_g1, fuse_g1, Caller, Enriched
 pub use g2_search::{G2SearchError, G2SourceFactory, G2SourceProvider, LancedbProvider, ProbeProvider, RipgrepProvider};
 #[rustfmt::skip]
 pub use g3::{execute_g3, merge_g3_by_entity, G3FactObservation, G3MergeOutcome, G3MergedFact, G3Outcome, G3Query, G3Source, G3SourceOutput, G3SourceStatus, G3_MASTER_DEADLINE, G3_PER_SOURCE_DEADLINE};
+#[rustfmt::skip]
+pub use g4::{execute_g4, merge_g4_dependency_union, G4BlastRadiusEntry, G4DependencyEdge, G4EdgeKind, G4EdgeOrigin, G4Outcome, G4Query, G4Source, G4SourceOutput, G4SourceStatus, G4UnifiedEdge, G4UnionOutcome, G4_MASTER_DEADLINE, G4_PER_SOURCE_DEADLINE};
 #[rustfmt::skip]
 pub use lancedb_indexer::{ChunkIndexerError, CodeRankEmbeddingSource, EmbeddingSource, EmbeddingSourceError, IndexerHandle, IndexerState, IndexerStats, LancedbChunkIndexer};
 #[rustfmt::skip]

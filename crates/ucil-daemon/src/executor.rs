@@ -3720,3 +3720,740 @@ pub async fn test_g3_parallel_merge() {
         merged_sa8.total_entities_out
     );
 }
+
+// ── G4 (Architecture) parallel orchestrator + edge-union/BFS-blast-radius
+// merger acceptance test (P3-W9-F09 / WO-0073) ─────────────────────────────
+//
+// Per `DEC-0007` (frozen-selector module-root placement), the
+// acceptance test `test_g4_architecture_query` lives at the MODULE
+// ROOT of `executor.rs` — NOT inside `mod tests {}` — so the
+// `feature-list.json` selector
+// `-p ucil-daemon executor::test_g4_architecture_query` resolves
+// cleanly without a `tests::` intermediate (parallel to
+// `executor::test_g1_parallel_execution` from WO-0047 and
+// `executor::test_g3_parallel_merge` from WO-0070).
+//
+// Per `DEC-0008` §4 the local `TestG4Source` impl below is UCIL-
+// internal — NOT a mock of any external wire format.  Production
+// wiring of real subprocess clients (e.g. `CodeGraphContextG4Source`
+// calling the F08 plugin via `tokio::process::Command`,
+// `LSPCallHierarchyG4Source` calling the P1-W5-F06 LSP bridge) is
+// deferred to a follow-up production-wiring WO that bundles G4 into
+// the cross-group executor.
+
+/// Frozen acceptance selector for feature `P3-W9-F09` — see
+/// `ucil-build/feature-list.json` entry for
+/// `-p ucil-daemon executor::test_g4_architecture_query`.
+///
+/// Drives [`crate::g4::execute_g4`] +
+/// [`crate::g4::merge_g4_dependency_union`] over UCIL-internal
+/// [`crate::g4::G4Source`] impls and asserts eight properties
+/// (SA1..SA8):
+///
+/// * **SA1 — Parallelism**: 3 sources each `Sleep(200 ms, …)` produce
+///   `wall_elapsed_ms in [180, 500)` (lower bound proves at least one
+///   source's sleep elapsed; upper bound tightened from a hypothetical
+///   round-number 700 ms to 500 ms per WO-0070 lessons "compute
+///   parallelism dual-bound upper limit from
+///   `max_per_source_sleep_ms * (N_sources / 2)`" → `200 * 3/2 = 300`
+///   plus 200 ms noise margin → 500 ms ceiling, which reliably trips
+///   serial 3×200 = 600 ms execution).
+/// * **SA2 — Edge dedup on union**: source A and source B both emit
+///   the same `(foo, bar, Import)` edge with different
+///   `coupling_weight`; merger collapses them into one
+///   [`crate::g4::G4UnifiedEdge`] with both `source_id`s in
+///   `contributing_source_ids` and `coupling_weight = max(0.7, 0.9)
+///   = 0.9`.
+/// * **SA3 — Different sources contribute disjoint edges**: source A
+///   emits `(a, b)` and source B emits `(c, d)`; merger emits both
+///   edges and `sources_contributing == 2`.
+/// * **SA4 — BFS blast-radius depth-tracking**: edges
+///   `(root → child1, child1 → grandchild, child1 → cousin)` plus
+///   seed `["root"]` produce `{root: 0, child1: 1, grandchild: 2,
+///   cousin: 2}` at `max_blast_depth = 3`, and `{root, child1}` at
+///   `max_blast_depth = 1`.
+/// * **SA5 — Coupling-weight propagation (multiplicative)**: edges
+///   `[(a, b, 0.9), (a, c, 0.1), (b, d, 1.0), (c, e, 1.0)]` plus seed
+///   `["a"]` yield `cumulative_coupling = {a: 1.0, b: 0.9, c: 0.1,
+///   d: 0.9, e: 0.1}` (multiplicative, not additive — master-plan
+///   §5.4 line 495 "weight by coupling strength").
+/// * **SA6 — Partial-Errored**: 1 of 3 sources errors; the merger
+///   succeeds without that source's contributions.
+/// * **SA7 — Partial-TimedOut**: 1 of 3 sources sleeps >
+///   `G4_PER_SOURCE_DEADLINE`; the per-source timeout fires before
+///   the master deadline.
+/// * **SA8 — Master-deadline-trip**: tight `master_deadline = 100 ms`
+///   with 7 s sleepers trips master, `wall_elapsed_ms < 2000 ms`.
+#[cfg(test)]
+#[allow(clippy::too_many_lines, clippy::missing_panics_doc)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+pub async fn test_g4_architecture_query() {
+    use std::collections::HashMap;
+    use std::time::Instant;
+
+    use crate::g4::{
+        execute_g4, merge_g4_dependency_union, G4BlastRadiusEntry, G4DependencyEdge, G4EdgeKind,
+        G4EdgeOrigin, G4Outcome, G4Query, G4Source, G4SourceOutput, G4SourceStatus,
+        G4_PER_SOURCE_DEADLINE,
+    };
+
+    /// Behaviour switches for the per-test [`G4Source`] impl below.
+    ///
+    /// `ReturnEdges` returns the supplied edges verbatim under
+    /// `Available`; `Sleep` blocks for `Duration` then returns the
+    /// edges; `Error` returns `Errored` with the supplied message;
+    /// `LongSleep` blocks for longer than
+    /// [`G4_PER_SOURCE_DEADLINE`] so the orchestrator's per-source
+    /// timeout fires.
+    #[derive(Clone)]
+    enum TestBehaviour {
+        ReturnEdges(Vec<G4DependencyEdge>),
+        Sleep(Duration, Vec<G4DependencyEdge>),
+        Error(String),
+        LongSleep(Duration),
+    }
+
+    /// Local [`G4Source`] impl driving the per-scenario behaviour.
+    /// Per `DEC-0008` §4 this is a UCIL-internal trait (the
+    /// dependency-inversion seam), so a local impl in a test is not
+    /// a mock of any external wire format — same shape as the
+    /// `TestG1Source` impl earlier in this file and the
+    /// `TestG3Source` impl above.
+    struct TestG4Source {
+        id: String,
+        behaviour: TestBehaviour,
+    }
+
+    #[async_trait::async_trait]
+    impl G4Source for TestG4Source {
+        fn source_id(&self) -> &str {
+            &self.id
+        }
+
+        async fn execute(&self, _query: &G4Query) -> G4SourceOutput {
+            match &self.behaviour {
+                TestBehaviour::ReturnEdges(edges) => G4SourceOutput {
+                    source_id: self.id.clone(),
+                    status: G4SourceStatus::Available,
+                    elapsed_ms: 0,
+                    edges: edges.clone(),
+                    error: None,
+                },
+                TestBehaviour::Sleep(d, edges) => {
+                    let start = Instant::now();
+                    tokio::time::sleep(*d).await;
+                    let elapsed_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+                    G4SourceOutput {
+                        source_id: self.id.clone(),
+                        status: G4SourceStatus::Available,
+                        elapsed_ms,
+                        edges: edges.clone(),
+                        error: None,
+                    }
+                }
+                TestBehaviour::Error(msg) => G4SourceOutput {
+                    source_id: self.id.clone(),
+                    status: G4SourceStatus::Errored,
+                    elapsed_ms: 0,
+                    edges: vec![],
+                    error: Some(msg.clone()),
+                },
+                TestBehaviour::LongSleep(d) => {
+                    tokio::time::sleep(*d).await;
+                    // The orchestrator's per-source timeout must fire
+                    // before this branch returns; if the test ever
+                    // sees `Available` here, the timeout wrapper has
+                    // regressed (an M1-style mutation would land us
+                    // here).
+                    G4SourceOutput {
+                        source_id: self.id.clone(),
+                        status: G4SourceStatus::Available,
+                        elapsed_ms: u64::try_from(d.as_millis()).unwrap_or(u64::MAX),
+                        edges: vec![],
+                        error: None,
+                    }
+                }
+            }
+        }
+    }
+
+    /// Helper for ergonomic edge construction inside the test.
+    fn make_edge(
+        source: &str,
+        target: &str,
+        kind: G4EdgeKind,
+        weight: f64,
+        src_id: &str,
+    ) -> G4DependencyEdge {
+        G4DependencyEdge {
+            source: source.to_owned(),
+            target: target.to_owned(),
+            edge_kind: kind,
+            source_id: src_id.to_owned(),
+            origin: G4EdgeOrigin::Inferred,
+            coupling_weight: weight,
+        }
+    }
+
+    let q_default = G4Query {
+        changed_nodes: vec!["TaskManager".to_owned()],
+        max_blast_depth: 3,
+        max_edges: 256,
+    };
+
+    // ── SA1 — Parallelism ─────────────────────────────────────────────
+    //
+    // Three sources each Sleep(200 ms, ...) → wall in [180, 500).
+    // Lower bound proves at least one source's 200 ms sleep elapsed.
+    // Upper bound tightened to 500 ms (NOT a round-number 700 ms) so
+    // serial 3×200 = 600 ms execution can NOT slip through — defeats
+    // the M1 sequential-execution mutation per WO-0070 lessons.
+    let sources_sa1: Vec<Box<dyn G4Source + Send + Sync + 'static>> = vec![
+        Box::new(TestG4Source {
+            id: "alpha".to_owned(),
+            behaviour: TestBehaviour::Sleep(
+                Duration::from_millis(200),
+                vec![make_edge("a", "b", G4EdgeKind::Import, 0.5, "alpha")],
+            ),
+        }),
+        Box::new(TestG4Source {
+            id: "beta".to_owned(),
+            behaviour: TestBehaviour::Sleep(
+                Duration::from_millis(200),
+                vec![make_edge("c", "d", G4EdgeKind::Call, 0.5, "beta")],
+            ),
+        }),
+        Box::new(TestG4Source {
+            id: "gamma".to_owned(),
+            behaviour: TestBehaviour::Sleep(
+                Duration::from_millis(200),
+                vec![make_edge("e", "f", G4EdgeKind::Inherits, 0.5, "gamma")],
+            ),
+        }),
+    ];
+    let outcome_sa1: G4Outcome =
+        execute_g4(q_default.clone(), sources_sa1, Duration::from_millis(5_000)).await;
+    assert!(
+        outcome_sa1.wall_elapsed_ms >= 180,
+        "(SA1) parallel wall >= 180 ms; left: {}, right: 180 (proves \
+         at least one 200 ms sleep elapsed)",
+        outcome_sa1.wall_elapsed_ms
+    );
+    // Upper bound 500 ms (NOT a round-number 700 ms): max-per-source
+    // 200 ms × (N=3 / 2) = 300 ms target + 200 ms noise margin = 500
+    // ms.  Catches sequential 3×200=600 ms execution under the M1
+    // mutation.
+    assert!(
+        outcome_sa1.wall_elapsed_ms < 500,
+        "(SA1) parallel wall < 500 ms; left: {}, right: 500 (proves \
+         serial 3x200=600 ms did NOT happen → parallelism confirmed)",
+        outcome_sa1.wall_elapsed_ms
+    );
+    assert!(
+        !outcome_sa1.master_timed_out,
+        "(SA1) master_timed_out must be false on a 200 ms-per-source \
+         happy path; left: true, right: false"
+    );
+    assert_eq!(
+        outcome_sa1.results.len(),
+        3,
+        "(SA1) outcome.results must contain exactly 3 entries (one \
+         per source); left: {}, right: 3",
+        outcome_sa1.results.len()
+    );
+
+    // ── SA2 — Edge dedup on union ────────────────────────────────────
+    //
+    // source A returns [(foo→bar, weight=0.7)] AND source B returns
+    // [(foo→bar, weight=0.9), (bar→baz, weight=0.5)]; merge.unified_
+    // edges contains exactly 2 unique edges (foo→bar deduped,
+    // bar→baz unique); the deduped foo→bar entry has
+    // contributing_source_ids = ["src-a", "src-b"] (sorted
+    // lexicographically) AND coupling_weight == 0.9 (max wins).
+    let sources_sa2: Vec<Box<dyn G4Source + Send + Sync + 'static>> = vec![
+        Box::new(TestG4Source {
+            id: "src-a".to_owned(),
+            behaviour: TestBehaviour::ReturnEdges(vec![make_edge(
+                "foo",
+                "bar",
+                G4EdgeKind::Import,
+                0.7,
+                "src-a",
+            )]),
+        }),
+        Box::new(TestG4Source {
+            id: "src-b".to_owned(),
+            behaviour: TestBehaviour::ReturnEdges(vec![
+                make_edge("foo", "bar", G4EdgeKind::Import, 0.9, "src-b"),
+                make_edge("bar", "baz", G4EdgeKind::Call, 0.5, "src-b"),
+            ]),
+        }),
+    ];
+    let q_sa2 = G4Query {
+        changed_nodes: vec![],
+        max_blast_depth: 3,
+        max_edges: 256,
+    };
+    let outcome_sa2 = execute_g4(q_sa2.clone(), sources_sa2, Duration::from_millis(5_000)).await;
+    let merged_sa2 = merge_g4_dependency_union(&outcome_sa2.results, &q_sa2);
+    assert_eq!(
+        merged_sa2.unified_edges.len(),
+        2,
+        "(SA2) unified_edges.len() == 2; left: {}, right: 2 (foo→bar \
+         deduped, bar→baz unique)",
+        merged_sa2.unified_edges.len()
+    );
+    let foo_bar = merged_sa2
+        .unified_edges
+        .iter()
+        .find(|ue| ue.edge.source == "foo" && ue.edge.target == "bar")
+        .expect("(SA2) foo→bar edge must be in unified_edges");
+    assert_eq!(
+        foo_bar.contributing_source_ids,
+        vec!["src-a".to_owned(), "src-b".to_owned()],
+        "(SA2) contributing_source_ids must be [\"src-a\", \"src-b\"] \
+         lexicographically sorted; left: {:?}, right: [\"src-a\", \
+         \"src-b\"]",
+        foo_bar.contributing_source_ids
+    );
+    assert!(
+        (foo_bar.edge.coupling_weight - 0.9).abs() < 1e-9,
+        "(SA2) deduped foo→bar coupling_weight == 0.9 (max-wins); \
+         left: {}, right: 0.9",
+        foo_bar.edge.coupling_weight
+    );
+    assert_eq!(
+        merged_sa2.total_edges_in, 3,
+        "(SA2) total_edges_in must be 3 (1 from src-a + 2 from src-b); \
+         left: {}, right: 3",
+        merged_sa2.total_edges_in
+    );
+
+    // ── SA3 — Different sources contribute disjoint edges ────────────
+    //
+    // source A returns [(a→b, 0.5)], source B returns [(c→d, 0.5)];
+    // merge.unified_edges contains BOTH edges (length 2) AND
+    // merge.sources_contributing == 2.
+    let sources_sa3: Vec<Box<dyn G4Source + Send + Sync + 'static>> = vec![
+        Box::new(TestG4Source {
+            id: "src-a".to_owned(),
+            behaviour: TestBehaviour::ReturnEdges(vec![make_edge(
+                "a",
+                "b",
+                G4EdgeKind::Import,
+                0.5,
+                "src-a",
+            )]),
+        }),
+        Box::new(TestG4Source {
+            id: "src-b".to_owned(),
+            behaviour: TestBehaviour::ReturnEdges(vec![make_edge(
+                "c",
+                "d",
+                G4EdgeKind::Import,
+                0.5,
+                "src-b",
+            )]),
+        }),
+    ];
+    let q_sa3 = G4Query {
+        changed_nodes: vec![],
+        max_blast_depth: 3,
+        max_edges: 256,
+    };
+    let outcome_sa3 = execute_g4(q_sa3.clone(), sources_sa3, Duration::from_millis(5_000)).await;
+    let merged_sa3 = merge_g4_dependency_union(&outcome_sa3.results, &q_sa3);
+    assert_eq!(
+        merged_sa3.unified_edges.len(),
+        2,
+        "(SA3) disjoint edges → unified_edges.len() == 2; left: {}, \
+         right: 2",
+        merged_sa3.unified_edges.len()
+    );
+    assert_eq!(
+        merged_sa3.sources_contributing, 2,
+        "(SA3) sources_contributing == 2; left: {}, right: 2",
+        merged_sa3.sources_contributing
+    );
+
+    // ── SA4 — BFS blast-radius depth-tracking ────────────────────────
+    //
+    // edges = [(root → child1, 1.0), (child1 → grandchild, 1.0),
+    //          (child1 → cousin, 1.0)]
+    // changed_nodes = ["root"], max_blast_depth = 3
+    // Expected depths: {root: 0, child1: 1, grandchild: 2, cousin: 2}
+    //
+    // The `depth child1 == 1` assertion is FIRST so the M3 mutation
+    // (`+ 1` → `+ 2`) panics with the pre-baked message
+    // `(SA4) BFS depth child1 == 1; left: 2, right: 1` — under M3,
+    // child1 IS in blast_radius (at depth 2 ≤ max=3), so the lookup
+    // succeeds and the depth assertion fires.
+    let sources_sa4: Vec<Box<dyn G4Source + Send + Sync + 'static>> =
+        vec![Box::new(TestG4Source {
+            id: "tree".to_owned(),
+            behaviour: TestBehaviour::ReturnEdges(vec![
+                make_edge("root", "child1", G4EdgeKind::Import, 1.0, "tree"),
+                make_edge("child1", "grandchild", G4EdgeKind::Import, 1.0, "tree"),
+                make_edge("child1", "cousin", G4EdgeKind::Import, 1.0, "tree"),
+            ]),
+        })];
+    let q_sa4 = G4Query {
+        changed_nodes: vec!["root".to_owned()],
+        max_blast_depth: 3,
+        max_edges: 256,
+    };
+    let outcome_sa4 = execute_g4(q_sa4.clone(), sources_sa4, Duration::from_millis(5_000)).await;
+    let merged_sa4 = merge_g4_dependency_union(&outcome_sa4.results, &q_sa4);
+
+    let by_node_sa4: HashMap<&str, &G4BlastRadiusEntry> = merged_sa4
+        .blast_radius
+        .iter()
+        .map(|e| (e.node.as_str(), e))
+        .collect();
+    let child1 = by_node_sa4
+        .get("child1")
+        .expect("(SA4) child1 must be in blast_radius for max_blast_depth=3");
+    // M3 mutation target — fires first under +2 mutation since child1
+    // IS still reachable at depth 2 ≤ max_blast_depth=3 even with the
+    // off-by-two depth.
+    assert_eq!(
+        child1.depth, 1,
+        "(SA4) BFS depth child1 == 1; left: {}, right: 1",
+        child1.depth
+    );
+    assert_eq!(
+        merged_sa4.blast_radius.len(),
+        4,
+        "(SA4) max_blast_depth=3 → all 4 nodes (root, child1, \
+         grandchild, cousin) present; left: {}, right: 4",
+        merged_sa4.blast_radius.len()
+    );
+    let root_e = by_node_sa4
+        .get("root")
+        .expect("(SA4) root must be in blast_radius");
+    assert_eq!(
+        root_e.depth, 0,
+        "(SA4) BFS depth root == 0; left: {}, right: 0",
+        root_e.depth
+    );
+    let grandchild = by_node_sa4
+        .get("grandchild")
+        .expect("(SA4) grandchild must be in blast_radius");
+    assert_eq!(
+        grandchild.depth, 2,
+        "(SA4) BFS depth grandchild == 2; left: {}, right: 2",
+        grandchild.depth
+    );
+    let cousin = by_node_sa4
+        .get("cousin")
+        .expect("(SA4) cousin must be in blast_radius");
+    assert_eq!(
+        cousin.depth, 2,
+        "(SA4) BFS depth cousin == 2; left: {}, right: 2",
+        cousin.depth
+    );
+
+    // SA4 second sub-case — max_blast_depth=1 prunes everything below
+    // depth 1.  Should yield exactly {root, child1}.
+    let q_sa4b = G4Query {
+        changed_nodes: vec!["root".to_owned()],
+        max_blast_depth: 1,
+        max_edges: 256,
+    };
+    let merged_sa4b = merge_g4_dependency_union(&outcome_sa4.results, &q_sa4b);
+    assert_eq!(
+        merged_sa4b.blast_radius.len(),
+        2,
+        "(SA4) max_blast_depth=1 → exactly 2 nodes (root + child1); \
+         left: {}, right: 2",
+        merged_sa4b.blast_radius.len()
+    );
+    let nodes_sa4b: Vec<&str> = merged_sa4b
+        .blast_radius
+        .iter()
+        .map(|e| e.node.as_str())
+        .collect();
+    assert!(
+        nodes_sa4b.contains(&"root") && nodes_sa4b.contains(&"child1"),
+        "(SA4) max_blast_depth=1 nodes must contain root + child1; \
+         left: {nodes_sa4b:?}, right: [root, child1]"
+    );
+
+    // ── SA5 — Coupling-weight propagation (multiplicative) ───────────
+    //
+    // edges = [(a, b, 0.9), (a, c, 0.1), (b, d, 1.0), (c, e, 1.0)]
+    // changed_nodes = ["a"], max_blast_depth = 3
+    // Expected cumulative_coupling: {a: 1.0, b: 0.9, c: 0.1, d: 0.9,
+    //                                e: 0.1}
+    // Multiplicative shape: cumulative_coupling[child] =
+    // cumulative_coupling[parent] * edge.coupling_weight.
+    let sources_sa5: Vec<Box<dyn G4Source + Send + Sync + 'static>> =
+        vec![Box::new(TestG4Source {
+            id: "diamond".to_owned(),
+            behaviour: TestBehaviour::ReturnEdges(vec![
+                make_edge("a", "b", G4EdgeKind::Import, 0.9, "diamond"),
+                make_edge("a", "c", G4EdgeKind::Import, 0.1, "diamond"),
+                make_edge("b", "d", G4EdgeKind::Import, 1.0, "diamond"),
+                make_edge("c", "e", G4EdgeKind::Import, 1.0, "diamond"),
+            ]),
+        })];
+    let q_sa5 = G4Query {
+        changed_nodes: vec!["a".to_owned()],
+        max_blast_depth: 3,
+        max_edges: 256,
+    };
+    let outcome_sa5 = execute_g4(q_sa5.clone(), sources_sa5, Duration::from_millis(5_000)).await;
+    let merged_sa5 = merge_g4_dependency_union(&outcome_sa5.results, &q_sa5);
+
+    let by_node_sa5: HashMap<&str, &G4BlastRadiusEntry> = merged_sa5
+        .blast_radius
+        .iter()
+        .map(|e| (e.node.as_str(), e))
+        .collect();
+    let expected: &[(&str, f64)] = &[("a", 1.0), ("b", 0.9), ("c", 0.1), ("d", 0.9), ("e", 0.1)];
+    for (node, expected_weight) in expected {
+        let entry = by_node_sa5.get(*node).unwrap_or_else(|| {
+            panic!(
+                "(SA5) node `{node}` must be in blast_radius for \
+                 max_blast_depth=3"
+            )
+        });
+        assert!(
+            (entry.cumulative_coupling - expected_weight).abs() < 1e-3,
+            "(SA5) cumulative_coupling[{node}] == {expected_weight} \
+             (multiplicative); left: {}, right: {expected_weight}",
+            entry.cumulative_coupling
+        );
+    }
+
+    // ── SA6 — Partial-Errored ────────────────────────────────────────
+    //
+    // 1 of 3 sources returns Errored; outcome.results carries exactly
+    // 1 Errored + 2 Available, AND the merger proceeds without
+    // including the errored source's contributions.
+    let sources_sa6: Vec<Box<dyn G4Source + Send + Sync + 'static>> = vec![
+        Box::new(TestG4Source {
+            id: "ok-a".to_owned(),
+            behaviour: TestBehaviour::ReturnEdges(vec![make_edge(
+                "x",
+                "y",
+                G4EdgeKind::Import,
+                0.5,
+                "ok-a",
+            )]),
+        }),
+        Box::new(TestG4Source {
+            id: "broken".to_owned(),
+            behaviour: TestBehaviour::Error("injected error".to_owned()),
+        }),
+        Box::new(TestG4Source {
+            id: "ok-b".to_owned(),
+            behaviour: TestBehaviour::ReturnEdges(vec![make_edge(
+                "y",
+                "z",
+                G4EdgeKind::Import,
+                0.5,
+                "ok-b",
+            )]),
+        }),
+    ];
+    let q_sa6 = G4Query {
+        changed_nodes: vec!["x".to_owned()],
+        max_blast_depth: 3,
+        max_edges: 256,
+    };
+    let outcome_sa6 = execute_g4(q_sa6.clone(), sources_sa6, Duration::from_millis(5_000)).await;
+    let errored_sa6 = outcome_sa6
+        .results
+        .iter()
+        .filter(|r| r.status == G4SourceStatus::Errored)
+        .count();
+    let available_sa6 = outcome_sa6
+        .results
+        .iter()
+        .filter(|r| r.status == G4SourceStatus::Available)
+        .count();
+    assert_eq!(
+        errored_sa6, 1,
+        "(SA6) outcome must contain exactly 1 Errored entry; left: \
+         {errored_sa6}, right: 1"
+    );
+    assert_eq!(
+        available_sa6, 2,
+        "(SA6) outcome must contain exactly 2 Available entries; \
+         left: {available_sa6}, right: 2"
+    );
+    let merged_sa6 = merge_g4_dependency_union(&outcome_sa6.results, &q_sa6);
+    let merged_source_ids_sa6: BTreeSetWrapper = merged_sa6
+        .unified_edges
+        .iter()
+        .flat_map(|ue| ue.contributing_source_ids.iter().cloned())
+        .collect::<std::collections::BTreeSet<String>>()
+        .into();
+    assert!(
+        !merged_source_ids_sa6.0.contains("broken"),
+        "(SA6) merged unified_edges must NOT include the errored \
+         source's source_id; left: {:?}, right: [no `broken`]",
+        merged_source_ids_sa6.0
+    );
+    assert_eq!(
+        merged_sa6.unified_edges.len(),
+        2,
+        "(SA6) merger proceeds without errored source's \
+         contributions — both ok-a/ok-b edges survive; left: {}, \
+         right: 2",
+        merged_sa6.unified_edges.len()
+    );
+
+    // ── SA7 — Partial-TimedOut ───────────────────────────────────────
+    //
+    // 1 of 3 sources LongSleep(6 s) > G4_PER_SOURCE_DEADLINE = 4.5 s.
+    // outcome.results carries exactly 1 TimedOut + 2 Available.
+    // wall_elapsed_ms < 5500 ms (per-source 4.5 s ceiling fires
+    // before master 5 s).
+    let sources_sa7: Vec<Box<dyn G4Source + Send + Sync + 'static>> = vec![
+        Box::new(TestG4Source {
+            id: "fast-a".to_owned(),
+            behaviour: TestBehaviour::ReturnEdges(vec![make_edge(
+                "p",
+                "q",
+                G4EdgeKind::Import,
+                0.5,
+                "fast-a",
+            )]),
+        }),
+        Box::new(TestG4Source {
+            id: "slow".to_owned(),
+            behaviour: TestBehaviour::LongSleep(Duration::from_secs(6)),
+        }),
+        Box::new(TestG4Source {
+            id: "fast-b".to_owned(),
+            behaviour: TestBehaviour::ReturnEdges(vec![make_edge(
+                "q",
+                "r",
+                G4EdgeKind::Import,
+                0.5,
+                "fast-b",
+            )]),
+        }),
+    ];
+    let q_sa7 = G4Query {
+        changed_nodes: vec!["p".to_owned()],
+        max_blast_depth: 3,
+        max_edges: 256,
+    };
+    let outcome_sa7 = execute_g4(q_sa7, sources_sa7, Duration::from_millis(5_000)).await;
+    let timed_out_sa7 = outcome_sa7
+        .results
+        .iter()
+        .filter(|r| r.status == G4SourceStatus::TimedOut)
+        .count();
+    let available_sa7 = outcome_sa7
+        .results
+        .iter()
+        .filter(|r| r.status == G4SourceStatus::Available)
+        .count();
+    assert_eq!(
+        timed_out_sa7, 1,
+        "(SA7) outcome must contain exactly 1 TimedOut entry; left: \
+         {timed_out_sa7}, right: 1"
+    );
+    assert_eq!(
+        available_sa7, 2,
+        "(SA7) outcome must contain exactly 2 Available entries; \
+         left: {available_sa7}, right: 2"
+    );
+    assert!(
+        outcome_sa7.wall_elapsed_ms < 5_500,
+        "(SA7) wall_elapsed_ms must be < 5500 ms (per-source {} ms \
+         ceiling fires before master 5000 ms); left: {}, right: 5500",
+        G4_PER_SOURCE_DEADLINE.as_millis(),
+        outcome_sa7.wall_elapsed_ms
+    );
+    assert!(
+        !outcome_sa7.master_timed_out,
+        "(SA7) master_timed_out must be false — per-source ceiling \
+         fires first; left: true, right: false"
+    );
+
+    // ── SA8 — Master-deadline-trip ───────────────────────────────────
+    //
+    // master_deadline = 100 ms, all 3 sources Sleep(7 s, ...).  Master
+    // deadline fires before per-source.  outcome.master_timed_out ==
+    // true, wall_elapsed_ms < 2000 ms.
+    //
+    // Compatible with the unconditional-const per-source deadline:
+    // the per-source CONST never gets shortened to master_deadline
+    // (per WO-0068 + WO-0070 lessons), so the master timer wins
+    // deterministically when master_deadline (100 ms) is much smaller
+    // than G4_PER_SOURCE_DEADLINE (4500 ms).
+    let sources_sa8: Vec<Box<dyn G4Source + Send + Sync + 'static>> = vec![
+        Box::new(TestG4Source {
+            id: "stall-a".to_owned(),
+            behaviour: TestBehaviour::Sleep(
+                Duration::from_secs(7),
+                vec![make_edge("u", "v", G4EdgeKind::Import, 0.5, "stall-a")],
+            ),
+        }),
+        Box::new(TestG4Source {
+            id: "stall-b".to_owned(),
+            behaviour: TestBehaviour::Sleep(
+                Duration::from_secs(7),
+                vec![make_edge("v", "w", G4EdgeKind::Import, 0.5, "stall-b")],
+            ),
+        }),
+        Box::new(TestG4Source {
+            id: "stall-c".to_owned(),
+            behaviour: TestBehaviour::Sleep(
+                Duration::from_secs(7),
+                vec![make_edge("w", "x", G4EdgeKind::Import, 0.5, "stall-c")],
+            ),
+        }),
+    ];
+    let q_sa8 = G4Query {
+        changed_nodes: vec!["u".to_owned()],
+        max_blast_depth: 3,
+        max_edges: 256,
+    };
+    let outcome_sa8 = execute_g4(q_sa8, sources_sa8, Duration::from_millis(100)).await;
+    assert!(
+        outcome_sa8.master_timed_out,
+        "(SA8) master_timed_out must be true on tight 100 ms master \
+         with 7 s sleepers; left: false, right: true"
+    );
+    assert!(
+        outcome_sa8.wall_elapsed_ms < 2_000,
+        "(SA8) master deadline trips before per-source — \
+         wall_elapsed_ms must be < 2000 ms; left: {}, right: 2000",
+        outcome_sa8.wall_elapsed_ms
+    );
+    assert_eq!(
+        outcome_sa8.results.len(),
+        3,
+        "(SA8) master-trip path must synthesise placeholders for all \
+         3 sources; left: {}, right: 3",
+        outcome_sa8.results.len()
+    );
+    for r in &outcome_sa8.results {
+        assert_eq!(
+            r.status,
+            G4SourceStatus::TimedOut,
+            "(SA8) every placeholder must carry G4SourceStatus::TimedOut; \
+             left: {:?}, right: TimedOut",
+            r.status
+        );
+    }
+}
+
+/// Tiny `BTreeSet<String>` newtype to keep the SA6 assertion site
+/// clean (a one-liner of `BTreeSet::contains` instead of a chained
+/// expression that would get formatted across multiple lines).
+#[cfg(test)]
+struct BTreeSetWrapper(std::collections::BTreeSet<String>);
+
+#[cfg(test)]
+impl From<std::collections::BTreeSet<String>> for BTreeSetWrapper {
+    fn from(value: std::collections::BTreeSet<String>) -> Self {
+        Self(value)
+    }
+}
