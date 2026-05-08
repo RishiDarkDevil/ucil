@@ -3,7 +3,7 @@ ts: 2026-05-08T16:35:00Z
 phase: 3
 session: monitor
 trigger: harness-defect-investigation
-resolved: false
+resolved: true
 blocks_loop: false
 severity: harness-config
 auto_classify: bucket-B-fix-or-bucket-E-halt
@@ -232,4 +232,15 @@ trivial). Otherwise emit a Bucket-D micro-WO that bundles Fix 1 + Fix 2 +
 Fix 3 with integration-test that simulates verifier-on-main and asserts
 flip-feature.sh exits 6.
 
-resolved: false
+resolved: true
+
+## Resolution (2026-05-08T17:05Z, monitor session, user-authorized)
+
+Resolved-by-deferral. Recovery for WO-0079/0080 already landed at `19906a0`;
+main is consistent. WO-0083 (`354d96f`) went through the pipeline correctly
+with a proper `merge: WO-0083` commit, demonstrating the defect is
+intermittent (depends on verifier subagent CWD discipline). The 3 candidate
+fixes are valid prevention work but touch harness-territory files; deferred
+to a planner-emitted Bucket-D micro-WO. Triage Bucket-E halt was overly
+cautious — defect documented, recovery committed, fix is prevention, not a
+current blocker.
