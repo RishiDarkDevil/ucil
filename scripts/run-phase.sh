@@ -245,6 +245,16 @@ Read ucil-build/rejections/${WO_ID}.md (if present), ucil-build/critic-reports/$
       }
       safe_git_pull
 
+      # Step 5c/5: prune merged worktrees to reclaim disk space.
+      # Each worktree carries ~20GB of cargo target/ + node_modules. Without
+      # periodic pruning the disk fills at ~200GB/day at typical P3 throughput.
+      # Idempotent + safe: never touches the active worktree or in-flight branches.
+      # Non-fatal — cleanup failures should not block the loop.
+      echo "[run-phase] Step 5c/5: prune merged worktrees"
+      scripts/prune-merged-worktrees.sh >/tmp/ucil-prune-worktrees.log 2>&1 || {
+        echo "[run-phase] prune-merged-worktrees failed (non-fatal) — see /tmp/ucil-prune-worktrees.log"
+      }
+
       break  # proceed to drift counter / next iteration
     fi
 
