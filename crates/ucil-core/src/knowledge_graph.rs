@@ -979,6 +979,44 @@ impl KnowledgeGraph {
         Ok(out)
     }
 
+    /// Full-table scan over the §12.1 `entities` table.
+    ///
+    /// Returns every persisted [`Entity`] row in `id ASC` order with
+    /// the same column projection as
+    /// [`Self::list_entities_by_file`] / [`Self::search_entities_by_name`].
+    ///
+    /// Intended for one-shot warm-up scans (e.g. the `P3-W10-F01`
+    /// Aider repo-map's `PageRank` input — `WO-0087`,
+    /// `crates/ucil-core/src/context_compiler.rs`).  NOT a hot-loop
+    /// caller — this is an unindexed scan over the full table; a
+    /// future ADR may add a `relations_by_kind` covering index if
+    /// benchmarks show the scan dominates wall-clock at scale.
+    ///
+    /// Master-plan §3.5 (G5 Context group) + §4.5 line 345 (Aider
+    /// repo-map (reimplemented) — Library (internal, Rust), P0) drive
+    /// the consumer requirement.
+    ///
+    /// # Errors
+    ///
+    /// * [`KnowledgeGraphError::Sqlite`] — statement prepare, bind, or
+    ///   iteration failure.
+    #[tracing::instrument(level = "debug", skip(self), name = "ucil.core.kg.list_all_entities")]
+    pub fn list_all_entities(&self) -> Result<Vec<Entity>, KnowledgeGraphError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, kind, name, qualified_name, file_path, start_line, end_line, \
+                    signature, doc_comment, language, t_valid_from, t_valid_to, \
+                    importance, source_tool, source_hash \
+             FROM entities \
+             ORDER BY id ASC",
+        )?;
+        let rows = stmt.query_map([], entity_from_row)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
     // ── Relation CRUD ────────────────────────────────────────────────
     //
     // `relations` has NO UNIQUE constraint in §12.1 — each call to
@@ -1096,6 +1134,49 @@ impl KnowledgeGraph {
              ORDER BY id ASC",
         )?;
         let rows = stmt.query_map(rusqlite::params![target_id], relation_from_row)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Full-table scan over `relations` filtered to `kind = "calls"`.
+    ///
+    /// Returns every persisted [`Relation`] row whose `kind` is the
+    /// literal string `"calls"`, in `id ASC` order with the same
+    /// column projection as
+    /// [`Self::list_relations_by_source`] / [`Self::list_relations_by_target`].
+    ///
+    /// Intended for one-shot warm-up scans (e.g. the `P3-W10-F01`
+    /// Aider repo-map's `PageRank` input — `WO-0087`,
+    /// `crates/ucil-core/src/context_compiler.rs`).  NOT a hot-loop
+    /// caller — this is an unindexed scan over the full table; a
+    /// future ADR may add a `relations(kind, source_id)` covering
+    /// index if benchmarks show the scan dominates wall-clock at scale.
+    /// The schema's existing indexes (master-plan §12.1) cover
+    /// `(source_id, kind)` and `(target_id, kind)` lookups, but not
+    /// the kind-only scan this helper performs.
+    ///
+    /// # Errors
+    ///
+    /// * [`KnowledgeGraphError::Sqlite`] — statement prepare, bind, or
+    ///   iteration failure.
+    #[tracing::instrument(
+        level = "debug",
+        skip(self),
+        name = "ucil.core.kg.list_all_calls_relations"
+    )]
+    pub fn list_all_calls_relations(&self) -> Result<Vec<Relation>, KnowledgeGraphError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, source_id, target_id, kind, weight, \
+                    t_valid_from, t_valid_to, \
+                    source_tool, source_evidence, confidence \
+             FROM relations \
+             WHERE kind = ?1 \
+             ORDER BY id ASC",
+        )?;
+        let rows = stmt.query_map(rusqlite::params!["calls"], relation_from_row)?;
         let mut out = Vec::new();
         for row in rows {
             out.push(row?);
