@@ -6376,3 +6376,577 @@ pub async fn test_find_similar_tool() {
         "(SA8) stub envelope must echo tool name: {response_no_executor}"
     );
 }
+
+// ── G4 architecture MCP tool tests (P3-W10-F16/F17/F18) ──────────────────────
+//
+// Three frozen `#[tokio::test]` selectors live at MODULE ROOT (NOT inside
+// any inner `mod tests { … }`) so the substring-match selector
+// `cargo test -p ucil-daemon server::test_get_architecture_tool`
+// resolves uniquely without `--exact` per DEC-0007 + WO-0067/0068
+// lessons §planner.  Each test injects a deterministic in-process
+// `TestG4Source` impl (shared helper below) and exercises the
+// corresponding handler through `handle_tools_call` end-to-end.
+//
+// The shared `TestG4Source` helper lives under `#[cfg(test)]` so it
+// compiles only in the test profile — exempt from the production-side
+// `mock|fake|stub` word-ban grep per WO-0048 line 363 + WO-0069
+// carve-out.
+
+/// Behaviour-light in-process [`G4Source`] impl driving the three
+/// frozen selectors below.  Per `DEC-0008` §4 the [`G4Source`] trait
+/// is UCIL-internal (the dependency-inversion seam) so a local impl
+/// in a test is not a substitute for any external wire format —
+/// same shape as the `TestG3Source` (WO-0070) and
+/// `executor::test_g4_architecture_query`'s `TestG4Source`
+/// (`crates/ucil-daemon/src/executor.rs:3822`) precedents.
+///
+/// The helper carries the `source_id` plus a pre-canned
+/// `Vec<G4DependencyEdge>`; `execute()` returns the edges verbatim
+/// under [`G4SourceStatus::Available`] with `elapsed_ms = 0`.
+#[cfg(test)]
+struct TestG4Source {
+    id: String,
+    edges: Vec<crate::g4::G4DependencyEdge>,
+}
+
+#[cfg(test)]
+#[async_trait::async_trait]
+impl G4Source for TestG4Source {
+    fn source_id(&self) -> &str {
+        &self.id
+    }
+
+    async fn execute(&self, _query: &G4Query) -> G4SourceOutput {
+        G4SourceOutput {
+            source_id: self.id.clone(),
+            status: G4SourceStatus::Available,
+            elapsed_ms: 0,
+            edges: self.edges.clone(),
+            error: None,
+        }
+    }
+}
+
+/// Convenience: build a `Vec<Arc<dyn G4Source>>` of one
+/// [`TestG4Source`] from a pre-canned edge list.
+#[cfg(test)]
+fn test_g4_source_list(
+    id: &str,
+    edges: Vec<crate::g4::G4DependencyEdge>,
+) -> Arc<Vec<Arc<dyn G4Source>>> {
+    let src: Arc<dyn G4Source> = Arc::new(TestG4Source {
+        id: id.to_owned(),
+        edges,
+    });
+    Arc::new(vec![src])
+}
+
+/// Convenience: build a [`crate::g4::G4DependencyEdge`] for the
+/// three frozen tests.  Always uses `G4EdgeOrigin::Inferred` since
+/// the test surfaces only need to drive the dependency-inversion
+/// seam, not the (P3-W10-F14 future) ground-truth-on-conflict
+/// branch.
+#[cfg(test)]
+fn make_g4_test_edge(
+    source: &str,
+    target: &str,
+    kind: crate::g4::G4EdgeKind,
+    weight: f64,
+    src_id: &str,
+) -> crate::g4::G4DependencyEdge {
+    crate::g4::G4DependencyEdge {
+        source: source.to_owned(),
+        target: target.to_owned(),
+        edge_kind: kind,
+        source_id: src_id.to_owned(),
+        origin: crate::g4::G4EdgeOrigin::Inferred,
+        coupling_weight: weight,
+    }
+}
+
+/// Frozen acceptance test for `P3-W10-F16` (`get_architecture`).
+///
+/// Master-plan §3.2 row 8 / §5.4 lines 483-500 / §18 Phase 3 Week 10
+/// line 1812.  Drives `handle_tools_call` end-to-end through the
+/// [`McpServer::handle_get_architecture`] handler with a deterministic
+/// in-process [`TestG4Source`] returning four edges spanning four
+/// node names — the architecture surface the tool's `_meta.modules`
+/// + `_meta.edges` envelope advertises.
+///
+/// Selector substring-match: `cargo test -p ucil-daemon
+/// server::test_get_architecture_tool` resolves uniquely without
+/// `--exact` per DEC-0007 + WO-0067/0068 lessons §planner.
+#[cfg(test)]
+#[tokio::test]
+async fn test_get_architecture_tool() {
+    use crate::g4::G4EdgeKind;
+
+    let edges = vec![
+        make_g4_test_edge("A", "B", G4EdgeKind::Import, 0.9, "test-g4-source"),
+        make_g4_test_edge("B", "C", G4EdgeKind::Call, 0.7, "test-g4-source"),
+        make_g4_test_edge("C", "D", G4EdgeKind::Implements, 0.6, "test-g4-source"),
+        make_g4_test_edge("A", "D", G4EdgeKind::Inherits, 0.4, "test-g4-source"),
+    ];
+    let sources = test_g4_source_list("test-g4-source", edges);
+    let server = McpServer::new().with_g4_sources(sources);
+
+    let request = json!({
+        "jsonrpc": JSONRPC_VERSION,
+        "id": 0xA1,
+        "method": "tools/call",
+        "params": {
+            "name": "get_architecture",
+            "arguments": {
+                "target": "A",
+                "max_depth": 4,
+                "max_edges": 256,
+            }
+        }
+    })
+    .to_string();
+    let response = server.handle_line(&request).await;
+
+    assert_eq!(
+        response.get("error"),
+        None,
+        "(precondition) handler must not return JSON-RPC error: {response}"
+    );
+
+    let meta = response
+        .pointer("/result/_meta")
+        .expect("(precondition) response must carry result._meta");
+
+    // ── SA1 — _meta.tool ─────────────────────────────────────────────
+    assert_eq!(
+        meta.get("tool").and_then(Value::as_str),
+        Some("get_architecture"),
+        "(SA1) _meta.tool == \"get_architecture\"; left: {:?}, right: \"get_architecture\"",
+        meta.get("tool")
+    );
+
+    // ── SA2 — _meta.source ───────────────────────────────────────────
+    assert_eq!(
+        meta.get("source").and_then(Value::as_str),
+        Some("g4-architecture-fanout"),
+        "(SA2) _meta.source == \"g4-architecture-fanout\"; left: {:?}, right: \"g4-architecture-fanout\"",
+        meta.get("source")
+    );
+
+    // ── SA3 — _meta.modules sorted unique [A, B, C, D] ──────────────
+    let modules = meta
+        .get("modules")
+        .and_then(Value::as_array)
+        .expect("(SA3 precondition) _meta.modules must be a JSON array");
+    let module_strs: Vec<&str> = modules.iter().filter_map(Value::as_str).collect();
+    assert_eq!(
+        module_strs,
+        vec!["A", "B", "C", "D"],
+        "(SA3) modules contains all four nodes sorted unique; left: {module_strs:?}, right: [\"A\", \"B\", \"C\", \"D\"]"
+    );
+
+    // ── SA4 — _meta.edges.len() == 4 ────────────────────────────────
+    let edges_arr = meta
+        .get("edges")
+        .and_then(Value::as_array)
+        .expect("(SA4 precondition) _meta.edges must be a JSON array");
+    assert_eq!(
+        edges_arr.len(),
+        4,
+        "(SA4) edges.len() == 4; left: {}, right: 4",
+        edges_arr.len()
+    );
+
+    // ── SA5 — highest coupling_weight is 0.9 (A->B Import) ──────────
+    let max_weight = edges_arr
+        .iter()
+        .filter_map(|e| e.get("coupling_weight").and_then(Value::as_f64))
+        .fold(f64::NEG_INFINITY, f64::max);
+    assert!(
+        (max_weight - 0.9).abs() < 1e-9,
+        "(SA5) max edge coupling_weight == 0.9 (A->B Import); left: {max_weight}, right: 0.9"
+    );
+
+    // ── SA6 — master_timed_out == false ─────────────────────────────
+    assert_eq!(
+        meta.get("master_timed_out").and_then(Value::as_bool),
+        Some(false),
+        "(SA6) master_timed_out == false; left: {:?}, right: false",
+        meta.get("master_timed_out")
+    );
+
+    // ── SA7 — _meta.source_results.len() == 1 ───────────────────────
+    let src_results = meta
+        .get("source_results")
+        .and_then(Value::as_array)
+        .expect("(SA7 precondition) _meta.source_results must be a JSON array");
+    assert_eq!(
+        src_results.len(),
+        1,
+        "(SA7) source_results.len() == 1; left: {}, right: 1",
+        src_results.len()
+    );
+
+    // ── SA8 — source_results[0].status == "available" ──────────────
+    assert_eq!(
+        src_results[0].get("status").and_then(Value::as_str),
+        Some("available"),
+        "(SA8) source_results[0].status == \"available\"; left: {:?}, right: \"available\"",
+        src_results[0].get("status")
+    );
+}
+
+/// Frozen acceptance test for `P3-W10-F17` (`trace_dependencies`).
+///
+/// Master-plan §3.2 row 9 / §5.4.  Drives `handle_tools_call`
+/// end-to-end with a `TestG4Source` producing a small chain plus a
+/// fork (A->B, B->C, C->D, E->B) so the directional BFS surfaces both
+/// upstream (A@1 + E@1) and downstream (C@1 + D@2) correctly when
+/// `direction == "both"`, AND honours direction filtering when
+/// `direction == "upstream"` (omits `_meta.downstream` entirely).
+///
+/// Selector substring-match: `cargo test -p ucil-daemon
+/// server::test_trace_dependencies_tool` resolves uniquely without
+/// `--exact`.
+#[cfg(test)]
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn test_trace_dependencies_tool() {
+    use crate::g4::G4EdgeKind;
+
+    let edges = vec![
+        make_g4_test_edge("A", "B", G4EdgeKind::Call, 0.9, "test-g4-source"),
+        make_g4_test_edge("B", "C", G4EdgeKind::Call, 0.8, "test-g4-source"),
+        make_g4_test_edge("C", "D", G4EdgeKind::Call, 0.7, "test-g4-source"),
+        make_g4_test_edge("E", "B", G4EdgeKind::Call, 0.6, "test-g4-source"),
+    ];
+    let sources = test_g4_source_list("test-g4-source", edges);
+    let server = McpServer::new().with_g4_sources(sources);
+
+    let request = json!({
+        "jsonrpc": JSONRPC_VERSION,
+        "id": 0xB1,
+        "method": "tools/call",
+        "params": {
+            "name": "trace_dependencies",
+            "arguments": {
+                "target": "B",
+                "direction": "both",
+                "max_depth": 3,
+            }
+        }
+    })
+    .to_string();
+    let response = server.handle_line(&request).await;
+
+    assert_eq!(
+        response.get("error"),
+        None,
+        "(precondition) handler must not return JSON-RPC error: {response}"
+    );
+
+    let meta = response
+        .pointer("/result/_meta")
+        .expect("(precondition) response must carry result._meta");
+
+    // ── SA1 — _meta.tool ─────────────────────────────────────────────
+    assert_eq!(
+        meta.get("tool").and_then(Value::as_str),
+        Some("trace_dependencies"),
+        "(SA1) _meta.tool == \"trace_dependencies\"; left: {:?}, right: \"trace_dependencies\"",
+        meta.get("tool")
+    );
+
+    // ── SA2 — _meta.target ──────────────────────────────────────────
+    assert_eq!(
+        meta.get("target").and_then(Value::as_str),
+        Some("B"),
+        "(SA2) _meta.target == \"B\"; left: {:?}, right: \"B\"",
+        meta.get("target")
+    );
+
+    // ── SA3 — _meta.direction ──────────────────────────────────────
+    assert_eq!(
+        meta.get("direction").and_then(Value::as_str),
+        Some("both"),
+        "(SA3) _meta.direction == \"both\"; left: {:?}, right: \"both\"",
+        meta.get("direction")
+    );
+
+    // ── SA4 — upstream contains [A@1, E@1] sorted alphabetically ───
+    let upstream = meta
+        .get("upstream")
+        .and_then(Value::as_array)
+        .expect("(SA4 precondition) _meta.upstream must be a JSON array");
+    let upstream_pairs: Vec<(String, u64)> = upstream
+        .iter()
+        .filter_map(|e| {
+            let n = e.get("node")?.as_str()?.to_owned();
+            let d = e.get("depth")?.as_u64()?;
+            Some((n, d))
+        })
+        .collect();
+    assert_eq!(
+        upstream_pairs,
+        vec![
+            ("A".to_owned(), 1u64),
+            ("E".to_owned(), 1u64),
+        ],
+        "(SA4) upstream contains A@1 + E@1 sorted alphabetically; left: {upstream_pairs:?}, right: [(\"A\", 1), (\"E\", 1)]"
+    );
+
+    // ── SA5 — downstream contains [C@1, D@2] sorted by depth asc ──
+    let downstream = meta
+        .get("downstream")
+        .and_then(Value::as_array)
+        .expect("(SA5 precondition) _meta.downstream must be a JSON array");
+    let downstream_pairs: Vec<(String, u64)> = downstream
+        .iter()
+        .filter_map(|e| {
+            let n = e.get("node")?.as_str()?.to_owned();
+            let d = e.get("depth")?.as_u64()?;
+            Some((n, d))
+        })
+        .collect();
+    assert_eq!(
+        downstream_pairs,
+        vec![
+            ("C".to_owned(), 1u64),
+            ("D".to_owned(), 2u64),
+        ],
+        "(SA5) downstream contains C@1 + D@2 sorted by depth ascending; left: {downstream_pairs:?}, right: [(\"C\", 1), (\"D\", 2)]"
+    );
+
+    // ── SA6 — master_timed_out == false ─────────────────────────────
+    assert_eq!(
+        meta.get("master_timed_out").and_then(Value::as_bool),
+        Some(false),
+        "(SA6) master_timed_out == false; left: {:?}, right: false",
+        meta.get("master_timed_out")
+    );
+
+    // ── SA7 — direction = "upstream" omits _meta.downstream ─────────
+    let edges_again = vec![
+        make_g4_test_edge("A", "B", G4EdgeKind::Call, 0.9, "test-g4-source"),
+        make_g4_test_edge("B", "C", G4EdgeKind::Call, 0.8, "test-g4-source"),
+        make_g4_test_edge("C", "D", G4EdgeKind::Call, 0.7, "test-g4-source"),
+        make_g4_test_edge("E", "B", G4EdgeKind::Call, 0.6, "test-g4-source"),
+    ];
+    let sources_upstream_only = test_g4_source_list("test-g4-source", edges_again);
+    let server_upstream_only = McpServer::new().with_g4_sources(sources_upstream_only);
+    let request_upstream_only = json!({
+        "jsonrpc": JSONRPC_VERSION,
+        "id": 0xB2,
+        "method": "tools/call",
+        "params": {
+            "name": "trace_dependencies",
+            "arguments": {
+                "target": "B",
+                "direction": "upstream",
+                "max_depth": 3,
+            }
+        }
+    })
+    .to_string();
+    let response_upstream_only = server_upstream_only
+        .handle_line(&request_upstream_only)
+        .await;
+    let meta_upstream_only = response_upstream_only
+        .pointer("/result/_meta")
+        .expect("(SA7 precondition) upstream-only response must carry result._meta");
+    assert_eq!(
+        meta_upstream_only.get("direction").and_then(Value::as_str),
+        Some("upstream"),
+        "(SA7) direction echoed as \"upstream\"; left: {:?}, right: \"upstream\"",
+        meta_upstream_only.get("direction")
+    );
+    assert!(
+        meta_upstream_only.get("downstream").is_none(),
+        "(SA7) _meta.downstream must be ABSENT when direction == \"upstream\" — direction filtering is load-bearing; left: {:?}, right: <key absent>",
+        meta_upstream_only.get("downstream")
+    );
+    assert!(
+        meta_upstream_only.get("upstream").is_some(),
+        "(SA7) _meta.upstream must still be PRESENT when direction == \"upstream\"; left: <absent>, right: <present>"
+    );
+}
+
+/// Frozen acceptance test for `P3-W10-F18` (`blast_radius`).
+///
+/// Master-plan §3.2 row 10 / §5.4 line 495.  Drives `handle_tools_call`
+/// end-to-end with a `TestG4Source` producing a 5-node BFS tree
+/// (A->B, A->C, B->D, C->E) so the bidirectional BFS with
+/// multiplicative coupling-weight attenuation surfaces (B, C, D, E)
+/// in `_meta.impacted` ranked by `path_weight` descending.
+///
+/// Selector substring-match: `cargo test -p ucil-daemon
+/// server::test_blast_radius_tool` resolves uniquely without
+/// `--exact`.
+#[cfg(test)]
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn test_blast_radius_tool() {
+    use crate::g4::G4EdgeKind;
+
+    let edges = vec![
+        make_g4_test_edge("A", "B", G4EdgeKind::Import, 0.9, "test-g4-source"),
+        make_g4_test_edge("A", "C", G4EdgeKind::Call, 0.5, "test-g4-source"),
+        make_g4_test_edge("B", "D", G4EdgeKind::Call, 0.8, "test-g4-source"),
+        make_g4_test_edge("C", "E", G4EdgeKind::Call, 0.4, "test-g4-source"),
+    ];
+    let sources = test_g4_source_list("test-g4-source", edges);
+    let server = McpServer::new().with_g4_sources(sources);
+
+    let request = json!({
+        "jsonrpc": JSONRPC_VERSION,
+        "id": 0xC1,
+        "method": "tools/call",
+        "params": {
+            "name": "blast_radius",
+            "arguments": {
+                "target": "A",
+                "max_depth": 3,
+                "max_edges": 256,
+            }
+        }
+    })
+    .to_string();
+    let response = server.handle_line(&request).await;
+
+    assert_eq!(
+        response.get("error"),
+        None,
+        "(precondition) handler must not return JSON-RPC error: {response}"
+    );
+
+    let meta = response
+        .pointer("/result/_meta")
+        .expect("(precondition) response must carry result._meta");
+
+    // ── SA1 — _meta.tool ─────────────────────────────────────────────
+    assert_eq!(
+        meta.get("tool").and_then(Value::as_str),
+        Some("blast_radius"),
+        "(SA1) _meta.tool == \"blast_radius\"; left: {:?}, right: \"blast_radius\"",
+        meta.get("tool")
+    );
+
+    // ── SA2 — _meta.target == ["A"] (single-string lifted) ─────────
+    let target_arr = meta
+        .get("target")
+        .and_then(Value::as_array)
+        .expect("(SA2 precondition) _meta.target must be an array (single-string lifted)");
+    let target_strs: Vec<&str> = target_arr.iter().filter_map(Value::as_str).collect();
+    assert_eq!(
+        target_strs,
+        vec!["A"],
+        "(SA2) _meta.target == [\"A\"] (single-string target lifted to array); left: {target_strs:?}, right: [\"A\"]"
+    );
+
+    // ── SA3 — impacted.len() == 4 (B, C, D, E; A excluded) ─────────
+    let impacted = meta
+        .get("impacted")
+        .and_then(Value::as_array)
+        .expect("(SA3 precondition) _meta.impacted must be a JSON array");
+    assert_eq!(
+        impacted.len(),
+        4,
+        "(SA3) impacted.len() == 4 (B, C, D, E excluding seed A); left: {}, right: 4",
+        impacted.len()
+    );
+
+    // ── SA4 — impacted[0].node is one of {B, D} (highest weight) ──
+    let top_node = impacted
+        .first()
+        .and_then(|v| v.get("node"))
+        .and_then(Value::as_str)
+        .expect("(SA4 precondition) impacted[0].node must be a string")
+        .to_owned();
+    assert!(
+        matches!(top_node.as_str(), "B" | "D"),
+        "(SA4) impacted[0].node is one of {{B, D}} (highest path_weight chain A->B=0.9 or A->B->D=0.72); left: {top_node:?}, right: \"B\" or \"D\""
+    );
+
+    // ── SA5 — descending path_weight invariant ─────────────────────
+    let weights: Vec<f64> = impacted
+        .iter()
+        .filter_map(|e| e.get("path_weight").and_then(Value::as_f64))
+        .collect();
+    assert!(
+        weights.len() >= 2,
+        "(SA5 precondition) impacted must carry at least 2 entries to compare; left: {}, right: >= 2",
+        weights.len()
+    );
+    assert!(
+        weights[0] >= weights[1],
+        "(SA5) impacted[0].path_weight >= impacted[1].path_weight (descending sort invariant); left: {} (impacted[0]={}), right: {} (impacted[1]={})",
+        weights[0],
+        impacted[0].get("node").and_then(Value::as_str).unwrap_or("?"),
+        weights[1],
+        impacted[1].get("node").and_then(Value::as_str).unwrap_or("?"),
+    );
+
+    // ── SA6 — array-target shape preserved ─────────────────────────
+    let edges_array = vec![
+        make_g4_test_edge("A", "B", G4EdgeKind::Import, 0.9, "test-g4-source"),
+        make_g4_test_edge("A", "C", G4EdgeKind::Call, 0.5, "test-g4-source"),
+        make_g4_test_edge("B", "D", G4EdgeKind::Call, 0.8, "test-g4-source"),
+        make_g4_test_edge("C", "E", G4EdgeKind::Call, 0.4, "test-g4-source"),
+    ];
+    let sources_array_target = test_g4_source_list("test-g4-source", edges_array);
+    let server_array_target = McpServer::new().with_g4_sources(sources_array_target);
+    let request_array_target = json!({
+        "jsonrpc": JSONRPC_VERSION,
+        "id": 0xC2,
+        "method": "tools/call",
+        "params": {
+            "name": "blast_radius",
+            "arguments": {
+                "target": ["A", "C"],
+                "max_depth": 3,
+                "max_edges": 256,
+            }
+        }
+    })
+    .to_string();
+    let response_array_target = server_array_target.handle_line(&request_array_target).await;
+    let meta_array_target = response_array_target
+        .pointer("/result/_meta")
+        .expect("(SA6 precondition) array-target response must carry result._meta");
+    let target_array_meta = meta_array_target
+        .get("target")
+        .and_then(Value::as_array)
+        .expect("(SA6 precondition) _meta.target must be an array");
+    let target_array_strs: Vec<&str> = target_array_meta.iter().filter_map(Value::as_str).collect();
+    assert_eq!(
+        target_array_strs,
+        vec!["A", "C"],
+        "(SA6) _meta.target preserves array shape; left: {target_array_strs:?}, right: [\"A\", \"C\"]"
+    );
+
+    // ── SA7 — dependency_chain is non-empty path-shape canary ──────
+    let dep_chain = meta
+        .get("dependency_chain")
+        .and_then(Value::as_array)
+        .expect("(SA7 precondition) _meta.dependency_chain must be a JSON array");
+    assert!(
+        !dep_chain.is_empty(),
+        "(SA7) dependency_chain.len() >= 1; left: 0, right: >= 1"
+    );
+    for (i, entry) in dep_chain.iter().enumerate() {
+        let s = entry
+            .as_str()
+            .expect("(SA7 precondition) every dependency_chain entry must be a string");
+        assert!(
+            !s.is_empty() && s.contains(" -> "),
+            "(SA7) dependency_chain[{i}] is non-empty AND contains \" -> \"; left: {s:?}, right: <non-empty path with ' -> '>"
+        );
+    }
+
+    // ── SA8 — master_timed_out == false ─────────────────────────────
+    assert_eq!(
+        meta.get("master_timed_out").and_then(Value::as_bool),
+        Some(false),
+        "(SA8) master_timed_out == false; left: {:?}, right: false",
+        meta.get("master_timed_out")
+    );
+}
