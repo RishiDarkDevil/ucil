@@ -89,10 +89,11 @@
 
 #![deny(rustdoc::broken_intra_doc_links)]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::BuildHasher;
+use std::path::PathBuf;
 
-use crate::knowledge_graph::{Entity, KnowledgeGraphError};
+use crate::knowledge_graph::{Entity, KnowledgeGraph, KnowledgeGraphError};
 
 // ── Errors ────────────────────────────────────────────────────────────────────
 
@@ -432,4 +433,175 @@ where
     }
 
     (score, iterations, converged)
+}
+
+// ── Budget fitting ────────────────────────────────────────────────────────────
+
+/// Greedy prefix-fit: take ranked entries in order, accumulating their
+/// `token_estimate`, and stop at the first entry that would push the
+/// running total past `token_budget`.
+///
+/// Pure-deterministic helper.  Returns `(fitted_prefix, total_tokens)`.
+/// When the input is empty OR the first entry already exceeds the
+/// budget, returns `(empty_vec, 0)`.  Master-plan §6.3 ("Response
+/// assembly — full detail for relevant content; `PageRank`-driven
+/// ranking") calls for "fits symbol list into a configurable token
+/// budget" — this is the standard Aider repo-map prefix-greedy
+/// semantic at top-of-rank.  NOT knapsack — knapsack would reorder
+/// or skip mid-rank entries, which violates the Aider semantic and
+/// the WO-0087 acceptance test's strict-prefix assertion.
+fn fit_to_budget(ranked: Vec<RankedSymbol>, token_budget: usize) -> (Vec<RankedSymbol>, usize) {
+    let mut total = 0usize;
+    let mut fitted: Vec<RankedSymbol> = Vec::with_capacity(ranked.len());
+    for entry in ranked {
+        let next_total = total.saturating_add(entry.token_estimate);
+        if next_total > token_budget {
+            break;
+        }
+        total = next_total;
+        fitted.push(entry);
+    }
+    (fitted, total)
+}
+
+// ── Public entry point ───────────────────────────────────────────────────────
+
+/// Build a budget-fitted, recency-biased repo-map over the given KG.
+///
+/// Reads every entity and every `kind = "calls"` relation out of the
+/// supplied [`KnowledgeGraph`], builds the sparse adjacency, constructs
+/// the personalization vector with 50× bias on entities whose
+/// `file_path` is in `recently_queried_files`, runs personalized
+/// `PageRank`, sorts by descending score (tie-break on ascending
+/// `qualified_name` for determinism), and returns the prefix that
+/// fits in `options.token_budget`.
+///
+/// # Personalization vector
+///
+/// For each [`Entity`] `e`, let `path = PathBuf::from(&e.file_path)`.
+/// If `recently_queried_files.contains(&path)`, the entity's raw
+/// personalization mass is `recency_bias_multiplier / N`; otherwise
+/// it is `1 / N` (where `N` is the entity count).  The raw vector is
+/// then renormalised to sum to `1.0` inside [`personalized_page_rank`].
+///
+/// Path comparison is strict `PathBuf` equality — no string-suffix
+/// match.  A `recently_queried_files` containing `"src/foo.rs"` does
+/// NOT match an entity with `file_path = "vendor/dep/src/foo.rs"`.
+///
+/// # Errors
+///
+/// * [`RepoMapError::KnowledgeGraph`] — KG table-scan or row-iteration
+///   failure (typically a `SQLite` error from
+///   [`KnowledgeGraph::list_all_entities`] or
+///   [`KnowledgeGraph::list_all_calls_relations`]).
+/// * [`RepoMapError::EmptyGraph`] — the KG returned zero entities.
+///   When entities exist but no `calls` edges do, the function still
+///   succeeds and returns the unbiased uniform-`PageRank` ranking
+///   (every entity has equal score).
+pub fn build_repo_map<S: BuildHasher>(
+    kg: &KnowledgeGraph,
+    recently_queried_files: &HashSet<PathBuf, S>,
+    options: &RepoMapOptions,
+) -> Result<RepoMap, RepoMapError> {
+    // ── Read the §12.1 entities + calls-relations slices ───────────
+    let entities: Vec<Entity> = kg.list_all_entities()?;
+    if entities.is_empty() {
+        return Err(RepoMapError::EmptyGraph);
+    }
+    let relations = kg.list_all_calls_relations()?;
+
+    // ── Build sparse adjacency `source_id -> [target_id]` ──────────
+    //
+    // Every entity in the universe must appear as a key in `adjacency`
+    // — even when it has no outgoing `calls` edges (it becomes a
+    // dangling sink under the iteration's "teleport" treatment).  The
+    // initialisation pass seeds every key with an empty `Vec`; the
+    // edge-walk then pushes targets onto the source's list.
+    let mut adjacency: HashMap<i64, Vec<i64>> = HashMap::with_capacity(entities.len());
+    for e in &entities {
+        if let Some(id) = e.id {
+            adjacency.entry(id).or_default();
+        }
+    }
+    for rel in &relations {
+        // Skip self-loops and edges referencing entities we did not
+        // ingest above (foreign-key consistency is enforced at the
+        // schema level via `REFERENCES entities(id)`, but defensive
+        // guards cost nothing and protect against post-test fixtures
+        // with manually-deleted rows).
+        if rel.source_id == rel.target_id {
+            continue;
+        }
+        if !adjacency.contains_key(&rel.source_id) || !adjacency.contains_key(&rel.target_id) {
+            continue;
+        }
+        adjacency
+            .entry(rel.source_id)
+            .or_default()
+            .push(rel.target_id);
+    }
+
+    // ── Personalization vector with 50× recency bias ───────────────
+    //
+    // master-plan §6.1 line 506: "PageRank, 50x bias toward relevant
+    // files".  For each entity, base mass is `1 / N`; when the
+    // entity's file is in `recently_queried_files`, the mass is
+    // multiplied by `options.recency_bias_multiplier` (default 50.0).
+    // The kernel renormalises to Σ pers = 1.0 internally.
+    #[allow(clippy::cast_precision_loss)]
+    let n_f64 = entities.len() as f64;
+    let uniform_mass = 1.0 / n_f64;
+    let mut personalization: HashMap<i64, f64> = HashMap::with_capacity(entities.len());
+    for e in &entities {
+        let Some(id) = e.id else {
+            continue;
+        };
+        let path = PathBuf::from(&e.file_path);
+        let mass = if recently_queried_files.contains(&path) {
+            options.recency_bias_multiplier * uniform_mass
+        } else {
+            uniform_mass
+        };
+        personalization.insert(id, mass);
+    }
+
+    // ── Run the kernel ──────────────────────────────────────────────
+    let (scores, iterations, converged) =
+        personalized_page_rank(&adjacency, &personalization, options);
+
+    // ── Sort entities by descending score, tie-break on qualified_name
+    //   ascending (deterministic) ──────────────────────────────────
+    let mut ranked: Vec<RankedSymbol> = entities
+        .into_iter()
+        .filter_map(|entity| {
+            let id = entity.id?;
+            let score = scores.get(&id).copied().unwrap_or(0.0);
+            let token_estimate = entity_token_estimate(&entity);
+            Some(RankedSymbol {
+                entity,
+                score,
+                token_estimate,
+            })
+        })
+        .collect();
+    ranked.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| {
+                let a_qn = a.entity.qualified_name.as_deref().unwrap_or(&a.entity.name);
+                let b_qn = b.entity.qualified_name.as_deref().unwrap_or(&b.entity.name);
+                a_qn.cmp(b_qn)
+            })
+    });
+
+    // ── Greedy prefix-fit to the token budget ───────────────────────
+    let (symbols, total_tokens) = fit_to_budget(ranked, options.token_budget);
+
+    Ok(RepoMap {
+        symbols,
+        total_tokens,
+        iterations,
+        converged,
+    })
 }
