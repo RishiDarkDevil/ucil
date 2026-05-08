@@ -80,7 +80,19 @@ SMOKE_INPUT="${CGC_TMPDIR}/jsonrpc-in"
 SMOKE_OUTPUT="${CGC_TMPDIR}/jsonrpc-out"
 mkfifo "${SMOKE_INPUT}"
 
+# Copy the fixture into the tmpdir so codegraphcontext's auto-generated
+# .cgcignore (a side-effect of `add_code_to_graph`) does NOT pollute
+# tests/fixtures/rust-project (forbidden_paths in WO-0071). Read-only
+# against the real fixture.
+FIXTURE_COPY="${CGC_TMPDIR}/rust-project"
+cp -r "${REPO_ROOT}/tests/fixtures/rust-project" "${FIXTURE_COPY}"
+
 echo "[INFO] P3-W9-F08: spawning ${PINNED_PKG_SPEC} for dep-graph smoke..."
+# CGC_ALLOWED_ROOTS lets codegraphcontext index paths outside its CWD;
+# we point it at the FIXTURE_COPY tmpdir to keep tests/fixtures
+# byte-identical (forbidden_paths). Without this env, CGC enforces
+# "only subdirectories of CWD" and rejects the indexing call.
+CGC_ALLOWED_ROOTS="${FIXTURE_COPY}" \
 uvx --with "${PINNED_FALKORDBLITE_DEP}" "${PINNED_PKG_SPEC}" mcp start \
     <"${SMOKE_INPUT}" >"${SMOKE_OUTPUT}" 2>>"${SMOKE_LOG}" &
 SERVER_PID=$!
@@ -92,6 +104,14 @@ cleanup_smoke() {
     if kill -0 "${SERVER_PID}" 2>/dev/null; then
         kill "${SERVER_PID}" 2>/dev/null || true
         wait "${SERVER_PID}" 2>/dev/null || true
+    fi
+    # Defense in depth: if codegraphcontext somehow reached the real
+    # fixture path (it shouldn't — we point it at FIXTURE_COPY below),
+    # remove any auto-generated .cgcignore so the real fixture remains
+    # byte-identical.
+    if [[ -f "${REPO_ROOT}/tests/fixtures/rust-project/.cgcignore" ]] \
+        && ! git -C "${REPO_ROOT}" ls-tree HEAD -- tests/fixtures/rust-project/.cgcignore | grep -q .; then
+        rm -f "${REPO_ROOT}/tests/fixtures/rust-project/.cgcignore"
     fi
     rm -rf "${CGC_TMPDIR}"
 }
@@ -113,11 +133,11 @@ send_tools_call() {
     sleep "${pause}"
 }
 
-INDEX_PAYLOAD="{\"name\":\"add_code_to_graph\",\"arguments\":{\"path\":\"${REPO_ROOT}/tests/fixtures/rust-project\",\"is_dependency\":false}}"
+INDEX_PAYLOAD="{\"name\":\"add_code_to_graph\",\"arguments\":{\"path\":\"${FIXTURE_COPY}\",\"is_dependency\":false}}"
 echo "[INFO] P3-W9-F08: INDEX - tools/call add_code_to_graph..."
 send_tools_call 2 "${INDEX_PAYLOAD}" 8
 
-ANALYZE_PAYLOAD="{\"name\":\"analyze_code_relationships\",\"arguments\":{\"query_name\":\"who_calls_function\",\"target\":\"evaluate\"}}"
+ANALYZE_PAYLOAD="{\"name\":\"analyze_code_relationships\",\"arguments\":{\"query_type\":\"find_callers\",\"target\":\"evaluate\"}}"
 echo "[INFO] P3-W9-F08: ANALYZE - tools/call analyze_code_relationships..."
 send_tools_call 3 "${ANALYZE_PAYLOAD}" 6
 
