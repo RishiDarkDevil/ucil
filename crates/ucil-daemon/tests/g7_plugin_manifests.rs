@@ -422,4 +422,110 @@ mod g7_plugin_manifests {
             health.tools,
         );
     }
+
+    /// Health-check for the Ruff (G7 Quality, P3-W11-F03) plugin
+    /// manifest at `plugins/quality/ruff/plugin.toml`. Spawns
+    /// `uvx mcp-server-analyzer@0.1.2` as a real subprocess (DEC-0023
+    /// §Decision point 2 Tier-1 path — Anselmoo's PyPI wrapper that
+    /// combines Ruff + Vulture into a single MCP server), drives the
+    /// `initialize` → `notifications/initialized` → `tools/list`
+    /// handshake via [`PluginManager::health_check_with_timeout`], and
+    /// asserts the canonical `ruff-check` tool is advertised
+    /// (kebab-case as emitted verbatim by the upstream's `tools/list`).
+    ///
+    /// PyPI-name vs serverInfo.name asymmetry per WO-0077 §planner
+    /// lesson `Capture BOTH PyPI/npm package name AND serverInfo.name`
+    /// — PyPI package is `mcp-server-analyzer` (the install ref);
+    /// runtime `serverInfo.name` is `Python Analyzer` (the FastMCP
+    /// instance name; see plugins/quality/ruff/plugin.toml top-of-file
+    /// rustdoc for the full asymmetry capture). The test asserts on
+    /// the manifest-level UCIL plugin name `ruff` which
+    /// `health_check_with_timeout` returns from `manifest.plugin.name`
+    /// — independent of the runtime serverInfo name.
+    ///
+    /// Self-resolving server (no operator-state CLI dep, contrast with
+    /// the Semgrep test): the upstream PyPI wrapper bundles ruff +
+    /// vulture as transitive Python deps; uvx-managed venv self-
+    /// resolves them. NO `RUFF_PATH` env var, NO equivalent of the
+    /// Semgrep CLI lifespan call, NO `unsafe std::env::set_var` block
+    /// (per WO-0080 scope_in #17 + #34).
+    #[tokio::test]
+    async fn ruff_manifest_health_check() {
+        if skip_via_env() {
+            return;
+        }
+        let manifest_path = repo_root().join("plugins/quality/ruff/plugin.toml");
+        let manifest = PluginManifest::from_path(&manifest_path).expect("parse ruff plugin.toml");
+
+        // Manifest sanity (cheap pre-flight before paying the uvx cost).
+        assert_eq!(manifest.plugin.name, "ruff");
+        assert_eq!(manifest.transport.kind, "stdio");
+        assert!(
+            !manifest.capabilities.provides.is_empty(),
+            "ruff manifest must declare at least one provided capability",
+        );
+        assert!(
+            manifest
+                .capabilities
+                .provides
+                .iter()
+                .all(|c| c.starts_with("quality.")),
+            "ruff manifest must declare its capabilities under the quality.* namespace, got: {:?}",
+            manifest.capabilities.provides,
+        );
+
+        // Copy the python-project fixture into a tmpdir BEFORE invoking
+        // the upstream binary (per WO-0074 §executor #5 + WO-0080
+        // scope_in #5/#16). The upstream tools accept inline `code:str`
+        // arguments rather than file paths so the spawned binary's cwd
+        // does not affect tools/list — the tmpdir copy is here for
+        // parity with the verify script's tool-level smoke + to keep
+        // the read-only fixture tree pristine when later helpers
+        // fabricate deliberate-violation files.
+        let project_dir =
+            copy_fixture_to_tmpdir("ucil-wo-0080-ruff-", "tests/fixtures/python-project").await;
+        assert_dir_exists(&project_dir);
+
+        let health = PluginManager::health_check_with_timeout(&manifest, FIRST_RUN_TIMEOUT_MS)
+            .await
+            .expect("health-check ruff MCP server");
+
+        // `health.name` is sourced from `manifest.plugin.name` (UCIL's
+        // local plugin name) NOT the runtime `serverInfo.name` —
+        // independent of the upstream's PyPI-name vs serverInfo-name
+        // asymmetry (PyPI: `mcp-server-analyzer`; serverInfo:
+        // `Python Analyzer`). See plugins/quality/ruff/plugin.toml
+        // top-of-file rustdoc for the full asymmetry capture.
+        assert_eq!(health.name, "ruff");
+        assert_eq!(
+            health.status,
+            HealthStatus::Ok,
+            "ruff health-check returned non-Ok status: {:?}",
+            health.status,
+        );
+        assert!(!health.tools.is_empty(), "ruff advertised zero tools");
+        // `ruff-check` is the canonical Ruff lint tool advertised by
+        // `mcp-server-analyzer@0.1.2` (alongside 4 other tools — full
+        // live list captured in the manifest's top-of-file rustdoc:
+        // ruff-check, ruff-format, ruff-check-ci, vulture-scan,
+        // analyze-code). The master-plan §4.7 line 376 vocabulary
+        //   Ruff MCP — Python lint via Rust
+        // describes the capability category independent of the
+        // upstream literal tool name. Pinning on `ruff-check` (the
+        // upstream literal that matches our declared
+        // `quality.ruff.lint` capability verbatim) gives the strongest
+        // detection signal for upstream renames mirroring the WO-0072
+        // / WO-0074 / WO-0075 / WO-0076 rationale. Note: kebab-case
+        // `ruff-check` is the upstream literal as emitted by
+        // `tools/list` — preferred over snake-case translation per
+        // WO-0074 scope_in #1 lesson. Pinning on the count would force
+        // updates on every benign upstream tool addition while pinning
+        // on a specific name surfaces upstream tool-surface drift
+        // loudly (WO-0080 scope_in #7 rationale).
+        assert!(
+            health.tools.iter().any(|t| t == "ruff-check"),
+            "(SA3) expected `ruff-check` tool in advertised set; got: {:?}",
+            health.tools,
+        );
+    }
 }

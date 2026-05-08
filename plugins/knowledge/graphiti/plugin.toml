@@ -1,0 +1,161 @@
+# Graphiti MCP plugin manifest (master-plan §14.1 category = "knowledge").
+#
+# pinned 2026-05-08: graphiti `mcp-v1.0.2` (getzep/graphiti — mcp_server/
+# subdirectory)
+#   source          : https://github.com/getzep/graphiti/tree/mcp-v1.0.2/mcp_server
+#   commit          : 19e44a97a929ebf121294f97f26966f0379d8e30
+#                     https://github.com/getzep/graphiti/commit/19e44a97a929ebf121294f97f26966f0379d8e30
+#                     (Frozen `mcp-v1.0.2` release tag — canonical Zep MCP
+#                     server release; `pyproject.toml` reports
+#                     `name = "mcp-server"`, `version = "1.0.2"`. The tag is
+#                     immutable; the commit SHA is the load-bearing pin.)
+#   pinned tag      : `mcp-v1.0.2` (a frozen release tag, NOT a moving
+#                     branch). Per AC15 + master-plan §13 + WO-0069 lesson
+#                     §executor: floating refs (`main`/`master`/`latest`/
+#                     `head`/`develop`/`dev`/`nightly`) are forbidden; this
+#                     pin uses the tag at SHA 19e44a97 for byte-identical
+#                     reproducibility across CI / operator workstations.
+#   binary launch   : `uvx --from
+#                       git+https://github.com/getzep/graphiti.git@mcp-v1.0.2#subdirectory=mcp_server
+#                       python -m graphiti_mcp_server --transport stdio` —
+#                     the upstream `mcp_server/pyproject.toml` does NOT
+#                     declare a `[project.scripts]` console-script entry
+#                     point, so `uvx --from <pkg> graphiti_mcp_server`
+#                     would fail with "no such command". Mirroring the
+#                     upstream README's stdio recipe
+#                     (https://github.com/getzep/graphiti/blob/mcp-v1.0.2/mcp_server/README.md#for-claude-desktop-and-other-stdio-only-clients
+#                     uses `uv run --directory <local checkout>/mcp_server
+#                     main.py --transport stdio`), we adapt that to a
+#                     git-fetched ephemeral env via `uvx --from <git+ref>
+#                     python -m graphiti_mcp_server --transport stdio` —
+#                     the package installs cleanly under uvx because the
+#                     `mcp_server/src/` layout exposes
+#                     `graphiti_mcp_server` as an importable top-level
+#                     module (verified via
+#                     `python -m graphiti_mcp_server --help` at the pin).
+#                     The default `--transport http` (the upstream's
+#                     production-recommended path) is overridden to
+#                     `stdio` per master-plan §13.
+#   advertised tools: add_memory, search_nodes, search_memory_facts,
+#                     delete_entity_edge, delete_episode, get_entity_edge,
+#                     get_episodes, clear_graph, get_status (9 total —
+#                     verified end-to-end via PluginManager::health_check;
+#                     see crates/ucil-daemon/tests/g3_plugin_manifests.rs).
+#                     CRUD vocabulary mapping (master-plan §3.1
+#                     line 313 → upstream tool names):
+#                       store    → add_memory   (episode-backed knowledge ingest)
+#                       retrieve → search_memory_facts / search_nodes
+#                       list     → get_episodes / get_entity_edge
+#   transport       : stdio (master-plan §13; no HTTP in Phase 3).
+#                     The upstream default is `http`; the manifest's
+#                     `--transport stdio` flag overrides that for
+#                     UCIL-side daemon orchestration over JSON-RPC over
+#                     stdio.
+#
+# Operator-state requirements (DUAL-DEPENDENT classification per WO-0077
+# §planner-classification): graphiti requires BOTH of the following at
+# spawn time, otherwise `initialize_server()` raises a `RuntimeError`
+# during startup (verified at the pinned commit-sha — see capture script
+# /tmp/wo-0079-capture.py):
+#
+#   1. **Graph DB connection**. Default provider is FalkorDB at
+#      `redis://127.0.0.1:6379` (`FALKORDB_URI` env var override);
+#      Neo4j is the secondary supported provider via `NEO4J_URI` /
+#      `NEO4J_USER` / `NEO4J_PASSWORD`. The server's lifespan handler
+#      (`graphiti_mcp_server.initialize_server` →
+#      `GraphitiService.initialize`) eagerly connects on startup and
+#      raises if the DB is unreachable; `tools/list` does NOT respond
+#      until the connection succeeds.
+#   2. **LLM API key**. Default provider is OpenAI via `OPENAI_API_KEY`;
+#      ANTHROPIC_API_KEY / GROQ_API_KEY / GEMINI_API_KEY (and their
+#      provider-specific embedder keys) are alternatives per the
+#      upstream `--llm-provider {openai,azure_openai,anthropic,gemini,groq}`
+#      flag. The MCP server requires the key for tool invocations
+#      (entity extraction, semantic search). **However**, `tools/list`
+#      itself succeeds with a syntactically-valid placeholder key
+#      (`OPENAI_API_KEY=sk-not-a-real-key-tools-list-only`) — the LLM
+#      client is lazily instantiated; tool invocation is what actually
+#      requires a live key. UCIL's `PluginManager::health_check` therefore needs
+#      ONLY the graph DB to respond to `tools/list`; the cargo-test
+#      gates on graph DB env presence (per scope_in #6 of WO-0079) and
+#      passes a placeholder LLM key when the DB is set.
+#
+# Two-gate skip pattern (extends WO-0069 mem0 MEM0_API_KEY gate per
+# WO-0079 scope_in #6): the integration test in
+# crates/ucil-daemon/tests/g3_plugin_manifests.rs honours
+# `UCIL_SKIP_KNOWLEDGE_PLUGIN_E2E=1` AND a missing
+# `FALKORDB_URI`/`NEO4J_URI` (either-set is sufficient) AND a missing
+# `OPENAI_API_KEY` as separate skip-via-env reasons; the verifier MUST
+# NOT set `UCIL_SKIP_EXTERNAL_PLUGIN_TESTS` or
+# `UCIL_SKIP_KNOWLEDGE_PLUGIN_E2E` per WO-0069 scope_in #5 carry-forward.
+# The cargo-test `tools/list` path is the load-bearing assertion when
+# all gates pass; the partner verify script
+# scripts/verify/P3-W9-F10.sh covers the same gates plus an optional
+# tool-level smoke (gated identically) per scope_in #11.
+#
+# Secondary install path (DO NOT WIRE unless PRIMARY uvx --from git+
+# fails per scope_in #2): `docker run -i --rm zepai/knowledge-graph-mcp:1.0.2`
+# (Docker Hub image documented at
+# https://hub.docker.com/r/zepai/knowledge-graph-mcp tags
+# `1.0.2-graphiti-0.28.2`, `1.0.2`, `1.0.2-standalone`, `latest`). UCIL
+# currently has zero docker-installed plugins; adding one would be
+# net-new transport infrastructure (operator must `docker pull` + start
+# a FalkorDB/Neo4j sidecar + create a docker network). The PRIMARY
+# `uvx --from git+` path was verified to produce a clean `tools/list`
+# MCP handshake at the pinned commit-sha against an embedded
+# `falkordblite` (FalkorDB redislite variant), so the docker path is
+# NOT wired by this manifest; document only.
+#
+# G3 Knowledge source per master-plan §5.3 lines 463-475 — graphiti is
+# the bi-temporal-knowledge-graph side of G3 (validity windows;
+# hallmark of the Graphiti P1 plugin per master-plan §17.2). Where
+# codebase-memory holds structural knowledge derived from the source
+# tree and mem0 holds semantic knowledge derived from the agent's
+# interactions, graphiti holds *temporal* knowledge — facts annotated
+# with their validity intervals so the agent can reason about
+# "what was true when". This extends the `knowledge.*` capability
+# namespace established by codebase-memory + mem0 in WO-0069 with
+# `knowledge.temporal_query` (the search_memory_facts surface) and
+# `knowledge.fact_validity_lookup` (the get_entity_edge surface, where
+# entity edges carry `valid_at` / `invalid_at` time-anchor properties
+# per upstream graphiti-core schema).
+#
+# Languages: empty list — temporal-knowledge-graph episodes are
+# text-keyed agent observations, not code-language-keyed (mirrors the
+# mem0 manifest at plugins/knowledge/mem0/plugin.toml). Empty
+# `[capabilities] languages` is the deliberate language-agnostic signal.
+#
+# Reproducibility: a moving `latest`/`main`/`master`/`head`/`develop`/
+# `dev`/`nightly` ref is deliberately avoided per
+# .claude/rules/commit-style.md and master-plan §13. The git ref is
+# pinned to the immutable `mcp-v1.0.2` release tag at SHA 19e44a97 so
+# the manifest produces byte-identical health checks across CI machines
+# and operator workstations. When upstream cuts an mcp-v1.1.x with
+# breaking tool-surface changes, supersede this manifest in a new ADR
+# and bump the pin.
+
+[plugin]
+name = "graphiti"
+version = "1.0.2"
+description = "Bi-temporal knowledge graph with validity windows (G3 source per master-plan §5.3 / §17.2 — Graphiti P1 plugin)."
+
+[capabilities]
+provides = ["knowledge.temporal_query", "knowledge.fact_validity_lookup"]
+languages = []
+
+[transport]
+type = "stdio"
+command = "uvx"
+args = [
+    "--from",
+    "git+https://github.com/getzep/graphiti.git@mcp-v1.0.2#subdirectory=mcp_server",
+    "python",
+    "-m",
+    "graphiti_mcp_server",
+    "--transport",
+    "stdio",
+]
+
+[lifecycle]
+hot_cold = true
+idle_timeout_minutes = 10

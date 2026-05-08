@@ -186,4 +186,104 @@ mod g3_plugin_manifests {
             health.tools,
         );
     }
+
+    /// `graphiti_manifest_health_check` (P3-W9-F10) extends the
+    /// skip-via-env pattern with two additional gates per WO-0079
+    /// `scope_in` #5(iii) / #6: graphiti is operator-state-DUAL-
+    /// DEPENDENT — the upstream `mcp_server` lifespan handler eagerly
+    /// connects to (a) a graph DB (FalkorDB by default; Neo4j as
+    /// alternative) AND (b) instantiates an LLM client whose
+    /// constructor reads the API key from env.
+    ///
+    /// Verified at the pinned commit-sha (mcp-v1.0.2 / SHA
+    /// 19e44a97a929ebf121294f97f26966f0379d8e30) via
+    /// `/tmp/wo-0079-capture.py`:
+    ///   * Without `FALKORDB_URI` / `NEO4J_URI`, startup raises
+    ///     `RuntimeError: Database Connection Error: FalkorDB is
+    ///     not running` and `tools/list` never responds.
+    ///   * Without `OPENAI_API_KEY` (or another LLM-provider key),
+    ///     startup raises `openai.OpenAIError: Missing credentials`
+    ///     during `OpenAIClient.__init__` and `tools/list` never
+    ///     responds.
+    ///
+    /// When either gate is missing, the test honours the skip-via-
+    /// env early-return per WO-0069 `tests/g3_plugin_manifests.rs:34`
+    /// precedent — keeping the cargo-test selectable on a clean
+    /// developer workstation that cannot satisfy the dual operator-
+    /// state requirements without the verifier setting opt-outs
+    /// (forbidden per WO-0069 `scope_in` #5 / WO-0079 `scope_in`
+    /// #25).
+    fn graphiti_skip_via_env() -> bool {
+        if skip_via_env() {
+            return true;
+        }
+        let graph_db_set =
+            std::env::var("FALKORDB_URI").is_ok() || std::env::var("NEO4J_URI").is_ok();
+        let llm_key_set = std::env::var("OPENAI_API_KEY").is_ok()
+            || std::env::var("ANTHROPIC_API_KEY").is_ok()
+            || std::env::var("GROQ_API_KEY").is_ok()
+            || std::env::var("GEMINI_API_KEY").is_ok()
+            || std::env::var("AZURE_OPENAI_API_KEY").is_ok();
+        !(graph_db_set && llm_key_set)
+    }
+
+    #[tokio::test]
+    async fn graphiti_manifest_health_check() {
+        if graphiti_skip_via_env() {
+            return;
+        }
+        let manifest_path = repo_root().join("plugins/knowledge/graphiti/plugin.toml");
+        let manifest =
+            PluginManifest::from_path(&manifest_path).expect("parse graphiti plugin.toml");
+
+        // Manifest sanity (cheap pre-flight before paying the uvx
+        // git-fetch + dependency-resolution cost — the upstream's
+        // ~50 transitive Python deps include graphiti-core, mcp,
+        // openai, pydantic, falkordb, etc.).
+        assert_eq!(manifest.plugin.name, "graphiti");
+        assert_eq!(manifest.transport.kind, "stdio");
+        assert!(
+            !manifest.capabilities.provides.is_empty(),
+            "graphiti manifest must declare at least one provided capability",
+        );
+
+        let health = PluginManager::health_check_with_timeout(&manifest, FIRST_RUN_TIMEOUT_MS)
+            .await
+            .expect("health-check graphiti MCP server");
+
+        assert_eq!(health.name, "graphiti");
+        assert_eq!(
+            health.status,
+            HealthStatus::Ok,
+            "graphiti health-check returned non-Ok status: {:?}",
+            health.status,
+        );
+        assert!(!health.tools.is_empty(), "graphiti advertised zero tools",);
+        // `add_memory` is the canonical episode-ingest store tool
+        // advertised by `graphiti mcp-v1.0.2` (alongside
+        // `search_nodes`, `search_memory_facts`, `delete_entity_edge`,
+        // `delete_episode`, `get_entity_edge`, `get_episodes`,
+        // `clear_graph`, `get_status` — 9 total at the pinned
+        // commit-sha 19e44a97a929ebf121294f97f26966f0379d8e30,
+        // captured live via /tmp/wo-0079-capture.py during WO-0079
+        // execution). The master-plan §3.1 line 313 / §17.2 store/
+        // retrieve/list vocabulary maps to:
+        //   store    → add_memory       (episode-backed knowledge ingest)
+        //   retrieve → search_memory_facts / search_nodes
+        //   list     → get_episodes / get_entity_edge
+        // Pinning on `add_memory` (the store side) gives the
+        // strongest detection signal for upstream renames of the
+        // canonical episode-ingest write surface and mirrors the
+        // mem0 `add_memory` pin + codebase-memory `search_graph`
+        // pin (rationale at WO-0069 § / WO-0079 scope_in #7).
+        // Pinning on a count-based assertion (`tools.len() >= 9`)
+        // would tolerate benign upstream additions but mask
+        // tool-rename / tool-removal regressions; per WO-0079
+        // scope_out #21 we deliberately reject that shape.
+        assert!(
+            health.tools.iter().any(|t| t == "add_memory"),
+            "expected `add_memory` tool in advertised set, got: {:?}",
+            health.tools,
+        );
+    }
 }

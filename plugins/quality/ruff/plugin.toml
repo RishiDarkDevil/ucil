@@ -1,0 +1,184 @@
+# Ruff MCP plugin manifest (master-plan §14.1 category = "quality").
+#
+# pinned 2026-05-08: mcp-server-analyzer v0.1.2
+#   source          : https://github.com/anselmoo/mcp-server-analyzer
+#   pypi package    : https://pypi.org/project/mcp-server-analyzer/
+#   pinned tag      : 0.1.2 — pypi `latest` published by Anselmoo on
+#                     2026-05-08 (MIT license; community wrapper that
+#                     combines Ruff + Vulture into one MCP server).
+#                     The PyPI release history at the pin date is
+#                     ['0.1.1', '0.1.2'] — v0.1.2 is the latest stable
+#                     release. Pre-release tags are deliberately NOT
+#                     consumed: only immutable release tags get pinned
+#                     per .claude/rules/commit-style.md.
+#   binary launch   : `uvx mcp-server-analyzer@0.1.2` — `uvx` (from
+#                     `uv`) downloads + caches the pypi package into
+#                     an isolated venv and runs the package's
+#                     `mcp-server-analyzer` console-script entry-
+#                     point. The server speaks JSON-RPC 2.0 over
+#                     stdio (the upstream's default transport via
+#                     FastMCP). No `--mcp` / `mcp start` subcommand
+#                     needed: the binary IS the MCP server (mirrors
+#                     the WO-0076 ESLint + Semgrep shape).
+#
+# Tier-1-vs-Tier-2 decision (DEC-0023 §Decision point 4 — executor
+# authority granted to escalate to Tier-2 in the SAME WO if Tier-1
+# smoke fails). This manifest selects **Tier 1**: the Anselmoo
+# `mcp-server-analyzer` PyPI package is reachable, the live
+# `tools/list` capture against `uvx mcp-server-analyzer@0.1.2`
+# succeeded first-attempt with five canonical tools advertised under
+# the runtime serverInfo name `Python Analyzer` (see
+# §"Live tool name capture" below). Tier-2 (vendored ~50-line
+# FastMCP wrapper at `plugin/ruff-mcp/`) was NOT triggered — the
+# documented upstream of record per DEC-0023 §Rationale handled the
+# integration cleanly.
+#
+# PyPI package name vs serverInfo.name asymmetry (per WO-0077
+# §planner lesson `Capture BOTH PyPI/npm package name AND
+# serverInfo.name`):
+#   PyPI package           : `mcp-server-analyzer` (the install ref)
+#   runtime serverInfo.name: `Python Analyzer` (with version 3.2.4
+#                            advertised by the upstream FastMCP
+#                            instance — distinct from the v0.1.2 PyPI
+#                            release tag because Anselmoo bumps the
+#                            internal FastMCP `name` / `version`
+#                            independent of the PyPI package version).
+#                            The integration test asserts on the
+#                            manifest-level UCIL plugin name `ruff`
+#                            (the conceptual capability per UCIL's
+#                            plugin namespace) which `PluginManager
+#                            ::health_check_with_timeout` returns
+#                            from `manifest.plugin.name` —
+#                            independent of the runtime serverInfo
+#                            name. The verify script's tool-level
+#                            smoke does NOT pin on serverInfo.name
+#                            either; only the tools/list array is
+#                            load-bearing.
+#
+# Live tool name capture against `uvx mcp-server-analyzer@0.1.2`
+# (recorded via /tmp/wo-0080-capture.py on 2026-05-08):
+#   serverInfo.name    : "Python Analyzer"
+#   serverInfo.version : "3.2.4"
+#   tools (5 total)    :
+#     ruff-check     - Lint Python code using RUFF (input: code:str,
+#                      config_path:Optional[str]).
+#     ruff-format    - Format Python code using RUFF's fast
+#                      formatter (input: code:str,
+#                      config_path:Optional[str]).
+#     ruff-check-ci  - Run RUFF linter with CI/CD-specific output
+#                      formats (input: code:str,
+#                      output_format:str=json, config_path:
+#                      Optional[str]).
+#     vulture-scan   - Detect dead/unused code via VULTURE (input:
+#                      code:str, min_confidence:int=80).
+#     analyze-code   - Comprehensive analysis combining RUFF + VULTURE
+#                      (input: code:str, ruff_config_path:
+#                      Optional[str], min_confidence:int=80).
+#   The integration test pins on `ruff-check` — the canonical Ruff
+#   lint tool that maps verbatim to our declared
+#   `quality.ruff.lint` capability and is the strongest detection
+#   signal for upstream renames mirroring the WO-0072 / WO-0074 /
+#   WO-0075 / WO-0076 rationale. Note: kebab-case `ruff-check` is
+#   the upstream literal as emitted by `tools/list` — preferred
+#   over snake-case translation per WO-0074 scope_in #1 lesson.
+#   The Anselmoo upstream uniformly uses kebab-case for all five
+#   tool names (consistent with FastMCP's `mcp.tool()` decorator
+#   which preserves the function's underscore-to-hyphen translation
+#   when the Python function name contains underscores, OR the
+#   explicit `name=` kwarg the wrapper passes).
+#
+#   Tool input shape note: the upstream tools take `code:str` inline
+#   (NOT file paths). The verify script's tool-level smoke
+#   (scripts/verify/P3-W11-F03.sh Step 7) reads the deliberate-
+#   violation file's contents into a Python string and passes it via
+#   the `code` argument — independent of cwd and forbidden-paths-
+#   safe (the fixture's tmpdir copy is read into memory only; the
+#   MCP server scans the inline string).
+#
+#   transport       : stdio (master-plan §13; no HTTP in Phase 3).
+#   API keys        : NONE — Ruff + Vulture run entirely locally
+#                     (no LLM, no external service, no network call
+#                     after the initial uvx fetch).
+#   operator state  : NONE — Ruff + Vulture are bundled as Python
+#                     dependencies in `mcp-server-analyzer`'s
+#                     pyproject.toml; uvx-managed venv self-resolves
+#                     them transitively. NO equivalent of the
+#                     WO-0076 Semgrep CLI dep (`semgrep --pro
+#                     --version` lifespan call). NO `RUFF_PATH` env
+#                     var. The upstream is **SELF-RESOLVING** per
+#                     WO-0076 / WO-0077 §planner lesson `distinguish
+#                     operator-state-CLI-dependent vs self-resolving
+#                     MCP servers`. The integration test + verify
+#                     script BOTH operate without parent-process env
+#                     mutation; no `unsafe std::env::set_var` blocks
+#                     are introduced for this manifest (per WO-0080
+#                     scope_in #17 — ruff sidesteps the WO-0076 W1+W2
+#                     unsafe-set_var debt by virtue of being self-
+#                     resolving).
+#
+# Working-directory invariant: the upstream tools accept inline
+# Python source code via the `code` argument — the spawned binary's
+# cwd does NOT affect tool output. The integration test does NOT
+# need a tmpdir copy for the cargo-test path (which only exercises
+# tools/list). The verify script's tool-level smoke copies
+# `tests/fixtures/python-project` into a `mktemp -d` tmpdir BEFORE
+# fabricating a `bad.py` deliberate-lint-violation file (per WO-0080
+# scope_in #35/#36) — fixture stays read-only.
+#
+# Establishing the `quality.*` capability namespace: see the
+# matching documentation in plugins/quality/eslint/plugin.toml.
+# Ruff is the Python lint + format half of the G7 group; ESLint
+# is the JS/TS lint half; Semgrep is the multi-language SAST half.
+# Future G7 entries (Sonarqube, Snyk, OSV, RuboCop, Trivy,
+# TruffleHog, Gitleaks, Biome, DeepSource, Codacy per master-plan
+# §4.7 lines 378-388) extend the quality.* namespace consistently.
+#
+# G7 Quality source per master-plan §5.7 — the G7 group queries all
+# quality stores in parallel and the agent synthesizes a unified
+# diagnostic packet for the active task. Ruff MCP sits at master-
+# plan §3.1 + §4.7 line 376 as P0 priority — the canonical Python
+# lint + format plugin to land alongside ESLint + Semgrep. DEC-0023
+# revives this feature in Phase 3 scope after DEC-0020's premature
+# deferral was traced to a search-narrowness error (the planner
+# triad searched `pypi/mcp-ruff`, `pypi/ruff-mcp`,
+# `pypi/ruff-mcp-server` — all 404 — but did NOT search PyPI
+# broadly; `mcp-server-analyzer` was the canonical wrapper of
+# record).
+#
+# Reproducibility: a moving `latest` dist-tag is deliberately
+# avoided per .claude/rules/commit-style.md. The pypi package
+# version is pinned to an immutable release tag so the manifest
+# produces byte-identical health checks across CI machines and
+# operator workstations. When upstream cuts a v0.2.x with breaking
+# tool-surface changes (e.g., kebab→snake rename, tool removal,
+# deprecation_notice pivot per WO-0076 Semgrep precedent),
+# supersede this manifest in a new ADR and bump the pin.
+
+[plugin]
+name = "ruff"
+category = "quality"
+priority = "P0"
+version = "0.1.2"
+description = "Python lint + format via Ruff (MIT license; bundled with Vulture dead-code detection through the mcp-server-analyzer wrapper). G7 source per master-plan §3.1 + §4.7 line 376 + §5.7."
+
+[capabilities]
+provides = [
+    "quality.ruff.lint",
+    "quality.ruff.format",
+]
+languages = ["python"]
+
+[capabilities.activation]
+on_language = ["python"]
+on_tool = ["check_quality", "review_changes"]
+
+[transport]
+type = "stdio"
+command = "uvx"
+args = [
+    "mcp-server-analyzer@0.1.2",
+]
+
+[lifecycle]
+hot_cold = true
+idle_timeout_minutes = 10
