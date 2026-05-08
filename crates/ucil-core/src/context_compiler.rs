@@ -93,6 +93,7 @@ use std::collections::{HashMap, HashSet};
 use std::hash::BuildHasher;
 use std::path::PathBuf;
 
+use crate::cross_group::{CrossGroupFusedHit, CrossGroupFusedOutcome};
 use crate::knowledge_graph::{Entity, KnowledgeGraph, KnowledgeGraphError};
 
 // ── Errors ────────────────────────────────────────────────────────────────────
@@ -857,6 +858,415 @@ fn test_repo_map_pagerank() {
             "(SA3c) budgeted prefix mismatch at index {i}: \
              symbol[i].qualified_name={budgeted_qn:?} != \
              unbudgeted[i].qualified_name={unbudgeted_qn:?}",
+        );
+    }
+}
+
+// ── Response assembly (P3-W10-F09) ───────────────────────────────────────────
+//
+// Master-plan §6.3 lines 660-690 — Response assembly applies session-
+// dedup + relevance threshold + token annotation over a
+// `CrossGroupFusedOutcome` to produce the final response shape that
+// the host adapter renders.  The §6.3 contract drives the algorithm:
+//
+//   1. "Skip files already in the agent's context" — session dedup
+//      against a caller-supplied `files_in_context` set (master-plan
+//      §6.3 line 663).
+//   2. "Skip if relevance score < 0.1" — strict-`<` relevance
+//      threshold (master-plan §6.3 line 667).
+//   3. "Annotate with token cost" — 4-char-per-token lower-bound
+//      heuristic per surviving hit (master-plan §6.3 line 700-701
+//      `_meta.token_count`).
+//
+// The function chains directly into `crate::bonus_selector::select_bonus_context`
+// when the caller wants the full §6.3 line 670 response shape — F09's
+// surviving hits are F11's bonus-recipients exactly when the two
+// thresholds are aligned (the default 0.1).
+
+/// Per-response counters returned alongside the surviving hits.
+///
+/// Master-plan §6.3 line 700-701: "Format: Markdown with file paths
+/// as headers, full code blocks ... Add `_meta.token_count` for
+/// host-adapter trimming."  These four counters compose that
+/// `_meta` block.
+///
+/// # Invariants
+///
+/// * `total_input == hits-surviving + deduped_count + filtered_count`
+///   (the conservation invariant — every input hit ends up in
+///   exactly one of the three buckets).
+/// * `token_count` is the sum of [`hit_token_estimate`] across
+///   surviving hits; never negative.
+///
+/// NOT marked `#[non_exhaustive]` — this is a stable response-shape
+/// contract per master-plan §6.3 line 700-701 (the host adapter
+/// reads `_meta.token_count` to drive trimming).
+///
+/// # Examples
+///
+/// ```
+/// use ucil_core::ResponseMeta;
+///
+/// let meta = ResponseMeta {
+///     token_count: 42,
+///     deduped_count: 1,
+///     filtered_count: 2,
+///     total_input: 5,
+/// };
+/// // Conservation invariant — 5 inputs minus 1 dedup minus 2
+/// // filter equals 2 surviving.
+/// let surviving = meta.total_input - meta.deduped_count - meta.filtered_count;
+/// assert_eq!(surviving, 2);
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ResponseMeta {
+    /// Total token estimate across surviving hits (the
+    /// 4-char-per-token lower-bound heuristic).  Master-plan §6.3
+    /// line 700-701 `_meta.token_count` for host-adapter trimming.
+    pub token_count: usize,
+    /// Number of hits removed because their `file_path` was in the
+    /// caller-supplied `files_in_context` set.  Master-plan §6.3
+    /// line 663 session-dedup.
+    pub deduped_count: usize,
+    /// Number of hits removed because their `fused_score` was
+    /// strictly less than `options.relevance_threshold`.  Master-
+    /// plan §6.3 line 667 ("Skip if relevance score < 0.1").
+    pub filtered_count: usize,
+    /// Input outcome's hit count BEFORE any filtering.
+    pub total_input: usize,
+}
+
+/// The §6.3 final response shape — surviving hits paired with
+/// projection-counter metadata.
+///
+/// `hits` preserves the input outcome's order
+/// ([`CrossGroupFusedOutcome::hits`] is sorted descending by
+/// `fused_score` per WO-0068's §6.2 contract; this projection ONLY
+/// filters, never re-sorts).  Length invariant:
+/// `hits.len() == meta.total_input - meta.deduped_count - meta.filtered_count`.
+///
+/// NOT marked `#[non_exhaustive]` — this is a stable response-shape
+/// contract per master-plan §6.3 line 700-701.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct AssembledResponse {
+    /// Surviving hits, in input order (descending `fused_score`).
+    pub hits: Vec<CrossGroupFusedHit>,
+    /// Per-response counters (token-count, dedup-count,
+    /// filter-count, total-input).
+    pub meta: ResponseMeta,
+}
+
+/// Tuning knobs for [`assemble_response`].
+///
+/// The defaults reproduce the master-plan §6.3 line 663-668
+/// canonical values:
+///
+/// * `relevance_threshold = 0.1` — strict-`<` filter floor; a hit
+///   with `fused_score == 0.1` IS surviving (boundary inclusion).
+///   Master-plan §6.3 line 667 verbatim ("Skip if relevance score
+///   < 0.1").
+/// * `dedup_enabled = true` — apply session dedup against
+///   `files_in_context`.  Disable to retain every hit regardless of
+///   the caller's session state (only useful for debug / tracing
+///   workflows).
+///
+/// # Examples
+///
+/// ```
+/// use ucil_core::ResponseAssemblyOptions;
+///
+/// let defaults = ResponseAssemblyOptions::default();
+/// assert!((defaults.relevance_threshold - 0.1).abs() < f64::EPSILON);
+/// assert!(defaults.dedup_enabled);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ResponseAssemblyOptions {
+    /// Strict-`<` filter floor.  Hits with `fused_score < threshold`
+    /// are filtered out; hits with `fused_score == threshold` ARE
+    /// surviving.  Master-plan §6.3 line 667 default `0.1`.
+    pub relevance_threshold: f64,
+    /// Whether to apply session-dedup against the caller-supplied
+    /// `files_in_context` set.  Default `true`.
+    pub dedup_enabled: bool,
+}
+
+impl Default for ResponseAssemblyOptions {
+    fn default() -> Self {
+        Self {
+            relevance_threshold: 0.1,
+            dedup_enabled: true,
+        }
+    }
+}
+
+/// Estimate the rendered token cost of a [`CrossGroupFusedHit`] in
+/// the §6.3 response shape.
+///
+/// Mirrors [`entity_token_estimate`] — the 4-char-per-token
+/// lower-bound heuristic (`cl100k_base` ≈ 4 chars/token for ASCII
+/// source) used by Aider's original repo-map for budget-fitting
+/// before invoking tiktoken.  Counts `chars()` (not `len()`) so
+/// multi-byte source code does not over-count by byte-width.
+///
+/// The `+ 8` constant is the per-hit Markdown-rendering overhead
+/// (file-path header + line-range annotation + code-block
+/// delimiters per master-plan §6.3 line 700 "Format: Markdown with
+/// file paths as headers, full code blocks").  Documented inline
+/// rather than extracted to a const so the heuristic is greppable
+/// when a future ADR swaps in `tiktoken-rs`.
+///
+/// See also: [`entity_token_estimate`].
+#[must_use]
+pub fn hit_token_estimate(hit: &CrossGroupFusedHit) -> usize {
+    hit.snippet.chars().count() / 4 + hit.file_path.to_string_lossy().chars().count() / 4 + 8
+}
+
+/// Assemble the §6.3 final response — apply session-dedup +
+/// relevance threshold + token annotation to a fused outcome.
+///
+/// Pure-deterministic projection; never panics; never returns
+/// `Result`.  Empty input → empty output.  Order of input is
+/// preserved (the caller's [`CrossGroupFusedOutcome::hits`] is
+/// already sorted descending by `fused_score` per the WO-0068
+/// §6.2 contract; this projection ONLY filters, never re-sorts).
+///
+/// §15.2 tracing carve-out applies (pure-deterministic projection)
+/// — production impls of the daemon-side response-assembly
+/// orchestration carry `tracing::instrument` at the boundary.
+///
+/// # Algorithm — master-plan §6.3 lines 665-685
+///
+/// 1. Capture `total_input = outcome.hits.len()`.
+/// 2. If `options.dedup_enabled`, partition hits into
+///    `(kept, deduped)` where a hit is `deduped` IFF
+///    `files_in_context.contains(&hit.file_path)` (strict
+///    `HashSet`-on-`PathBuf` comparison; no string-suffix match,
+///    no canonicalization).  Otherwise `kept = all input`.
+/// 3. Partition `kept` into `(surviving, filtered)` where a hit is
+///    `filtered` IFF `hit.fused_score < options.relevance_threshold`
+///    (strict-`<` per master-plan §6.3 line 667 — boundary
+///    inclusion: `0.1 < 0.1` is false so the hit IS surviving).
+/// 4. Compute `token_count = Σ hit_token_estimate(h) for h in surviving`.
+/// 5. Construct + return [`AssembledResponse`].
+///
+/// # Examples
+///
+/// ```
+/// use std::collections::HashSet;
+/// use std::path::PathBuf;
+/// use ucil_core::{
+///     CrossGroupFusedOutcome, ResponseAssemblyOptions, assemble_response,
+/// };
+///
+/// let outcome = CrossGroupFusedOutcome::default();
+/// let files: HashSet<PathBuf> = HashSet::new();
+/// let options = ResponseAssemblyOptions::default();
+/// let result = assemble_response(&outcome, &files, &options);
+/// assert_eq!(result.meta.total_input, 0);
+/// assert!(result.hits.is_empty());
+/// ```
+#[must_use]
+pub fn assemble_response<S: BuildHasher>(
+    outcome: &CrossGroupFusedOutcome,
+    files_in_context: &HashSet<PathBuf, S>,
+    options: &ResponseAssemblyOptions,
+) -> AssembledResponse {
+    let total_input = outcome.hits.len();
+
+    // ── Step 2 — session dedup ─────────────────────────────────
+    //
+    // Strict `HashSet::contains` on `PathBuf` — no string-suffix
+    // matching, no canonicalization.  When `dedup_enabled` is
+    // false we skip this partition entirely (deduped_count = 0).
+    let mut deduped_count: usize = 0;
+    let kept: Vec<&CrossGroupFusedHit> = outcome
+        .hits
+        .iter()
+        .filter(|hit| {
+            if options.dedup_enabled && files_in_context.contains(&hit.file_path) {
+                deduped_count += 1;
+                false
+            } else {
+                true
+            }
+        })
+        .collect();
+
+    // ── Step 3 — strict-`<` relevance threshold ────────────────
+    //
+    // Boundary inclusion: a hit with `fused_score == relevance_threshold`
+    // IS surviving (`0.1 < 0.1` is false).
+    let mut filtered_count: usize = 0;
+    let surviving: Vec<CrossGroupFusedHit> = kept
+        .into_iter()
+        .filter(|hit| {
+            if hit.fused_score < options.relevance_threshold {
+                filtered_count += 1;
+                false
+            } else {
+                true
+            }
+        })
+        .cloned()
+        .collect();
+
+    // ── Step 4 — token annotation ──────────────────────────────
+    let token_count: usize = surviving.iter().map(hit_token_estimate).sum();
+
+    AssembledResponse {
+        hits: surviving,
+        meta: ResponseMeta {
+            token_count,
+            deduped_count,
+            filtered_count,
+            total_input,
+        },
+    }
+}
+
+// ── Module-root test for assemble_response (DEC-0007 frozen-selector) ─────────
+//
+// `test_response_assembly` lives at module root — NOT inside
+// `mod tests { ... }` — so the substring selector
+// `cargo test -p ucil-core context_compiler::test_response_assembly`
+// resolves uniquely without `--exact`.
+
+/// Build a [`CrossGroupFusedHit`] with a known `fused_score` for
+/// the SA1-SA8 fixture.
+#[cfg(test)]
+fn make_assembly_hit(file: &str, score: f64) -> CrossGroupFusedHit {
+    CrossGroupFusedHit {
+        file_path: PathBuf::from(file),
+        start_line: 1,
+        end_line: 10,
+        snippet: format!("// {file}\nfn placeholder() {{}}"),
+        fused_score: score,
+        contributing_groups: Vec::new(),
+        per_group_ranks: Vec::new(),
+    }
+}
+
+/// Frozen test for [`assemble_response`].
+///
+/// SA tags (mutation-targeted):
+///
+/// * SA1 — input-count preserved into `total_input`.
+/// * SA2 — `file_a.rs` appears twice; both hits are deduped
+///   (M1 target: bypass dedup → SA2 fails with 0 instead of 2).
+/// * SA3 — score 0.05 + 0.00 are below 0.1 threshold; both
+///   filtered (M2 target: bypass threshold → SA3 fails with 0
+///   instead of 2).
+/// * SA4 — only file_b.rs at 0.30 survives both filters
+///   (5 - 2 dedup - 2 filter = 1).
+/// * SA5 — surviving hit is file_b.rs.
+/// * SA6 — token_count is in the plausible range (1, 1000).
+/// * SA7 — conservation invariant:
+///   `total_input == hits + deduped + filtered`.
+/// * SA8 — boundary inclusion at `fused_score == 0.1` (the hit
+///   survives because `0.1 < 0.1` is false).
+#[cfg(test)]
+#[test]
+fn test_response_assembly() {
+    // Five hits — file_a.rs twice (deduped), file_b.rs at 0.30
+    // (surviving), file_c.rs at 0.05 + file_d.rs at 0.00 (both
+    // below threshold).
+    let hits = vec![
+        make_assembly_hit("file_a.rs", 0.50),
+        make_assembly_hit("file_b.rs", 0.30),
+        make_assembly_hit("file_c.rs", 0.05),
+        make_assembly_hit("file_d.rs", 0.00),
+        make_assembly_hit("file_a.rs", 0.20),
+    ];
+    let outcome = CrossGroupFusedOutcome {
+        hits,
+        used_weights: [0.0; 8],
+        degraded_groups: Vec::new(),
+    };
+    let mut files_in_context: HashSet<PathBuf> = HashSet::new();
+    files_in_context.insert(PathBuf::from("file_a.rs"));
+    let options = ResponseAssemblyOptions::default();
+
+    let result = assemble_response(&outcome, &files_in_context, &options);
+
+    // ── SA1 — total_input preserved ──────────────────────────────
+    assert_eq!(
+        result.meta.total_input,
+        5,
+        "(SA1) total_input expected 5; observed {n}",
+        n = result.meta.total_input,
+    );
+
+    // ── SA2 — both file_a.rs hits deduped (M1 target) ─────────────
+    assert_eq!(
+        result.meta.deduped_count,
+        2,
+        "(SA2) deduped_count expected 2; observed {n}",
+        n = result.meta.deduped_count,
+    );
+
+    // ── SA3 — score-0.05 and score-0.00 filtered (M2 target) ──────
+    assert_eq!(
+        result.meta.filtered_count,
+        2,
+        "(SA3) filtered_count expected 2; observed {n}",
+        n = result.meta.filtered_count,
+    );
+
+    // ── SA4 — only file_b.rs at 0.30 survives ─────────────────────
+    assert_eq!(
+        result.hits.len(),
+        1,
+        "(SA4) surviving hits expected 1; observed {n}",
+        n = result.hits.len(),
+    );
+
+    // ── SA5 — surviving hit IS file_b.rs ──────────────────────────
+    assert_eq!(
+        result.hits[0].file_path,
+        PathBuf::from("file_b.rs"),
+        "(SA5) survivor file_path expected file_b.rs; observed {fp:?}",
+        fp = result.hits[0].file_path,
+    );
+
+    // ── SA6 — token_count plausible-range sanity ──────────────────
+    assert!(
+        result.meta.token_count > 0 && result.meta.token_count < 1000,
+        "(SA6) token_count out of plausible range [1, 1000]; observed {n}",
+        n = result.meta.token_count,
+    );
+
+    // ── SA7 — conservation invariant ──────────────────────────────
+    assert_eq!(
+        result.meta.total_input,
+        result.hits.len() + result.meta.deduped_count + result.meta.filtered_count,
+        "(SA7) total_input != hits + deduped + filtered: {a} vs {b} + {c} + {d}",
+        a = result.meta.total_input,
+        b = result.hits.len(),
+        c = result.meta.deduped_count,
+        d = result.meta.filtered_count,
+    );
+
+    // ── SA8 — boundary inclusion at fused_score == 0.1 ────────────
+    //
+    // A second outcome with one hit at exactly the threshold;
+    // dedup-empty input.  The hit MUST survive because
+    // `0.1 < 0.1` is false (strict-`<` comparison per
+    // master-plan §6.3 line 667).
+    {
+        let outcome2 = CrossGroupFusedOutcome {
+            hits: vec![make_assembly_hit("file_boundary.rs", 0.1)],
+            used_weights: [0.0; 8],
+            degraded_groups: Vec::new(),
+        };
+        let empty_files: HashSet<PathBuf> = HashSet::new();
+        let result2 = assemble_response(&outcome2, &empty_files, &options);
+        assert_eq!(
+            result2.hits.len(),
+            1,
+            "(SA8) boundary-inclusion at threshold: hit at score=0.1 expected to survive; \
+             observed filtered_count={n}, hits.len={h}",
+            n = result2.meta.filtered_count,
+            h = result2.hits.len(),
         );
     }
 }
