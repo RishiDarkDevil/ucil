@@ -1,0 +1,122 @@
+# GitHub MCP plugin manifest (master-plan §14.1 category = "platform").
+#
+# pinned 2026-05-08: @modelcontextprotocol/server-github v2025.4.8
+#   source          : https://github.com/modelcontextprotocol/servers
+#   npm package     : https://www.npmjs.com/package/@modelcontextprotocol/server-github
+#   pinned tag      : 2025.4.8 — npm `latest` published by the
+#                     @modelcontextprotocol team (MIT license; canonical
+#                     Node MCP server for the GitHub REST + GraphQL API
+#                     surface). The `next` / pre-release dist-tags are
+#                     deliberately NOT consumed: only immutable release
+#                     tags get pinned per .claude/rules/commit-style.md.
+#   binary launch   : `npx -y @modelcontextprotocol/server-github@2025.4.8`
+#                     — `npx` downloads + caches the npm package and
+#                     runs the `mcp-server-github` console-script entry-
+#                     point. The server speaks JSON-RPC 2.0 over stdio.
+#                     No `--mcp` / `mcp start` subcommand needed: the
+#                     binary IS the MCP server (mirrors Context7 shape,
+#                     differs from Repomix which has a CLI mode).
+#   advertised tools: create_or_update_file, search_repositories,
+#                     create_repository, get_file_contents, push_files,
+#                     create_issue, create_pull_request,
+#                     fork_repository, create_branch, list_commits,
+#                     list_issues, update_issue, add_issue_comment,
+#                     search_code, search_issues, search_users,
+#                     get_issue, get_pull_request, list_pull_requests,
+#                     create_pull_request_review, merge_pull_request,
+#                     get_pull_request_files, get_pull_request_status,
+#                     update_pull_request_branch,
+#                     get_pull_request_comments, get_pull_request_reviews
+#                     (26 total — verified end-to-end via
+#                     PluginManager::health_check; see
+#                     crates/ucil-daemon/tests/g6_plugin_manifests.rs).
+#                     The master-plan §3.1 line 314 + §4.6 line 348 +
+#                     §5.6 vocabulary (`list_repositories`,
+#                     `list_pull_requests`, `get_workflow_status`)
+#                     describes capability NAMES independent of the
+#                     upstream literal tool names. The closest upstream
+#                     literal for repo-list is `search_repositories`
+#                     (the canonical browse-repos surface); PR-list
+#                     maps verbatim to `list_pull_requests`; there is
+#                     no upstream `get_workflow_status` tool in the
+#                     2025.4.8 catalog (the master-plan vocabulary is
+#                     forward-compatible with future @modelcontextprotocol
+#                     surface expansions). The integration test pins on
+#                     `list_pull_requests` (the upstream literal that
+#                     matches our declared capability `platform.github.
+#                     list_pull_requests` verbatim) — strongest
+#                     detection signal for upstream renames mirroring
+#                     the WO-0072 codegraphcontext / WO-0074 Context7
+#                     rationale (snake_case `list_pull_requests` is the
+#                     upstream literal as emitted by `tools/list` —
+#                     preferred over kebab-case translation per WO-0074
+#                     scope_in #1).
+#   transport       : stdio (master-plan §13; no HTTP in Phase 3).
+#   API keys        : `GITHUB_PERSONAL_ACCESS_TOKEN` REQUIRED for the
+#                     API-backed `tools/call` operations (every tool
+#                     in the catalog reaches api.github.com over HTTPS
+#                     and requires a PAT with the appropriate scopes).
+#                     `tools/list` works WITHOUT auth — it returns the
+#                     static tool catalog regardless of token presence;
+#                     only `tools/call` actually exercises the HTTP
+#                     surface that needs a token. The integration test
+#                     and `scripts/verify/P3-W10-F05.sh` both rely on
+#                     this property: `tools/list` is the load-bearing
+#                     assertion (always run); `tools/call
+#                     search_repositories` is gated on
+#                     `${GITHUB_PERSONAL_ACCESS_TOKEN}` env presence
+#                     and `[SKIP]`s gracefully when unset (per the
+#                     WO-0069 Mem0 API-key short-circuit precedent).
+#
+# Establishing the `platform.*` capability namespace: parallel to
+# `search.*` (probe; P2-W6-F06), `navigate.*` (scip; P2-W7-F08),
+# `knowledge.*` (codebase-memory; P3-W9-F05 + mem0; P3-W9-F06),
+# `architecture.*` (codegraphcontext; P3-W9-F08), and `context.*`
+# (Context7 + Repomix; P3-W10-F02/F03). G6 Platform sources advertise
+# capabilities under the `platform.*` prefix; sub-divisions per source
+# are `platform.github.*`, `platform.git.*`, `platform.fs.*`. GitHub
+# is the remote-VCS half of the G6 group; Git is the local-VCS half;
+# Filesystem is the local-IO half (see plugins/platform/git/plugin.toml
+# and plugins/platform/filesystem/plugin.toml).
+#
+# G6 Platform source per master-plan §5.6 — the G6 group queries all
+# platform stores in parallel and the agent synthesizes a unified
+# platform-state packet for the active task. GitHub MCP sits at
+# master-plan §3.1 line 314 + §4.6 line 348 as P0 priority — the
+# canonical first G6 plugin to land. Future G6 entries (Memory MCP,
+# Sequential Thinking MCP, etc. per master-plan §14.1 line 1678+)
+# extend the platform.* namespace.
+#
+# Reproducibility: a moving `latest` or `next` dist-tag is deliberately
+# avoided per .claude/rules/commit-style.md. The npm package version is
+# pinned to an immutable release tag so the manifest produces
+# byte-identical health checks across CI machines and operator
+# workstations. When upstream cuts a v2026.x with breaking tool-surface
+# changes, supersede this manifest in a new ADR and bump the pin.
+
+[plugin]
+name = "github"
+category = "platform"
+priority = "P0"
+version = "2025.4.8"
+description = "GitHub REST + GraphQL API access (issues, PRs, code search, repo browse). MIT license. G6 source per master-plan §3.1 line 314 + §4.6 line 348 + §5.6."
+
+[capabilities]
+provides = [
+    "platform.github.list_repositories",
+    "platform.github.list_pull_requests",
+    "platform.github.get_workflow_status",
+]
+languages = []
+
+[transport]
+type = "stdio"
+command = "npx"
+args = [
+    "-y",
+    "@modelcontextprotocol/server-github@2025.4.8",
+]
+
+[lifecycle]
+hot_cold = true
+idle_timeout_minutes = 10
