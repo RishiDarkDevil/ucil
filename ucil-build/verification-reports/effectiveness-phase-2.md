@@ -1,17 +1,17 @@
 # Effectiveness Report — Phase 2
 
-Run at: 2026-05-08T (refresh-pass at WO-0068 HEAD)
-Commit: `03ca34e` (`HEAD` at evaluator-launch)
-Branch: `feat/WO-0068-cross-group-executor-and-fusion`
+Run at: 2026-05-08T (refresh-pass at WO-0069 HEAD)
+Commit: `2958986` (`HEAD` at evaluator-launch)
+Branch: `feat/WO-0069-codebase-memory-and-mem0-plugin-manifests`
 Evaluator: `effectiveness-evaluator` (this session, `claude-opus-4-7`)
 Prior substantive run: commit `aa7dc84` (full UCIL+baseline+judge invocations)
-Prior refresh-passes: `f0fbf32` @ HEAD `f0fbf32` (2026-05-08, earlier), `f9fd29d` @ HEAD `f9fd29d` (2026-05-07T19:45Z), `43645fd` @ HEAD `4efda0b` (2026-05-07T18:39Z), `43645fd` @ HEAD `43645fd` (2026-05-07T18:42Z), `dd4659e` @ HEAD `c45933c` (earlier)
+Prior refresh-passes: `03ca34e` @ HEAD `03ca34e` (2026-05-08, earlier — WO-0068 HEAD), `f0fbf32` @ HEAD `f0fbf32` (2026-05-08, earlier), `f9fd29d` @ HEAD `f9fd29d` (2026-05-07T19:45Z), `43645fd` @ HEAD `4efda0b` (2026-05-07T18:39Z), `43645fd` @ HEAD `43645fd` (2026-05-07T18:42Z), `dd4659e` @ HEAD `c45933c` (earlier)
 
 ## Refresh-pass note
 
-This is a **re-confirmation pass** at HEAD `03ca34e` (Phase 3 Week 1
-WO-0068 branch — the cross-group executor + RRF fusion work, plus
-report-only commits since `f0fbf32`). The substantive evaluation data
+This is a **re-confirmation pass** at HEAD `2958986` (Phase 3 Week 1
+WO-0069 branch — the codebase-memory + mem0 plugin-manifests work,
+landed on top of merged WO-0068). The substantive evaluation data
 (UCIL/baseline runs, judge scores, acceptance results) is inherited
 verbatim from the full run at commit `aa7dc84` because:
 
@@ -94,7 +94,110 @@ The full substantive evaluation detail (per-side run envelopes, judge
 prompts, acceptance results, observation list) is preserved unchanged
 below.
 
-### Probe evidence — 2026-05-08 (this session @ HEAD `03ca34e`)
+### Probe evidence — 2026-05-08 (this session @ HEAD `2958986`)
+
+This evaluator session independently re-ran the three-invariant probe at
+HEAD `2958986` on the `feat/WO-0069-codebase-memory-and-mem0-plugin-manifests`
+branch. The HEAD has advanced from prior refresh `03ca34e` → `2958986`
+(WO-0068 was merged into main; WO-0069 then branched off and added
+plugin manifests + an additive integration test). None of the WO-0069
+commits touch the agent-runtime MCP dispatch path, the scenario fixtures,
+or the scenarios themselves.
+
+- **Source delta vs prior refresh `03ca34e`** (this session):
+  `git diff 03ca34e..HEAD --stat -- crates/ adapters/ ml/ plugin*/
+  tests/fixtures/ tests/scenarios/ scripts/` → the only matches are:
+  - `crates/ucil-daemon/tests/g3_plugin_manifests.rs` — **+189 lines,
+    new file**, an integration-test for plugin manifests. Tests are
+    not in the agent-visible runtime path (they are only built/run by
+    `cargo test` in CI; the MCP server binary does not load them).
+  - `plugins/knowledge/codebase-memory/plugin.toml`,
+    `plugins/knowledge/mem0/plugin.toml` — new plugin manifests under
+    `plugins/`, not under `crates/`. These are configuration files
+    consumed by Phase-3 plugin discovery (not yet wired into the MCP
+    handler dispatch); they do not affect how `find_definition`,
+    `find_references`, `refactor`, or `search_code` respond.
+  - `scripts/devtools/install-codebase-memory-mcp.sh`,
+    `scripts/devtools/install-mem0-mcp.sh` — devtools install helpers,
+    not part of the MCP runtime.
+  - `scripts/verify/P3-W9-F05.sh`, `scripts/verify/P3-W9-F06.sh` —
+    verifier-side gate scripts for Phase-3 features; do not affect
+    the agent's view of the MCP server.
+
+  No regression vector to Phase-2 MCP behavior.
+- **Source delta vs `aa7dc84`** (this session):
+  `git diff aa7dc84..HEAD --stat -- crates/ucil-daemon/src/
+  crates/ucil-mcp/ tests/fixtures/ tests/scenarios/` → **0 lines** of
+  output. The agent-visible MCP dispatch source (note: `src/`, not the
+  additive `tests/` integration suite) and scenario inputs are
+  bit-identical to the full-run baseline.
+- **`tools/list` probe** at `target/debug/ucil-daemon mcp --stdio
+  --repo /tmp/ucil-eval-probe-2026-05-08-r5/repo` (fresh fixture copy
+  from `tests/fixtures/rust-project/`) → **22 tools** registered,
+  identical names to prior probes. All four scenario-required tools
+  listed (`find_definition`, `find_references`, `refactor`,
+  `search_code`).
+- **`tools/call find_definition name=retry_with_backoff`** (rust fixture)
+  → `_meta.source = "tree-sitter+kg"`, `isError = false`,
+  `_meta.found = true`, content cites
+  `retry_with_backoff` defined in
+  `/tmp/ucil-eval-probe-2026-05-08-r5/repo/src/http_client.rs` at line
+  37. **Real handler.**
+- **`tools/call find_definition name=compute_score`** (python fixture, run
+  at `/tmp/ucil-eval-probe-2026-05-08-r5/python-repo`) →
+  `_meta.source = "tree-sitter+kg"`, content cites `compute_score`
+  defined in `src/python_project/scoring.py` at line 15. **Real
+  handler.**
+- **`tools/call find_references name=retry_with_backoff`** →
+  `_meta.not_yet_implemented = true`,
+  `"tool 'find_references' is registered but its handler is not yet
+  implemented (Phase 1 stub)"`. **Phase-1 stub envelope.** Identical
+  to prior.
+- **`tools/call find_references name=compute_score`** (python) →
+  `_meta.not_yet_implemented = true`. **Phase-1 stub envelope.**
+- **`tools/call refactor old_name=compute_score
+  new_name=compute_relevance_score`** (both rust and python repos) →
+  `_meta.not_yet_implemented = true`. **Phase-1 stub envelope.**
+  Identical to prior.
+- **`tools/call search_code query=retry_with_backoff`** →
+  `_meta.source = "tree-sitter+ripgrep"`, `isError = false`, content =
+  `"50 matches"` count-only envelope; `_meta` carries
+  `count`, `text_match_count`, `symbol_match_count`, `results` (length
+  50), `root`, `query`, `tool` keys. Identical envelope shape to prior
+  probes (the absolute count varies with workspace state because the
+  daemon roots search at the working tree, not the `--repo` arg — this
+  matches the prior `f0fbf32` probe's count of 50 and is shape-identical
+  to the `03ca34e` probe's "9 matches" envelope).
+- **Fixture state** (this session, verified by independent grep + line
+  numbers):
+  - `tests/fixtures/rust-project/src/http_client.rs` — `pub fn
+    retry_with_backoff` at line 37; `pub fn fetch_startup_banner` at
+    line 62; in-file callers of `retry_with_backoff(` at lines
+    64, 84, 91, 110 (4 callers, matching prior); doc-comment example
+    at line 26.
+  - `tests/fixtures/python-project/` — **27 `\b`-bounded
+    `compute_score` occurrences across 3 .py files** (8 in
+    `scoring.py` including the definition at line 15, 9 `\b`-bounded in
+    `evaluator.py` including `_builtin_compute_score` wrapper at line
+    189, 10 in `tests/test_scoring.py`), identical to prior. The
+    `\b`-bounded count is 27; matches the augmented fixture.
+  - `git log -1 --oneline -- tests/fixtures/rust-project/
+    tests/fixtures/python-project/` →
+    `14bbace test(fixtures): add python-project scoring.compute_score (DEC-0017)`,
+    same commit as prior runs.
+
+All three substantive invariants hold at HEAD `2958986`. Inherited
+verdict (PASS, exit 0) is correct at this HEAD. No new escalations
+filed.
+
+Probe artefacts preserved (this session):
+- `/tmp/ucil-eval-probe-2026-05-08-r5/tools-list.json` — initialize + tools/list (22 tools)
+- `/tmp/ucil-eval-probe-2026-05-08-r5/toolcalls-rust.json` — 4× rust-fixture tools/call envelopes
+- `/tmp/ucil-eval-probe-2026-05-08-r5/toolcalls-python.json` — 3× python-fixture tools/call envelopes
+- `/tmp/ucil-eval-probe-2026-05-08-r5/repo/` — fresh rust-project fixture copy used for probe
+- `/tmp/ucil-eval-probe-2026-05-08-r5/python-repo/` — fresh python-project fixture copy used for probe
+
+### Probe evidence — 2026-05-08 (prior session @ HEAD `03ca34e`)
 
 This evaluator session independently re-ran the three-invariant probe at
 HEAD `03ca34e` on the `feat/WO-0068-cross-group-executor-and-fusion`
