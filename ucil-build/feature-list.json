@@ -1902,10 +1902,10 @@
         "P3-W9-F04"
       ],
       "passes": false,
-      "last_verified_ts": null,
-      "last_verified_by": null,
-      "last_verified_commit": null,
-      "attempts": 0,
+      "last_verified_ts": "2026-05-08T20:58:47Z",
+      "last_verified_by": "verifier-983d4d58-8546-4332-b7c0-536c73d5dbee",
+      "last_verified_commit": "d236016918f68fb01fbe9fdad2339313fc4e7f22",
+      "attempts": 1,
       "blocked_reason": null
     },
     {
