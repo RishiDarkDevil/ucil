@@ -605,3 +605,258 @@ pub fn build_repo_map<S: BuildHasher>(
         converged,
     })
 }
+
+// ── Module-root test (DEC-0007 frozen-selector placement) ─────────────────────
+//
+// `test_repo_map_pagerank` lives at module root — NOT inside
+// `mod tests { ... }` — so the substring selector
+// `cargo test -p ucil-core context_compiler::test_repo_map_pagerank`
+// resolves uniquely without `--exact`.  Per `DEC-0007` +
+// `WO-0070` lessons: the `tests::` infix added by the conventional
+// `mod tests` wrapper would break the selector resolution gate
+// (`! grep -cE 'test_repo_map_pagerank: test'` returning anything other
+// than 1 fails AC15).  The `#[cfg(test)]` attribute keeps the test
+// out of release builds.
+
+/// Build an [`Entity`] for the SA1/SA2/SA3 fixture.
+#[cfg(test)]
+fn make_test_entity(name: &str, qname: &str, file: &str) -> Entity {
+    Entity {
+        id: None,
+        kind: "function".to_owned(),
+        name: name.to_owned(),
+        qualified_name: Some(qname.to_owned()),
+        file_path: file.to_owned(),
+        start_line: Some(1),
+        end_line: Some(10),
+        signature: Some(format!("fn {name}()")),
+        doc_comment: None,
+        language: Some("rust".to_owned()),
+        t_valid_from: Some("2026-05-09T00:00:00+00:00".to_owned()),
+        t_valid_to: None,
+        importance: 0.5,
+        source_tool: Some("tree-sitter".to_owned()),
+        source_hash: None,
+    }
+}
+
+/// Build a `kind = "calls"` [`crate::knowledge_graph::Relation`] for
+/// the SA1/SA2/SA3 fixture.
+#[cfg(test)]
+fn make_test_call_relation(source_id: i64, target_id: i64) -> crate::knowledge_graph::Relation {
+    crate::knowledge_graph::Relation {
+        id: None,
+        source_id,
+        target_id,
+        kind: "calls".to_owned(),
+        weight: 1.0,
+        t_valid_from: Some("2026-05-09T00:00:00+00:00".to_owned()),
+        t_valid_to: None,
+        source_tool: Some("tree-sitter".to_owned()),
+        source_evidence: None,
+        confidence: 1.0,
+    }
+}
+
+/// Seed an isolated [`KnowledgeGraph`] with the 6-entity DAG used by
+/// SA1/SA2/SA3.  Returns the KG plus the [`tempfile::TempDir`] that
+/// owns the underlying `knowledge.db` (tempdir cleanup is `Drop`-bound;
+/// the caller must hold both for the lifetime of the test).
+#[cfg(test)]
+fn seed_repo_map_test_kg() -> (KnowledgeGraph, tempfile::TempDir) {
+    let tmp = tempfile::TempDir::new().expect("tempdir must be creatable");
+    let mut kg = KnowledgeGraph::open(&tmp.path().join("knowledge.db"))
+        .expect("KnowledgeGraph::open must succeed");
+
+    let id_root = kg
+        .upsert_entity(&make_test_entity("root", "a::root", "src/file_a.rs"))
+        .expect("a::root insert");
+    let id_child1 = kg
+        .upsert_entity(&make_test_entity("child1", "a::child1", "src/file_a.rs"))
+        .expect("a::child1 insert");
+    let id_child2 = kg
+        .upsert_entity(&make_test_entity("child2", "a::child2", "src/file_a.rs"))
+        .expect("a::child2 insert");
+    let id_handler = kg
+        .upsert_entity(&make_test_entity("handler", "b::handler", "src/file_b.rs"))
+        .expect("b::handler insert");
+    let id_helper = kg
+        .upsert_entity(&make_test_entity("helper", "b::helper", "src/file_b.rs"))
+        .expect("b::helper insert");
+    let id_leaf = kg
+        .upsert_entity(&make_test_entity("leaf", "c::leaf", "src/file_c.rs"))
+        .expect("c::leaf insert");
+
+    // Topology rationale (per RCA `verification-reports/root-cause-WO-0087.md`):
+    // the planner's original edge set in scope_in #8 made `c::leaf` (a chain
+    // sink) dominate the equilibrium, not `b::handler`.  This revised set —
+    // 6 entities + 6 `calls` relations + 3 files preserved — has been
+    // analytically and empirically verified to give:
+    //   * unbiased PageRank winner: `b::handler` (2 incoming: helper, leaf) → SA1
+    //   * 50× src/file_a.rs bias winner: `a::child1` (file_a entity)         → SA2
+    //   * token-budget=30 truncates the 6-symbol list to a strict prefix    → SA3
+    // The mutation contract (M1/M2/M3) surfaces SA2/SA3/SA1 panics respectively.
+    for rel in [
+        make_test_call_relation(id_root, id_child1), // file_a internal
+        make_test_call_relation(id_root, id_child2), // file_a internal
+        make_test_call_relation(id_helper, id_handler), // file_b internal (1st handler-incoming)
+        make_test_call_relation(id_leaf, id_handler), // file_c → file_b (2nd handler-incoming)
+        make_test_call_relation(id_helper, id_leaf), // file_b → file_c
+        make_test_call_relation(id_helper, id_child1), // file_b → file_a (gives child1 a feeder)
+    ] {
+        kg.upsert_relation(&rel).expect("relation insert");
+    }
+
+    (kg, tmp)
+}
+
+/// Seed an isolated KG with a 6-entity directed-acyclic call graph and
+/// assert structural-`PageRank` ranking, 50× recency-bias inversion,
+/// and token-budget fit per WO-0087 SA1/SA2/SA3 contract.
+///
+/// # Graph topology (revised per RCA `verification-reports/root-cause-WO-0087.md`)
+///
+/// ```text
+/// a::root    --calls-->  a::child1, a::child2  (file_a internal)
+/// b::helper  --calls-->  b::handler            (1st handler-incoming, file_b internal)
+/// b::helper  --calls-->  c::leaf               (file_b → file_c)
+/// b::helper  --calls-->  a::child1             (file_b → file_a; gives child1 a feeder)
+/// c::leaf    --calls-->  b::handler            (2nd handler-incoming, file_c → file_b)
+/// ```
+///
+/// Files:
+///   * `src/file_a.rs` → `a::root`, `a::child1`, `a::child2`
+///   * `src/file_b.rs` → `b::handler`, `b::helper`
+///   * `src/file_c.rs` → `c::leaf`
+///
+/// Why this topology (not the planner's original — see RCA hypothesis #1):
+/// the planner's original DAG (`root → child{1,2} → handler → helper → leaf`)
+/// concentrated equilibrium `PageRank` at the chain sink `c::leaf`, not at
+/// `b::handler`, breaking SA1.  This revised set keeps the spec-frozen
+/// invariants (6 entities + 6+ `calls` relations + 3 files), routes
+/// `b::handler` as the 2-incoming hub (helper, leaf), and uses
+/// `helper → child1` to give `a::child1` a non-bleeding feeder so the
+/// 50× `file_a` bias surfaces an `a::*` symbol on top.
+///
+/// Under unbiased `PageRank` (analytical equilibrium): `b::handler`
+/// 0.270 > `a::child1` 0.194 > `a::child2` 0.162 > `c::leaf` 0.146 >
+/// `a::root` 0.114 = `b::helper` 0.114 (tie-break: `a::root` < `b::helper`
+/// alphabetical).
+///
+/// Under 50× bias on `src/file_a.rs` (analytical equilibrium):
+/// `a::child1` 0.227 > `b::handler` 0.220 > `a::child2` 0.201 > … —
+/// top `file_path` is `src/file_a.rs`.
+///
+/// # SA tags (mutation-targeted)
+///
+/// * SA1 — structural-`PageRank` winner is `b::handler` (M3 target).
+/// * SA2 — recency-bias on `src/file_a.rs` flips top to a `file_a`
+///   entity (M1 target).
+/// * SA3 — token-budget = 30 truncates the 6-symbol list to a strict
+///   prefix (M2 target — three sub-assertions).
+#[cfg(test)]
+#[test]
+fn test_repo_map_pagerank() {
+    let (kg, _tmpdir_guard) = seed_repo_map_test_kg();
+
+    // ── SA1 — structural-PageRank winner is b::handler ──────────────
+    //
+    // Empty recency set → uniform personalization → unbiased PageRank.
+    // The 6-entity DAG centres mass on `b::handler` (2 incoming + 1
+    // outgoing, in the middle of the chain).  Token budget large
+    // enough to admit every symbol (no truncation).
+    let large_budget = RepoMapOptions {
+        token_budget: 100_000,
+        ..RepoMapOptions::default()
+    };
+    let empty_recent: HashSet<PathBuf> = HashSet::new();
+    let unbudgeted = build_repo_map(&kg, &empty_recent, &large_budget)
+        .expect("SA1 build_repo_map must succeed on the seeded KG");
+    assert!(
+        unbudgeted.converged,
+        "(SA1) PageRank must converge within max_iterations on the 6-entity fixture; iterations={}",
+        unbudgeted.iterations,
+    );
+    assert_eq!(
+        unbudgeted.symbols.len(),
+        6,
+        "(SA1) large-budget run must include all 6 symbols; got {}",
+        unbudgeted.symbols.len(),
+    );
+    let top_qn = unbudgeted.symbols[0]
+        .entity
+        .qualified_name
+        .as_deref()
+        .unwrap_or("<no qualified_name>");
+    assert_eq!(
+        top_qn, "b::handler",
+        "(SA1) structural pagerank winner expected b::handler; observed {top_qn:?}",
+    );
+
+    // ── SA2 — 50× recency bias on src/file_a.rs flips ranking ───────
+    //
+    // The personalization 50× multiplier on the three file_a entities
+    // pushes one of `a::root` / `a::child1` / `a::child2` above
+    // `b::handler`.  We assert the top-ranked symbol's file_path is
+    // `src/file_a.rs` regardless of which file_a symbol wins (the
+    // ordering among the three is implementation-stable but not
+    // contract-frozen).
+    let mut recent: HashSet<PathBuf> = HashSet::new();
+    recent.insert(PathBuf::from("src/file_a.rs"));
+    let biased = build_repo_map(&kg, &recent, &large_budget)
+        .expect("SA2 build_repo_map must succeed on the seeded KG");
+    let top_fp = &biased.symbols[0].entity.file_path;
+    let top_qn_biased = biased.symbols[0]
+        .entity
+        .qualified_name
+        .as_deref()
+        .unwrap_or("<no qualified_name>");
+    assert_eq!(
+        top_fp, "src/file_a.rs",
+        "(SA2) recency-bias top symbol expected file_a.rs; \
+         observed file_path={top_fp:?}, qualified_name={top_qn_biased:?}",
+    );
+
+    // ── SA3 — token-budget=30 truncates to a strict prefix ──────────
+    //
+    // The 6-entity ranking is the unbudgeted run above; the budgeted
+    // run with token_budget=30 must:
+    //   (a) total_tokens <= 30 (budget honored)
+    //   (b) symbols.len() < 6 (truncation occurred)
+    //   (c) returned symbols are a strict prefix of the unbudgeted
+    //       ranking (NOT a knapsack selection).
+    let small_budget = RepoMapOptions {
+        token_budget: 30,
+        ..RepoMapOptions::default()
+    };
+    let budgeted = build_repo_map(&kg, &empty_recent, &small_budget)
+        .expect("SA3 build_repo_map must succeed on the seeded KG");
+    let total = budgeted.total_tokens;
+    assert!(
+        total <= 30,
+        "(SA3a) token budget exceeded: total_tokens={total} > 30",
+    );
+    let n_budgeted = budgeted.symbols.len();
+    assert!(
+        n_budgeted < 6,
+        "(SA3b) budget did not truncate: returned all {n_budgeted} symbols",
+    );
+    for (i, budgeted_sym) in budgeted.symbols.iter().enumerate() {
+        let budgeted_qn = budgeted_sym
+            .entity
+            .qualified_name
+            .as_deref()
+            .unwrap_or("<no qualified_name>");
+        let unbudgeted_qn = unbudgeted.symbols[i]
+            .entity
+            .qualified_name
+            .as_deref()
+            .unwrap_or("<no qualified_name>");
+        assert_eq!(
+            budgeted_qn, unbudgeted_qn,
+            "(SA3c) budgeted prefix mismatch at index {i}: \
+             symbol[i].qualified_name={budgeted_qn:?} != \
+             unbudgeted[i].qualified_name={unbudgeted_qn:?}",
+        );
+    }
+}
