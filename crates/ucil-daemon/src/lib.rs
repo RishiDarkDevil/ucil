@@ -158,6 +158,7 @@ pub mod executor;
 pub mod g2_search;
 pub mod g3;
 pub mod g4;
+pub mod g7;
 pub mod lancedb_indexer;
 pub mod lifecycle;
 pub mod plugin_manager;
