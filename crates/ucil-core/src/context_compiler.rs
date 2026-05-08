@@ -89,6 +89,9 @@
 
 #![deny(rustdoc::broken_intra_doc_links)]
 
+use std::collections::HashMap;
+use std::hash::BuildHasher;
+
 use crate::knowledge_graph::{Entity, KnowledgeGraphError};
 
 // ── Errors ────────────────────────────────────────────────────────────────────
@@ -266,4 +269,167 @@ pub fn entity_token_estimate(entity: &Entity) -> usize {
         + doc_comment.chars().count() / 4
         + qualified_name.chars().count() / 4
         + 8
+}
+
+// ── PageRank kernel ───────────────────────────────────────────────────────────
+
+/// Run personalized `PageRank` over a sparse directed-edge adjacency.
+///
+/// Pure-deterministic kernel (no IO, no KG dependency, no async).
+/// Takes:
+///
+/// * `adjacency` — `node_id → Vec<outgoing_neighbor_ids>`.  Every node
+///   in the universe must appear as a key, even if its `Vec` is empty
+///   (dangling sink).  The personalization vector defines the universe;
+///   nodes referenced only as `target_id`s in some other node's
+///   outgoing list are folded in by the caller.
+/// * `personalization` — `node_id → mass`.  Should sum to `1.0`;
+///   renormalized internally if not (so the caller can pass un-
+///   normalized 50× weights and let the kernel handle the rescale).
+///   Every node must appear as a key, even if its mass is `0.0`.
+/// * `options` — provides `damping`, `max_iterations`, `tolerance`.
+///
+/// Returns `(score_map, iterations, converged)`.
+///
+/// # Update rule
+///
+/// ```text
+/// score_new[v] = (1 - d) * pers[v]
+///              + d * (Σ_{u ∈ in(v)} score_old[u] / out_degree(u))
+///              + d * dangling_mass / N
+/// ```
+///
+/// where `dangling_mass = Σ_{u with out_degree(u) == 0} score_old[u]`
+/// and `N` is the node count.  The dangling-redistribution term is the
+/// standard "teleport" treatment that keeps `Σ score = 1.0` invariant
+/// across iterations even when sinks exist (without it, score
+/// monotonically leaks to zero).
+///
+/// # Convergence
+///
+/// `Σ_v |score_new[v] - score_old[v]| < tolerance` — the L1 norm of
+/// the per-iteration delta.  When the norm drops below `tolerance`,
+/// the kernel returns `(score_new, iter+1, true)`.  When the
+/// `max_iterations` cap is reached, it returns
+/// `(last_score, max_iterations, false)`.
+///
+/// # Initial vector
+///
+/// Initialised to `1/N` for every node (the uniform distribution).
+/// Early iterations rapidly converge toward the personalized
+/// equilibrium under standard `damping = 0.85`.
+#[tracing::instrument(
+    level = "debug",
+    skip(adjacency, personalization),
+    fields(num_nodes = adjacency.len(), max_iter = options.max_iterations),
+    name = "ucil.core.context_compiler.page_rank",
+)]
+#[must_use]
+pub fn personalized_page_rank<A, P>(
+    adjacency: &HashMap<i64, Vec<i64>, A>,
+    personalization: &HashMap<i64, f64, P>,
+    options: &RepoMapOptions,
+) -> (HashMap<i64, f64>, usize, bool)
+where
+    A: BuildHasher,
+    P: BuildHasher,
+{
+    let n = adjacency.len();
+    if n == 0 {
+        return (HashMap::new(), 0, true);
+    }
+
+    // ── Renormalise personalization ────────────────────────────────
+    //
+    // The caller may pass an un-normalised vector (50× weights on the
+    // recent files, 1× elsewhere); rescale to sum to 1.0 here so the
+    // update rule is closed-form.  Empty / zero-sum personalization
+    // (every entry zero) falls back to the uniform 1/N distribution
+    // — the same equilibrium PageRank converges to under no bias.
+    #[allow(clippy::cast_precision_loss)]
+    let n_f64 = n as f64;
+    let pers_sum: f64 = personalization.values().sum();
+    let pers: HashMap<i64, f64> = if pers_sum <= 0.0 {
+        adjacency.keys().map(|&k| (k, 1.0 / n_f64)).collect()
+    } else {
+        adjacency
+            .keys()
+            .map(|&k| {
+                let raw = personalization.get(&k).copied().unwrap_or(0.0);
+                (k, raw / pers_sum)
+            })
+            .collect()
+    };
+
+    // ── Initial uniform score vector ───────────────────────────────
+    let mut score: HashMap<i64, f64> = adjacency.keys().map(|&k| (k, 1.0 / n_f64)).collect();
+
+    // ── Iteration loop ─────────────────────────────────────────────
+    //
+    // Standard damped PageRank update with explicit dangling-mass
+    // redistribution.  We compute incoming contribution per source
+    // first (one pass over the adjacency), then add the (1-d)*pers[v]
+    // base mass and the dangling-redistribution term per node.
+    let mut iterations = 0usize;
+    let mut converged = false;
+    for _ in 0..options.max_iterations {
+        iterations += 1;
+
+        // Compute the dangling-mass total: Σ score[u] for u with no
+        // outgoing edges.  These nodes' score must be teleported per
+        // iteration to keep Σ score = 1.0 invariant.
+        let dangling_mass: f64 = adjacency
+            .iter()
+            .filter_map(|(node, out)| {
+                if out.is_empty() {
+                    score.get(node).copied()
+                } else {
+                    None
+                }
+            })
+            .sum();
+
+        // Push contribution from each source to each of its targets.
+        // The `incoming[v]` accumulator builds Σ_{u in in(v)}
+        // score_old[u] / out_degree(u).
+        let mut incoming: HashMap<i64, f64> = adjacency.keys().map(|&k| (k, 0.0)).collect();
+        for (&u, out_neighbors) in adjacency {
+            if out_neighbors.is_empty() {
+                continue;
+            }
+            #[allow(clippy::cast_precision_loss)]
+            let out_deg = out_neighbors.len() as f64;
+            let contrib = score.get(&u).copied().unwrap_or(0.0) / out_deg;
+            for &v in out_neighbors {
+                if let Some(slot) = incoming.get_mut(&v) {
+                    *slot += contrib;
+                }
+            }
+        }
+
+        // Apply update rule + accumulate the L1-norm delta.
+        let mut new_score: HashMap<i64, f64> = HashMap::with_capacity(n);
+        let mut delta: f64 = 0.0;
+        for (&v, &incoming_sum) in &incoming {
+            let pers_v = pers.get(&v).copied().unwrap_or(0.0);
+            let dangling_share = options.damping * dangling_mass / n_f64;
+            // Equivalent to `(1.0 - options.damping) * pers_v + options.damping
+            // * incoming_sum + dangling_share`; mul_add fused for the
+            // first two terms per `clippy::suboptimal_flops`.
+            let new_v = (1.0 - options.damping).mul_add(pers_v, options.damping * incoming_sum)
+                + dangling_share;
+            let old_v = score.get(&v).copied().unwrap_or(0.0);
+            delta += (new_v - old_v).abs();
+            new_score.insert(v, new_v);
+        }
+
+        score = new_score;
+
+        if delta < options.tolerance {
+            converged = true;
+            break;
+        }
+    }
+
+    (score, iterations, converged)
 }
