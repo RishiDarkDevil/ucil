@@ -2089,10 +2089,10 @@
         "P3-W9-F04",
         "P3-W10-F01"
       ],
-      "passes": false,
-      "last_verified_ts": null,
-      "last_verified_by": null,
-      "last_verified_commit": null,
+      "passes": true,
+      "last_verified_ts": "2026-05-08T22:56:09Z",
+      "last_verified_by": "verifier-4b0b8412-3d68-45ab-b052-f716dfc58557",
+      "last_verified_commit": "f154ebb998c6cebac60b1538314703685f8985dc",
       "attempts": 0,
       "blocked_reason": null
     },
@@ -2133,10 +2133,10 @@
       "dependencies": [
         "P3-W10-F09"
       ],
-      "passes": false,
-      "last_verified_ts": null,
-      "last_verified_by": null,
-      "last_verified_commit": null,
+      "passes": true,
+      "last_verified_ts": "2026-05-08T22:56:12Z",
+      "last_verified_by": "verifier-4b0b8412-3d68-45ab-b052-f716dfc58557",
+      "last_verified_commit": "f154ebb998c6cebac60b1538314703685f8985dc",
       "attempts": 0,
       "blocked_reason": null
     },
