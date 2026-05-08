@@ -333,6 +333,14 @@ async fn run_g3_source(
 /// `cross_group::join_all_cross_group` — `tokio` ships everything we
 /// need for a 3-to-N-way fan-out without introducing an additional
 /// poll-set abstraction.
+///
+/// `#[allow(dead_code)]` covers the verifier's M1 mutation contract:
+/// the M1 mutation swaps [`execute_g3`]'s parallel join site for a
+/// sequential `for ... .await` loop, leaving this helper unreferenced.
+/// Without the allow, `#![deny(warnings)]` would convert the dead-code
+/// lint into a compile error and the verifier would observe a
+/// compile failure instead of the SA1 panic the contract expects.
+#[allow(dead_code)]
 async fn join_all_g3<'a, T>(
     mut futures: Vec<Pin<Box<dyn Future<Output = T> + Send + 'a>>>,
 ) -> Vec<T>

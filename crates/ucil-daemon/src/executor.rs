@@ -3319,9 +3319,14 @@ pub async fn test_g3_parallel_merge() {
          least one 200 ms sleep elapsed)",
         outcome_sa1.wall_elapsed_ms
     );
+    // Upper bound 500 ms (NOT the spec'd 700 ms): the WO scope_in #9
+    // wrote "in [180, 700)" but 700 lets a sequential 3×200=600 ms
+    // execution slip through, defeating the M1 mutation contract.
+    // Tightened to 500 ms — covers a noisy parallel run (~250-300 ms)
+    // while reliably catching sequential execution (≥600 ms).
     assert!(
-        outcome_sa1.wall_elapsed_ms < 700,
-        "(SA1) parallel wall < 700 ms; left: {}, right: 700 (proves \
+        outcome_sa1.wall_elapsed_ms < 500,
+        "(SA1) parallel wall < 500 ms; left: {}, right: 500 (proves \
          serial 3x200=600 ms did NOT happen → parallelism confirmed)",
         outcome_sa1.wall_elapsed_ms
     );
