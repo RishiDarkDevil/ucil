@@ -48,9 +48,18 @@
 //!
 //! # Re-ingest semantics
 //!
-//! [`persist_diagnostics`] does **not** upsert.  Calling it twice
-//! with identical diagnostics produces two rows.  Dedup / first-seen
-//! semantics are `P1-W5-F08` territory and are out of scope here.
+//! [`persist_diagnostics`] is a SELECT-then-UPSERT (`P3-W11-F06`,
+//! `WO-0085`): each call SELECTs the existing row (if any) by
+//! `(file_path, line_start, category, severity, message)` and either
+//! UPDATEs `last_seen` + `resolved = 0` (preserving `first_seen`) or
+//! INSERTs a fresh row.  After the per-row pass, any
+//! `(file_path, …)`-matching rows whose `id` was NOT touched
+//! transition to `resolved = 1` so the row count of unresolved
+//! issues per file is the live truth from the latest LSP scan.
+//!
+//! Soft-delete of rows past their retention window is a separate
+//! step — see [`soft_delete_resolved_quality_issues`] — which the
+//! daemon's session-shutdown / periodic-cleanup orchestration calls.
 //!
 //! # Timeout discipline
 //!
@@ -80,6 +89,8 @@
 // without per-item `#[allow]` spam, mirroring the decision in
 // `diagnostics.rs`.
 #![allow(clippy::module_name_repetitions)]
+
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use lsp_types::{Diagnostic as LspDiagnostic, DiagnosticSeverity, NumberOrString, Url};
 use thiserror::Error;
@@ -299,9 +310,16 @@ fn uri_to_file_path(uri: &Url) -> Result<String, QualityPipelineError> {
 ///
 /// # Re-ingest behaviour
 ///
-/// This function does not upsert.  Two calls with the same `file_uri`
-/// and the same diagnostic payload produce two rows.  Dedup / first-seen
-/// semantics are `P1-W5-F08` territory.
+/// SELECT-then-UPSERT (`P3-W11-F06`, `WO-0085`): the per-row dedup key
+/// is `(file_path, line_start, category, severity, message)` per
+/// master-plan §12.1 row-uniqueness; on hit, the existing row's
+/// `last_seen` is updated to `datetime('now')` and `resolved` is reset
+/// to 0 (preserving the original `first_seen`).  On miss, a fresh row
+/// is inserted with both `first_seen` and `last_seen` defaulted to
+/// `datetime('now')`.  After the per-row pass, any unresolved row in
+/// the same `file_path` that was NOT touched transitions to
+/// `resolved = 1` so the `quality_issues` rows for that file mirror
+/// the live LSP scan.
 ///
 /// # Tracing
 ///
@@ -340,48 +358,239 @@ pub async fn persist_diagnostics(
 
     let diagnostics = client.diagnostics(file_uri.clone()).await?;
 
-    if diagnostics.is_empty() {
-        tracing::debug!("no diagnostics returned; skipping transaction");
-        return Ok(0);
-    }
-
     let rows: Vec<QualityIssueRow<'_>> = diagnostics
         .iter()
         .map(|diag| QualityIssueRow::from_lsp(file_path.clone(), language, diag))
         .collect();
 
     let inserted = kg.execute_in_transaction(|tx| {
-        let mut stmt = tx.prepare(
+        // Step (a): SELECT existing row id by the §12.1 dedup key.
+        let mut select_stmt = tx.prepare(
+            "SELECT id FROM quality_issues \
+             WHERE file_path = ?1 \
+             AND COALESCE(line_start, -1) = COALESCE(?2, -1) \
+             AND category = ?3 AND severity = ?4 AND message = ?5 \
+             LIMIT 1;",
+        )?;
+
+        // Step (c): UPDATE on hit — preserve `first_seen`, advance
+        // `last_seen`, reset `resolved` to 0.  M3 mutation contract
+        // targets this statement: changing `SET last_seen = ...,
+        // resolved = 0` to also `SET first_seen = datetime('now')`
+        // would overwrite first_seen on every re-observation.
+        let mut update_stmt = tx.prepare(
+            "UPDATE quality_issues \
+             SET last_seen = datetime('now'), resolved = 0 \
+             WHERE id = ?1;",
+        )?;
+
+        // Step (d): INSERT on miss — `first_seen` defaults via the
+        // schema; we explicitly set `last_seen = datetime('now')` so
+        // SA `last_seen IS NOT NULL` holds on first observation.
+        let mut insert_stmt = tx.prepare(
             "INSERT INTO quality_issues \
-             (file_path, line_start, line_end, category, severity, message, rule_id, source_tool) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8);",
+             (file_path, line_start, line_end, category, severity, message, \
+              rule_id, source_tool, last_seen) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, datetime('now'));",
         )?;
 
         let mut count: usize = 0;
+        let mut touched_ids: Vec<i64> = Vec::with_capacity(rows.len());
         for row in &rows {
             tracing::debug!(
                 file_path = %row.file_path,
                 line_start = row.line_start,
                 severity = row.severity,
                 category = row.category,
-                "inserting quality_issues row",
+                "upserting quality_issues row",
             );
-            stmt.execute(rusqlite::params![
-                row.file_path,
-                row.line_start,
-                row.line_end,
-                row.category,
-                row.severity,
-                row.message,
-                row.rule_id,
-                row.source_tool,
-            ])?;
+            let line_start_param: Option<i64> = Some(row.line_start);
+            let existing: Option<i64> = select_stmt
+                .query_row(
+                    rusqlite::params![
+                        row.file_path,
+                        line_start_param,
+                        row.category,
+                        row.severity,
+                        row.message,
+                    ],
+                    |r| r.get::<_, i64>(0),
+                )
+                .ok();
+
+            if let Some(id) = existing {
+                update_stmt.execute(rusqlite::params![id])?;
+                touched_ids.push(id);
+            } else {
+                insert_stmt.execute(rusqlite::params![
+                    row.file_path,
+                    row.line_start,
+                    row.line_end,
+                    row.category,
+                    row.severity,
+                    row.message,
+                    row.rule_id,
+                    row.source_tool,
+                ])?;
+                touched_ids.push(tx.last_insert_rowid());
+            }
             count += 1;
         }
+
+        // Step (e) — resolve-transition: any unresolved row in the
+        // same `file_path` that was NOT touched in the per-row pass
+        // is no longer present in the latest LSP scan; flip
+        // `resolved = 1` for those rows.  When `diagnostics` was
+        // empty, `touched_ids` is empty too, and every unresolved row
+        // for `file_path` resolves correctly.
+        //
+        // The `id NOT IN (?, ?, …)` placeholder list is built by
+        // `format!`-rendering one `?` per touched id — the values are
+        // bound through `params_from_iter` to keep the SQL injection
+        // attack surface zero.  When `touched_ids.is_empty()`, we
+        // build `id NOT IN ()`, which SQLite rejects, so the
+        // statement is rewritten as `1 = 1` (i.e. "match every row")
+        // for the empty-touched case.
+        if touched_ids.is_empty() {
+            tx.execute(
+                "UPDATE quality_issues SET resolved = 1 \
+                 WHERE file_path = ?1 AND resolved = 0;",
+                rusqlite::params![file_path],
+            )?;
+        } else {
+            let placeholders = (0..touched_ids.len())
+                .map(|i| format!("?{}", i + 2))
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!(
+                "UPDATE quality_issues SET resolved = 1 \
+                 WHERE file_path = ?1 AND resolved = 0 \
+                 AND id NOT IN ({placeholders});",
+            );
+            let mut params: Vec<rusqlite::types::Value> = Vec::with_capacity(touched_ids.len() + 1);
+            params.push(rusqlite::types::Value::Text(file_path.clone()));
+            for id in &touched_ids {
+                params.push(rusqlite::types::Value::Integer(*id));
+            }
+            tx.execute(&sql, rusqlite::params_from_iter(params.iter()))?;
+        }
+
         Ok(count)
     })?;
 
     Ok(inserted)
+}
+
+// ── soft_delete_resolved_quality_issues ──────────────────────────────────────
+
+/// Hand-rolled UTC formatter for a `SystemTime` rendered as
+/// `YYYY-MM-DD HH:MM:SS` — the format `SQLite`'s `datetime('now')`
+/// produces, so column comparisons stay byte-for-byte equal under
+/// the lexicographic `TEXT` ordering.
+///
+/// Avoids pulling in `chrono` / `time` as a new direct dep on
+/// `ucil-lsp-diagnostics` per `WO-0085` `scope_out` #6.  The
+/// algorithm is the canonical civil-from-days proleptic-Gregorian
+/// decomposition (no leap-second handling — UCIL never observes
+/// `last_seen` outside the `SQLite` `datetime('now')` writer's
+/// resolution).
+fn format_utc_timestamp(t: SystemTime) -> String {
+    // Treat negative offsets (pre-epoch) as `0` — that floor pins
+    // any pathological caller-supplied `SystemTime` to the SQLite
+    // `1970-01-01 00:00:00` epoch, well below any real `last_seen`
+    // value, so the soft-delete cutoff stays sound.
+    let secs = t.duration_since(UNIX_EPOCH).map_or(0_u64, |d| d.as_secs());
+
+    let days = secs / 86_400;
+    let time_of_day = secs % 86_400;
+    let hour = time_of_day / 3_600;
+    let minute = (time_of_day % 3_600) / 60;
+    let second = time_of_day % 60;
+
+    // Civil-from-days (Howard Hinnant's algorithm, MIT-licensed),
+    // shifted so day 0 = 1970-01-01 (Unix epoch).  Yields a calendar
+    // date for every non-negative `days` value.  We work entirely in
+    // u64 because `secs` is non-negative and the algorithm only
+    // overflows past year ~292 billion CE.
+    let z_days: u64 = days + 719_468;
+    let era: u64 = z_days / 146_097;
+    let day_of_era: u64 = z_days - era * 146_097; // 0..=146096
+    let yoe: u64 =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let year_civil: u64 = yoe + era * 400;
+    let day_of_year: u64 = day_of_era - (365 * yoe + yoe / 4 - yoe / 100);
+    let month_phase: u64 = (5 * day_of_year + 2) / 153;
+    let day_of_month: u64 = day_of_year - (153 * month_phase + 2) / 5 + 1;
+    let month_civil: u64 = if month_phase < 10 {
+        month_phase + 3
+    } else {
+        month_phase - 9
+    };
+    let year_civil: u64 = year_civil + u64::from(month_civil <= 2);
+
+    format!("{year_civil:04}-{month_civil:02}-{day_of_month:02} {hour:02}:{minute:02}:{second:02}")
+}
+
+/// Soft-delete `quality_issues` rows whose `resolved = 1` AND
+/// `last_seen` is older than `now - retention_days` days.
+///
+/// Master-plan §12.1 + WO-0085 F06 prescribes the trend-tracking
+/// retention contract: rows that have transitioned to `resolved = 1`
+/// (via [`persist_diagnostics`]'s resolve-transition) stay in the
+/// table for `retention_days` so historical queries can surface them;
+/// once the retention window passes, this helper deletes them in a
+/// single transaction.  Returns the number of rows deleted.
+///
+/// `now` and `retention_days` are caller-supplied so tests can drive
+/// the cutoff deterministically without leaking the system clock into
+/// the helper.
+///
+/// # Tracing
+///
+/// Opens a single span named
+/// `ucil.lsp.soft_delete_resolved_quality_issues` per master-plan
+/// §15.2 (`ucil.<layer>.<op>`).
+///
+/// # Errors
+///
+/// * [`QualityPipelineError::KnowledgeGraph`] — the `BEGIN IMMEDIATE`
+///   transaction could not be opened, the DELETE statement failed, or
+///   the commit was rejected.
+#[tracing::instrument(
+    name = "ucil.lsp.soft_delete_resolved_quality_issues",
+    level = "debug",
+    skip(kg),
+    fields(retention_days)
+)]
+pub async fn soft_delete_resolved_quality_issues(
+    kg: &mut KnowledgeGraph,
+    now: SystemTime,
+    retention_days: u32,
+) -> Result<usize, QualityPipelineError> {
+    let cutoff = now
+        .checked_sub(std::time::Duration::from_secs(
+            u64::from(retention_days) * 86_400,
+        ))
+        .unwrap_or(UNIX_EPOCH);
+    let cutoff_str = format_utc_timestamp(cutoff);
+
+    let deleted = kg.execute_in_transaction(|tx| {
+        let mut stmt = tx.prepare(
+            "DELETE FROM quality_issues \
+             WHERE resolved = 1 AND last_seen IS NOT NULL AND last_seen < ?1;",
+        )?;
+        let n = stmt.execute(rusqlite::params![cutoff_str])?;
+        Ok(n)
+    })?;
+
+    tracing::debug!(
+        deleted,
+        cutoff = %cutoff_str,
+        retention_days,
+        "soft-deleted resolved quality_issues rows past retention",
+    );
+
+    Ok(deleted)
 }
 
 // ── Test-side helpers ────────────────────────────────────────────────────────
@@ -836,5 +1045,274 @@ async fn test_source_tool_falls_back_to_language_default() {
         fetch_source_tool_by_path(&kg, &uri_to_path_string(&uri_rs)),
         "lsp:rust-analyzer",
         "source=None on a Rust URI must fall back to `lsp:rust-analyzer`",
+    );
+}
+
+// ── Module-root acceptance test (P3-W11-F06 oracle) ──────────────────────────
+//
+// Per `DEC-0007` (frozen-selector module-root placement), the
+// acceptance test `test_quality_issues_tracking` lives at MODULE ROOT
+// (NOT inside `mod tests {}`) so the
+// `feature-list.json` selector
+// `-p ucil-lsp-diagnostics quality_pipeline::test_quality_issues_tracking`
+// resolves cleanly without a `tests::` intermediate.
+
+/// Frozen acceptance selector for feature `P3-W11-F06` — see
+/// `ucil-build/feature-list.json` entry for
+/// `-p ucil-lsp-diagnostics quality_pipeline::test_quality_issues_tracking`.
+///
+/// Drives [`persist_diagnostics`] + [`soft_delete_resolved_quality_issues`]
+/// over a `ScriptedFakeSerenaClient` and asserts six SA-numbered
+/// properties:
+///
+/// * **SA1 — First observation INSERTs**: 1 diagnostic →
+///   `inserted == 1`, the row has `first_seen != NULL`,
+///   `last_seen != NULL`, `resolved == 0`.
+/// * **SA2 — Re-observation UPDATEs (preserves `first_seen`)**:
+///   re-running with the SAME diagnostic → `inserted == 1`,
+///   `first_seen` UNCHANGED, `resolved == 0`, `COUNT(*) == 1` (no
+///   duplicate row).  This is the M3 mutation target.
+/// * **SA3 — `last_seen` advances on re-observation**:
+///   `last_seen >= first_seen`.
+/// * **SA4 — Empty diagnostics resolve outstanding rows**: running
+///   `persist_diagnostics` with an empty diagnostic vector for the
+///   same file → row transitions to `resolved == 1`.
+/// * **SA5 — Soft-delete past retention**: `now + 8 days` with
+///   `retention_days = 7` → returns `1` (the resolved row is
+///   deleted), `COUNT(*) == 0`.
+/// * **SA6 — Soft-delete preserves rows within retention**:
+///   re-running soft-delete with `now + 5 days` and the same
+///   `retention_days = 7` (after re-INSERTing the row first) →
+///   returns `0` (resolved row within retention is preserved).
+#[cfg(test)]
+#[allow(clippy::too_many_lines, clippy::missing_panics_doc)]
+#[tokio::test]
+pub async fn test_quality_issues_tracking() {
+    use std::time::{Duration as StdDuration, SystemTime};
+
+    use self::fake_serena_client::ScriptedFakeSerenaClient;
+    use self::test_fixtures::{client_from, make_diag, open_fresh_kg, uri_to_path_string};
+
+    let uri = Url::parse("file:///fixture/track.rs").expect("file URI must parse");
+    let path = uri_to_path_string(&uri);
+    let diag = make_diag(
+        4,
+        4,
+        Some(DiagnosticSeverity::ERROR),
+        Some(NumberOrString::String("E0308".to_owned())),
+        Some("rust-analyzer"),
+        "mismatched types",
+    );
+
+    let (_tmp, mut kg) = open_fresh_kg();
+
+    // Step (c) — first observation INSERTs.
+    let client_a = client_from(ScriptedFakeSerenaClient::new(vec![(
+        uri.clone(),
+        vec![diag.clone()],
+    )]));
+    let inserted_a = persist_diagnostics(&client_a, &mut kg, uri.clone(), Language::Rust)
+        .await
+        .expect("first persist_diagnostics must succeed");
+    assert_eq!(
+        inserted_a, 1,
+        "(SA1a) inserted == 1 on first observation; left: {inserted_a}, right: 1"
+    );
+
+    let row_a: (i64, Option<String>, Option<String>, i64) = kg
+        .conn()
+        .query_row(
+            "SELECT id, first_seen, last_seen, resolved FROM quality_issues \
+             WHERE file_path = ?1 LIMIT 1;",
+            rusqlite::params![path],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            },
+        )
+        .expect("SELECT after first INSERT must succeed");
+    let first_seen_a = row_a.1.expect("(SA1b) first_seen must NOT be NULL");
+    let last_seen_a = row_a.2.expect("(SA1c) last_seen must NOT be NULL");
+    assert!(
+        !first_seen_a.is_empty(),
+        "(SA1b) first_seen must be non-empty; left: {first_seen_a:?}"
+    );
+    assert!(
+        !last_seen_a.is_empty(),
+        "(SA1c) last_seen must be non-empty; left: {last_seen_a:?}"
+    );
+    assert_eq!(
+        row_a.3, 0,
+        "(SA1d) resolved == 0 on first observation; left: {}, right: 0",
+        row_a.3
+    );
+    let id_a = row_a.0;
+
+    // Sleep just over 1 s so SQLite's `datetime('now')` (1-second
+    // resolution) advances on the next call.  This is the
+    // load-bearing wait that keeps SA3 (`last_seen >= first_seen` AND
+    // observably advances) honest under the M3 mutation contract.
+    tokio::time::sleep(StdDuration::from_millis(1_100)).await;
+
+    // Step (d) — re-observation UPDATEs (preserves first_seen).
+    let client_b = client_from(ScriptedFakeSerenaClient::new(vec![(
+        uri.clone(),
+        vec![diag.clone()],
+    )]));
+    let inserted_b = persist_diagnostics(&client_b, &mut kg, uri.clone(), Language::Rust)
+        .await
+        .expect("second persist_diagnostics must succeed");
+    assert_eq!(
+        inserted_b, 1,
+        "(SA2a) inserted == 1 on UPSERT (UPDATE counts as 1); \
+         left: {inserted_b}, right: 1"
+    );
+
+    let row_b: (i64, Option<String>, Option<String>, i64) = kg
+        .conn()
+        .query_row(
+            "SELECT id, first_seen, last_seen, resolved FROM quality_issues \
+             WHERE file_path = ?1 LIMIT 1;",
+            rusqlite::params![path],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            },
+        )
+        .expect("SELECT after re-observation UPDATE must succeed");
+    assert_eq!(
+        row_b.0, id_a,
+        "(SA2b) UPSERT keeps the same row id; left: {}, right: {}",
+        row_b.0, id_a
+    );
+    let first_seen_b = row_b.1.expect("(SA2c) first_seen must NOT be NULL");
+    assert_eq!(
+        first_seen_b, first_seen_a,
+        "(SA2c) first_seen UNCHANGED across re-observation; \
+         left: {first_seen_b:?}, right: {first_seen_a:?}"
+    );
+    let last_seen_b = row_b.2.expect("(SA3) last_seen must NOT be NULL");
+    assert!(
+        last_seen_b.as_str() >= first_seen_b.as_str(),
+        "(SA3) last_seen >= first_seen on re-observation; \
+         left: {last_seen_b:?}, right: {first_seen_b:?}"
+    );
+    assert_eq!(
+        row_b.3, 0,
+        "(SA2d) resolved == 0 after re-observation; left: {}, right: 0",
+        row_b.3
+    );
+
+    let count_b: i64 = kg
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM quality_issues WHERE file_path = ?1;",
+            rusqlite::params![path],
+            |row| row.get::<_, i64>(0),
+        )
+        .expect("COUNT after re-observation must succeed");
+    assert_eq!(
+        count_b, 1,
+        "(SA2e) COUNT(*) == 1 — UPSERT did not insert duplicate; \
+         left: {count_b}, right: 1"
+    );
+
+    // Step (e) — empty diagnostics resolve outstanding rows.
+    let client_c = client_from(ScriptedFakeSerenaClient::new(vec![(
+        uri.clone(),
+        Vec::new(),
+    )]));
+    let inserted_c = persist_diagnostics(&client_c, &mut kg, uri.clone(), Language::Rust)
+        .await
+        .expect("empty-diagnostics persist_diagnostics must succeed");
+    assert_eq!(
+        inserted_c, 0,
+        "(SA4a) empty diagnostics → inserted == 0; \
+         left: {inserted_c}, right: 0"
+    );
+    let resolved_c: i64 = kg
+        .conn()
+        .query_row(
+            "SELECT resolved FROM quality_issues WHERE id = ?1;",
+            rusqlite::params![id_a],
+            |row| row.get::<_, i64>(0),
+        )
+        .expect("SELECT resolved after empty-scan must succeed");
+    assert_eq!(
+        resolved_c, 1,
+        "(SA4b) row transitions to resolved=1 when omitted from a fresh scan; \
+         left: {resolved_c}, right: 1"
+    );
+
+    // Step (f) — soft-delete past retention.  We can't easily set
+    // SQLite's `last_seen` to a controllable past timestamp without
+    // raw `UPDATE`s, so fast-forward `now` 8 days INTO THE FUTURE
+    // relative to the row's `last_seen` and run with
+    // `retention_days = 7`.
+    let now_real = SystemTime::now();
+    let now_8d = now_real + StdDuration::from_secs(8 * 86_400);
+    let deleted_d = soft_delete_resolved_quality_issues(&mut kg, now_8d, 7)
+        .await
+        .expect("soft_delete_resolved_quality_issues must succeed");
+    assert_eq!(
+        deleted_d, 1,
+        "(SA5a) one resolved row past retention is deleted; \
+         left: {deleted_d}, right: 1"
+    );
+    let count_d: i64 = kg
+        .conn()
+        .query_row("SELECT COUNT(*) FROM quality_issues;", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .expect("COUNT after soft-delete must succeed");
+    assert_eq!(
+        count_d, 0,
+        "(SA5b) COUNT(*) == 0 after soft-delete; left: {count_d}, right: 0"
+    );
+
+    // Step (g) — sentinel: re-INSERT, then soft-delete with `now + 5
+    // days` (within retention) returns 0.
+    let client_e = client_from(ScriptedFakeSerenaClient::new(vec![(
+        uri.clone(),
+        vec![diag],
+    )]));
+    persist_diagnostics(&client_e, &mut kg, uri.clone(), Language::Rust)
+        .await
+        .expect("re-insert must succeed");
+    // Resolve the freshly-inserted row by running an empty scan.
+    let client_f = client_from(ScriptedFakeSerenaClient::new(vec![(
+        uri.clone(),
+        Vec::new(),
+    )]));
+    persist_diagnostics(&client_f, &mut kg, uri.clone(), Language::Rust)
+        .await
+        .expect("resolve-transition must succeed");
+
+    let now_5d = now_real + StdDuration::from_secs(5 * 86_400);
+    let deleted_f = soft_delete_resolved_quality_issues(&mut kg, now_5d, 7)
+        .await
+        .expect("soft_delete within retention must succeed");
+    assert_eq!(
+        deleted_f, 0,
+        "(SA6) resolved row within retention is preserved; \
+         left: {deleted_f}, right: 0"
+    );
+    let count_f: i64 = kg
+        .conn()
+        .query_row("SELECT COUNT(*) FROM quality_issues;", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .expect("COUNT after within-retention soft-delete must succeed");
+    assert_eq!(
+        count_f, 1,
+        "(SA6) row preserved within retention; left: {count_f}, right: 1"
     );
 }
