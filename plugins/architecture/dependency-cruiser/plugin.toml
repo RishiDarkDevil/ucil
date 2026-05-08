@@ -1,0 +1,53 @@
+# dependency-cruiser plugin manifest (master-plan §14.1 category = "architecture").
+#
+# Pinned 2026-05-09: dependency-cruiser 17.4.0
+#   source           : https://github.com/sverweij/dependency-cruiser
+#   npm package      : https://www.npmjs.com/package/dependency-cruiser
+#   binary launch    : `depcruise` from system PATH (npm-installed; NO MCP server).
+#   capability       : `architecture.dependency` — JS/TS module-dependency
+#                      validation (rule-based circular-dep + module-rule
+#                      violations). Master-plan §4.4 line 328 lists this as
+#                      P0 priority for the JavaScript/TypeScript ecosystem.
+#
+# DEC-0009 (search-code-in-process-ripgrep, generalised): dependency-cruiser
+# is a CLI invocation, NOT an MCP server. The daemon does NOT spawn this
+# transport — when an `architecture.dependency` query lands on dep-cruiser
+# the runtime path is to `tokio::process::Command::new("depcruise")` directly
+# (see scripts/verify/P3-W10-F14.sh for the smoke harness; future WO will
+# wire `DependencyCruiserG4Source` against the G4 executor). This manifest
+# exists as DECLARATIVE METADATA so the planning layer can enumerate
+# dep-cruiser alongside codegraphcontext under the `architecture` category.
+#
+# Why a sentinel `[transport]` table is still required:
+# `PluginManifest` (crates/ucil-daemon/src/plugin_manager.rs:113) requires
+# every manifest to declare a `[transport]` section with `type` and
+# `command`. The fields below (`type = "stdio"`, `command = "depcruise"`,
+# `args = ["--version"]`) parse cleanly through `PluginManifest::from_path`
+# but are NEVER spawned as an MCP server: dep-cruiser does not speak
+# JSON-RPC. If a future code path accidentally tried to drive this transport
+# as an MCP server, `depcruise --version` would exit immediately without
+# speaking JSON-RPC and the health-check would (correctly) fail loudly.
+#
+# `commit-style.md` forbids moving refs — the version above is the concrete
+# `npm registry latest` semver tag captured 2026-05-09 from
+# `curl -sL https://registry.npmjs.org/dependency-cruiser | jq -r '."dist-tags".latest'`,
+# NOT a `latest` / `next` / `main` floater. Bump in a new ADR when the
+# upstream cuts a v18.x or major surface change.
+
+[plugin]
+name = "dependency-cruiser"
+version = "17.4.0"
+description = "JS/TS dependency validation; rule-based circular-dep + module-rule violations; CLI tool, in-process per DEC-0009."
+
+[capabilities]
+provides = ["architecture.dependency"]
+languages = ["javascript", "typescript"]
+
+[transport]
+type = "stdio"
+command = "depcruise"
+args = ["--version"]
+
+[lifecycle]
+hot_cold = false
+idle_timeout_minutes = 0
