@@ -101,3 +101,5 @@ Inspect with: `git -C <wt> stash list` — pop or drop per executor's judgement.
 - ../ucil-wt/WO-0080/ :: auto-stash-on-resume-20260508T145350Z
 
 Inspect with: `git -C <wt> stash list` — pop or drop per executor's judgement.
+
+2026-05-08T17:11Z merge-wo-skip-verifier-on-main-branch HALT — verifier-on-main harness defect lets passes=true land on main without source code merge (fake-green pattern explicitly forbidden by master plan). Hit by WO-0079/0080 today; recovery via cherry-pick at 19906a0. Suggested fixes touch `scripts/flip-feature.sh` (Bucket-B deny-list) AND `.claude/agents/verifier.md` (Bucket-B deny-list); third fix in `scripts/run-phase.sh` is in-scope for B but applying it alone would leave the silent-bypass mechanism in `flip-feature.sh` intact. Spans 3 harness files across 2 deny-list components — exactly Bucket E by rule. User action: decide which fix combo to apply (Fix 1 alone is 6 LOC and the fail-loud guard is the highest-value piece) and either patch directly or emit a planner-authored micro-WO that bundles all three under an ADR.
