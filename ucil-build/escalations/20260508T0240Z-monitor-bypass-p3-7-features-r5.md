@@ -3,7 +3,7 @@ ts: 2026-05-08T07:40:00Z
 phase: 3
 session: monitor
 trigger: stop-hook-blocks-on-mid-phase-gate-red
-resolved: false
+resolved: true
 blocks_loop: false
 severity: low
 auto_classify: bucket-A-admin
