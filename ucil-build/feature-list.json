@@ -2312,10 +2312,10 @@
         "P1-W5-F05",
         "P3-W9-F03"
       ],
-      "passes": false,
-      "last_verified_ts": null,
-      "last_verified_by": null,
-      "last_verified_commit": null,
+      "passes": true,
+      "last_verified_ts": "2026-05-08T19:13:21Z",
+      "last_verified_by": "verifier-0abb3a25-d9e2-4137-8a26-55314510ab1c",
+      "last_verified_commit": "80cbed347fbf471aa699c786327e908cfb603207",
       "attempts": 0,
       "blocked_reason": null
     },
@@ -2404,10 +2404,10 @@
         "P3-W11-F01",
         "P3-W9-F04"
       ],
-      "passes": false,
-      "last_verified_ts": null,
-      "last_verified_by": null,
-      "last_verified_commit": null,
+      "passes": true,
+      "last_verified_ts": "2026-05-08T19:13:25Z",
+      "last_verified_by": "verifier-0abb3a25-d9e2-4137-8a26-55314510ab1c",
+      "last_verified_commit": "80cbed347fbf471aa699c786327e908cfb603207",
       "attempts": 0,
       "blocked_reason": null
     },
@@ -2426,10 +2426,10 @@
       "dependencies": [
         "P1-W4-F01"
       ],
-      "passes": false,
-      "last_verified_ts": null,
-      "last_verified_by": null,
-      "last_verified_commit": null,
+      "passes": true,
+      "last_verified_ts": "2026-05-08T19:13:25Z",
+      "last_verified_by": "verifier-0abb3a25-d9e2-4137-8a26-55314510ab1c",
+      "last_verified_commit": "80cbed347fbf471aa699c786327e908cfb603207",
       "attempts": 0,
       "blocked_reason": null
     },
