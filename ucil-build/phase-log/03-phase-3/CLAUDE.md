@@ -614,3 +614,28 @@
 - **Net-new follow-up work surfaced by WO-0077** (NOT debt; deferred-by-design):
   - **G8 production-wiring WO (`McpPytestRunnerG8Source` trait + impl + `execute_g8` orchestrator + `merge_g8_testing_context` aggregation, consuming the mcp-pytest-runner manifest over `tokio::process::Command` + MCP wire format).** Deferred per scope_out #2 / #3 / #11, parallel to G1/G3/G4/G5/G6/G7 production-wiring deferrals. F09 is the dep-blocked feature ID for the follow-up — currently dep-blocked on F08 + P3-W9-F03 alone (per DEC-0021 §Decision point 5: F07's deferral is admin-satisfied, so F09's dep graph reduces).
 - WO-0077 introduces ZERO new high-priority debt items (W1 is a soft formatting warning consistent with prior precedent) and inherits all 8 follow-ups above without advancing them. **The Phase 3 paired-manifest WO sweep is now complete** modulo the three ADR-deferred features (P3-W9-F10 graphiti, P3-W11-F03 ruff, P3-W11-F07 test-runner-mcp).
+
+---
+
+## Lessons Learned (post-DEC-0022/0023/0024 supersedure 2026-05-08)
+
+**Authored by**: monitor session with explicit user authorization, 2026-05-08T11:30Z.
+
+**Context**: The three deferral ADRs above (DEC-0019 graphiti, DEC-0020 ruff, DEC-0021 test-runner-mcp) were authored by prior planner runs that did insufficient pre-flight upstream-availability searches. A 2026-05-08T11:30Z research sweep found that **all three upstreams exist** — they were just on non-PyPI channels (Docker Hub, PyPI under non-obvious name, npm) that the planner did not check.
+
+**For planner — supersedure summary**:
+
+- **DEC-0022 supersedes DEC-0019** — P3-W9-F10 graphiti is BACK IN PHASE 3 SCOPE. Install via official Zep Docker image `zepai/knowledge-graph-mcp` (or `uvx --from git+https://github.com/getzep/graphiti.git#subdirectory=mcp_server`). Pattern matches Serena P0 docker prior art. Re-emit a fresh WO; F10 has `attempts=2` so the next attempt must succeed cleanly (or hit 3-strikes soft escalation, NOT a halt).
+- **DEC-0023 supersedes DEC-0020** — P3-W11-F03 ruff is BACK IN PHASE 3 SCOPE. Install via PyPI `mcp-server-analyzer` (Anselmoo, combines ruff + vulture). Tier-2 fallback: vendor a 50-line FastMCP wrapper. Pattern matches WO-0076 ESLint.
+- **DEC-0024 supersedes DEC-0021** — P3-W11-F07 test-runner-mcp is BACK IN PHASE 3 SCOPE. Install via npm `test-runner-mcp` (privsim/mcp-test-runner) SHA-pinned. Pattern matches WO-0077 mcp-pytest-runner.
+
+**For planner — search discipline (NOW MANDATORY)**: `.claude/agents/planner.md` has been updated with a 7-channel pre-flight upstream-availability search matrix. Before authoring ANY deferral ADR, the planner MUST check ALL 7 channels (PyPI, npm, GitHub repo search, GitHub subdirectories of canonical repo, Docker Hub, community forks, maintainer signals on GitHub Discussions/Issues) and document each result in the ADR's "Context" section. Failure to search all 7 channels = forbidden to author a deferral ADR.
+
+**For docs-writer — earlier deferral notes are now historically-accurate-but-stale**: phase-log entries above (lines ~287-294, 358-360, items 7-8 in the most recent WO-0077 deferred-work block) reference DEC-0019/0020/0021 as authoritative deferrals. Those references are now superseded by DEC-0022/0023/0024. Future docs-writer passes may add a "(SUPERSEDED 2026-05-08 — see DEC-0022/0023/0024)" annotation but the historical record stands.
+
+**For planner — next emission priorities**: After WO-0078 (g6-platform-aggregation) ships, the planner has 3 freshly-revived features eligible:
+- P3-W9-F10 (graphiti, attempts=2) — emit with docker-image install path per DEC-0022
+- P3-W11-F03 (ruff, attempts=0) — emit with `mcp-server-analyzer` install path per DEC-0023
+- P3-W11-F07 (test-runner-mcp, attempts=0) — emit with `npx test-runner-mcp` SHA-pinned install path per DEC-0024
+
+These can ship as 1 batched WO (3 features) or 3 separate solo-feature WOs. F10's elevated attempts count (2) argues for solo-feature emission to reduce blast radius.
