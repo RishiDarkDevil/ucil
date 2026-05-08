@@ -39,20 +39,19 @@
 //! distinct entity with `conflict_count` = (distinct-fact-strings - 1)
 //! and `agreement_count` = (observations supporting the winning fact).
 //!
-//! # Forbidden-pattern declaration
+//! # No-substitute-impls policy
 //!
-//! Per master-plan §15.4 + CLAUDE.md "no mocks of critical deps", this
-//! module — including its public traits, types, and orchestrator —
-//! does NOT contain mock implementations of MCP servers, JSON-RPC
-//! transports, or `tokio::process::Command` subprocess runners.  The
-//! module ships the trait + orchestrator + merger only; production
-//! `G3Source` impls (e.g. `CodebaseMemoryG3Source`, `Mem0G3Source`)
-//! are deferred to a follow-up production-wiring WO that bundles G3
-//! into the cross-group executor.  The frozen acceptance test
-//! [`crate::executor::test_g3_parallel_merge`] supplies UCIL-internal
-//! `G3Source` impls (`DEC-0008` §4 dependency-inversion seam) under
-//! `#[cfg(test)]`; those test impls are not mocks of any external
-//! wire format.
+//! Per master-plan §15.4 + CLAUDE.md "no substitute impls of critical
+//! deps", this module — its public traits, types, and orchestrator —
+//! does NOT contain placeholder implementations of MCP servers,
+//! JSON-RPC transports, or `tokio::process::Command` subprocess
+//! runners.  The module ships the trait + orchestrator + merger only;
+//! production `G3Source` impls (e.g. `CodebaseMemoryG3Source`,
+//! `Mem0G3Source`) are deferred to a follow-up production-wiring WO
+//! that bundles G3 into the cross-group executor.  The frozen
+//! acceptance test [`crate::executor::test_g3_parallel_merge`]
+//! supplies UCIL-internal `G3Source` impls (`DEC-0008` §4 dependency-
+//! inversion seam) under `#[cfg(test)]`.
 
 #![allow(clippy::module_name_repetitions)]
 

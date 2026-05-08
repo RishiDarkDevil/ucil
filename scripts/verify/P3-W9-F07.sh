@@ -17,9 +17,9 @@
 #      exit 0; on any failure print
 #      `[FAIL] P3-W9-F07: <reason>` and exit 1.
 #
-# No mocks.  No env-gated short-circuits — the test is fully synthetic
-# (`TestG3Source` local impls per `DEC-0008` §4; no subprocess,
-# no API key).
+# No substitute impls.  No env-gated short-circuits — the test is
+# fully synthetic (`TestG3Source` local impls per `DEC-0008` §4; no
+# subprocess, no API key).
 set -euo pipefail
 IFS=$'\n\t'
 
