@@ -1,0 +1,149 @@
+# Filesystem MCP plugin manifest (master-plan §14.1 category = "platform").
+#
+# pinned 2026-05-08: @modelcontextprotocol/server-filesystem v2026.1.14
+#   source          : https://github.com/modelcontextprotocol/servers/tree/main/src/filesystem
+#   npm package     : https://www.npmjs.com/package/@modelcontextprotocol/server-filesystem
+#   pinned tag      : 2026.1.14 — npm `latest` published by the
+#                     @modelcontextprotocol team (MIT license; canonical
+#                     Node MCP server for the local-filesystem read/write
+#                     surface). Pre-release tags are deliberately NOT
+#                     consumed: only immutable release tags get pinned
+#                     per .claude/rules/commit-style.md.
+#   binary launch   : `npx -y @modelcontextprotocol/server-filesystem@2026.1.14
+#                       <ABS_ALLOWED_PATH>` — `npx` downloads + caches
+#                     the npm package and runs the
+#                     `mcp-server-filesystem` console-script entry-
+#                     point. The server speaks JSON-RPC 2.0 over stdio.
+#                     Allowed-path arguments are POSITIONAL (no flag);
+#                     supplying one or more directories on the command
+#                     line establishes the security perimeter — only
+#                     paths under the supplied roots are accessible to
+#                     `tools/call read_file` / `list_directory` /
+#                     `write_file` operations. The manifest
+#                     `transport.args` field carries the
+#                     `${UCIL_FS_MCP_ALLOWED_PATH}` placeholder
+#                     sentinel that the integration test and
+#                     `scripts/verify/P3-W10-F07.sh` substitute
+#                     per-invocation with an absolute path to a
+#                     freshly-fabricated mktemp -d directory
+#                     (NOT a fixture copy — the tmpdir is populated
+#                     from scratch with known small text files to
+#                     keep the test hermetic). The placeholder token
+#                     is emitted verbatim in the on-disk manifest so
+#                     the file is reproducible across CI machines;
+#                     the substitution is the consumer's
+#                     responsibility, NOT the manifest parser's.
+#   advertised tools: read_file, read_text_file, read_media_file,
+#                     read_multiple_files, write_file, edit_file,
+#                     create_directory, list_directory,
+#                     list_directory_with_sizes, directory_tree,
+#                     move_file, search_files, get_file_info,
+#                     list_allowed_directories
+#                     (14 total — verified end-to-end via
+#                     PluginManager::health_check; see
+#                     crates/ucil-daemon/tests/g6_plugin_manifests.rs).
+#                     The master-plan §3.1 line 316 + §4.6 line 350
+#                     vocabulary (`fs.read_file`, `fs.list_directory`,
+#                     `fs.write_file`) maps directly to the upstream
+#                     literals (`read_file`, `list_directory`,
+#                     `write_file`). The integration test pins on
+#                     `read_file` — the canonical read surface that
+#                     maps verbatim to our declared
+#                     `platform.fs.read_file` capability and is the
+#                     strongest detection signal for upstream renames
+#                     mirroring the WO-0072 / WO-0074 rationale
+#                     (snake_case `read_file` is the upstream literal
+#                     as emitted by `tools/list` — preferred over
+#                     kebab-case translation per WO-0074 scope_in #1).
+#   transport       : stdio (master-plan §13; no HTTP in Phase 3).
+#   API keys        : NONE — Filesystem MCP runs purely against local
+#                     paths supplied via positional argv. No network
+#                     calls; no auth required.
+#
+# READ-ONLY-IN-TESTS INVARIANT: although the upstream catalog
+# advertises `write_file`, `edit_file`, `move_file`, `create_directory`,
+# the integration test (g6_plugin_manifests.rs:filesystem_manifest_health_check)
+# and the verify script (scripts/verify/P3-W10-F07.sh) MUST NOT
+# exercise destructive write operations. The F07 spec line is
+# "secure file read and directory listing work within configured
+# allowed paths" — write operations are out of scope for F07
+# acceptance. The smoke MUST be read-only:
+#   * tools/call read_file <known-content-path> → assert content matches
+#   * tools/call list_directory <tmpdir>        → assert files listed
+# Any future write-side coverage requires a new feature ID + WO.
+#
+# `${UCIL_FS_MCP_ALLOWED_PATH}` placeholder substitution mechanic —
+# RATIONALE: the Filesystem MCP server is security-conscious by
+# design — only paths supplied as positional args at spawn time are
+# accessible to its tools. Two options were considered: (a) hardcode
+# `/tmp` as a permissive default (rejected — unsafe in shared CI
+# environments and non-reproducible across hosts since /tmp content
+# differs per machine); (b) carry a sentinel placeholder that
+# consumers substitute (chosen — keeps the manifest reproducible
+# and forces consumers to make the per-invocation security decision
+# explicit). The integration test in g6_plugin_manifests.rs:
+# filesystem_manifest_health_check loads the manifest, walks the
+# `transport.args` Vec<String>, replaces the token verbatim with
+# the tmpdir path, and constructs a PluginManifest with the patched
+# args before passing to PluginManager::health_check_with_timeout.
+# The verify script scripts/verify/P3-W10-F07.sh follows the same
+# pattern at the bash/python level for the tool-level smoke.
+# PluginManager itself does NOT perform placeholder substitution
+# (it consumes the `transport.args` Vec<String> verbatim) — the
+# consumer (test or production wiring) handles substitution per
+# WO-0074 §executor precedent.
+#
+# Establishing the `platform.*` capability namespace: parallel to
+# `search.*` (probe; P2-W6-F06), `navigate.*` (scip; P2-W7-F08),
+# `knowledge.*` (codebase-memory; P3-W9-F05 + mem0; P3-W9-F06),
+# `architecture.*` (codegraphcontext; P3-W9-F08), and `context.*`
+# (Context7 + Repomix; P3-W10-F02/F03). G6 Platform sources advertise
+# capabilities under the `platform.*` prefix; sub-divisions per source
+# are `platform.github.*`, `platform.git.*`, `platform.fs.*`. Filesystem
+# is the local-IO half of the G6 group (paired with GitHub which is
+# the remote-VCS half and Git which is the local-VCS half — together
+# they span the platform-state surfaces an agent reaches when it
+# wants to know "what's on this machine + in this repo + on the
+# remote").
+#
+# G6 Platform source per master-plan §5.6 — the G6 group queries all
+# platform stores in parallel and the agent synthesizes a unified
+# platform-state packet for the active task. Filesystem MCP sits at
+# master-plan §3.1 line 316 + §4.6 line 350 as P0 priority — the
+# canonical third G6 plugin to land alongside GitHub and Git.
+#
+# Reproducibility: a moving `latest` dist-tag is deliberately avoided
+# per .claude/rules/commit-style.md. The npm package version is
+# pinned to an immutable release tag so the manifest produces
+# byte-identical health checks across CI machines and operator
+# workstations. When upstream cuts a v2026.x with breaking
+# tool-surface changes, supersede this manifest in a new ADR and
+# bump the pin.
+
+[plugin]
+name = "filesystem"
+category = "platform"
+priority = "P0"
+version = "2026.1.14"
+description = "Local filesystem read/write/listing within configured allow-list paths. MIT license. G6 source per master-plan §3.1 line 316 + §4.6 line 350 + §5.6."
+
+[capabilities]
+provides = [
+    "platform.fs.read_file",
+    "platform.fs.list_directory",
+    "platform.fs.write_file",
+]
+languages = []
+
+[transport]
+type = "stdio"
+command = "npx"
+args = [
+    "-y",
+    "@modelcontextprotocol/server-filesystem@2026.1.14",
+    "${UCIL_FS_MCP_ALLOWED_PATH}",
+]
+
+[lifecycle]
+hot_cold = true
+idle_timeout_minutes = 10

@@ -1,0 +1,144 @@
+# Git MCP plugin manifest (master-plan §14.1 category = "platform").
+#
+# pinned 2026-05-08: mcp-server-git v2026.1.14 (modelcontextprotocol/servers,
+# python sub-package)
+#   source          : https://github.com/modelcontextprotocol/servers/tree/main/src/git
+#   pypi package    : https://pypi.org/project/mcp-server-git/
+#   pinned tag      : 2026.1.14 — pypi `latest` published by the
+#                     @modelcontextprotocol team (MIT license; canonical
+#                     Python MCP server for the local-git operations
+#                     surface). Pre-release tags are deliberately NOT
+#                     consumed: only immutable release tags get pinned
+#                     per .claude/rules/commit-style.md.
+#   binary launch   : `uvx mcp-server-git@2026.1.14
+#                       --repository <ABS_REPO_PATH>` — `uvx` (from `uv`)
+#                     downloads + caches the pypi package into an
+#                     isolated venv and runs the `mcp-server-git`
+#                     console-script entry-point. The server speaks
+#                     JSON-RPC 2.0 over stdio. The `--repository` (or
+#                     short `-r`) flag is REQUIRED — the upstream
+#                     `--help` output documents it as the canonical
+#                     repo-path flag (no positional alternative). The
+#                     manifest `transport.args` field carries the
+#                     `${UCIL_GIT_MCP_REPO}` placeholder sentinel that
+#                     the integration test
+#                     (crates/ucil-daemon/tests/g6_plugin_manifests.rs)
+#                     and `scripts/verify/P3-W10-F06.sh` substitute
+#                     per-invocation with an absolute path to a
+#                     mktemp -d copy of tests/fixtures/rust-project
+#                     (per WO-0074 §executor #5: copy fixtures into a
+#                     tmpdir BEFORE invoking — keeps the read-only
+#                     fixture tree pristine even if the upstream
+#                     binary writes side-files into the repo dir).
+#                     The placeholder token is emitted verbatim in
+#                     the on-disk manifest so the file is reproducible
+#                     across CI machines; the substitution is the
+#                     consumer's responsibility, NOT the manifest
+#                     parser's.
+#   advertised tools: git_status, git_diff_unstaged, git_diff_staged,
+#                     git_diff, git_commit, git_add, git_reset,
+#                     git_log, git_create_branch, git_checkout,
+#                     git_show, git_branch
+#                     (12 total — verified end-to-end via
+#                     PluginManager::health_check; see
+#                     crates/ucil-daemon/tests/g6_plugin_manifests.rs).
+#                     The master-plan §3.1 line 315 + §4.6 line 349
+#                     vocabulary (`git.log`, `git.blame`, `git.diff`)
+#                     describes capability NAMES independent of the
+#                     upstream literal tool names. There is no
+#                     `git_blame` tool in the v2026.1.14 catalog (the
+#                     master-plan vocabulary is forward-compatible
+#                     with future @modelcontextprotocol surface
+#                     expansions; the upstream provides
+#                     `git_diff` / `git_log` / `git_show` which together
+#                     span the blame use-case). The integration test
+#                     pins on `git_log` — the canonical commit-history
+#                     surface that maps verbatim to our declared
+#                     `platform.git.log` capability and is the
+#                     strongest detection signal for upstream renames
+#                     mirroring the WO-0072 / WO-0074 rationale
+#                     (snake_case `git_log` is the upstream literal
+#                     as emitted by `tools/list` — preferred over
+#                     kebab-case translation per WO-0074 scope_in #1).
+#   transport       : stdio (master-plan §13; no HTTP in Phase 3).
+#   API keys        : NONE — Git MCP runs purely against a local
+#                     git repository directory. No network calls;
+#                     no auth required. Reproducible across CI runs
+#                     against a tmpdir copy of
+#                     tests/fixtures/rust-project (which IS a git
+#                     repo with at least one commit).
+#
+# `${UCIL_GIT_MCP_REPO}` placeholder substitution mechanic — RATIONALE:
+# unlike GitHub MCP (no path arg) and Filesystem MCP (positional
+# allow-list path arg), Git MCP requires a CLI flag pair
+# (`--repository <path>`) — the path is intrinsically per-invocation
+# (an operator's working repo is not a stable global path). Two
+# options were considered: (a) hardcode `/tmp/some-default-repo` in
+# the manifest (rejected — non-reproducible across hosts and would
+# fail-fast at every spawn unless that path exists); (b) carry a
+# sentinel placeholder that consumers substitute (chosen — keeps the
+# manifest reproducible and forces consumers to make the per-
+# invocation decision explicit). The integration test in
+# crates/ucil-daemon/tests/g6_plugin_manifests.rs:git_manifest_health_check
+# loads the manifest, walks the `transport.args` Vec<String>, replaces
+# the token verbatim with the tmpdir path, and constructs a
+# PluginManifest with the patched args before passing to
+# PluginManager::health_check_with_timeout. The verify script
+# scripts/verify/P3-W10-F06.sh follows the same pattern at the
+# bash/python level for the tool-level smoke. PluginManager itself
+# does NOT perform placeholder substitution (it consumes the
+# `transport.args` Vec<String> verbatim) — the consumer (test or
+# production wiring) handles substitution per WO-0074 §executor
+# precedent.
+#
+# Establishing the `platform.*` capability namespace: parallel to
+# `search.*` (probe; P2-W6-F06), `navigate.*` (scip; P2-W7-F08),
+# `knowledge.*` (codebase-memory; P3-W9-F05 + mem0; P3-W9-F06),
+# `architecture.*` (codegraphcontext; P3-W9-F08), and `context.*`
+# (Context7 + Repomix; P3-W10-F02/F03). G6 Platform sources advertise
+# capabilities under the `platform.*` prefix; sub-divisions per source
+# are `platform.github.*`, `platform.git.*`, `platform.fs.*`. Git is
+# the local-VCS half of the G6 group (paired with GitHub which is the
+# remote-VCS half; see plugins/platform/github/plugin.toml).
+#
+# G6 Platform source per master-plan §5.6 — the G6 group queries all
+# platform stores in parallel and the agent synthesizes a unified
+# platform-state packet for the active task. Git MCP sits at master-
+# plan §3.1 line 315 + §4.6 line 349 as P0 priority — the canonical
+# second G6 plugin to land alongside GitHub.
+#
+# Reproducibility: a moving `latest` dist-tag is deliberately avoided
+# per .claude/rules/commit-style.md. The pypi package version is
+# pinned to an immutable release tag so the manifest produces
+# byte-identical health checks across CI machines and operator
+# workstations. When upstream cuts a v2026.x with breaking
+# tool-surface changes, supersede this manifest in a new ADR and
+# bump the pin.
+
+[plugin]
+name = "git"
+category = "platform"
+priority = "P0"
+version = "2026.1.14"
+description = "Local Git repository operations (log, diff, show, branch). MIT license. G6 source per master-plan §3.1 line 315 + §4.6 line 349 + §5.6."
+
+[capabilities]
+provides = [
+    "platform.git.log",
+    "platform.git.blame",
+    "platform.git.diff",
+]
+languages = []
+
+[transport]
+type = "stdio"
+command = "uvx"
+args = [
+    "mcp-server-git@2026.1.14",
+    "--repository",
+    "${UCIL_GIT_MCP_REPO}",
+]
+
+[lifecycle]
+hot_cold = true
+idle_timeout_minutes = 10
