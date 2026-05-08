@@ -1,0 +1,169 @@
+INITIALIZE_REPLY:
+{
+  "result": {
+    "protocolVersion": "2025-06-18",
+    "capabilities": {
+      "tools": {
+        "run_tests": {
+          "name": "run_tests",
+          "description": "Run tests and capture output",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "command": {
+                "type": "string",
+                "description": "Test command to execute (e.g., \"bats tests/*.bats\")"
+              },
+              "workingDir": {
+                "type": "string",
+                "description": "Working directory for test execution"
+              },
+              "framework": {
+                "type": "string",
+                "enum": [
+                  "bats",
+                  "pytest",
+                  "flutter",
+                  "jest",
+                  "go",
+                  "rust",
+                  "generic"
+                ],
+                "description": "Testing framework being used"
+              },
+              "outputDir": {
+                "type": "string",
+                "description": "Directory to store test results"
+              },
+              "timeout": {
+                "type": "number",
+                "description": "Test execution timeout in milliseconds (default: 300000)"
+              },
+              "env": {
+                "type": "object",
+                "description": "Environment variables for test execution",
+                "additionalProperties": {
+                  "type": "string"
+                }
+              },
+              "securityOptions": {
+                "type": "object",
+                "description": "Security options for command execution",
+                "properties": {
+                  "allowSudo": {
+                    "type": "boolean",
+                    "description": "Allow sudo commands (default: false)"
+                  },
+                  "allowSu": {
+                    "type": "boolean",
+                    "description": "Allow su commands (default: false)"
+                  },
+                  "allowShellExpansion": {
+                    "type": "boolean",
+                    "description": "Allow shell expansion like $() or backticks (default: true)"
+                  },
+                  "allowPipeToFile": {
+                    "type": "boolean",
+                    "description": "Allow pipe to file operations (default: false)"
+                  }
+                }
+              }
+            },
+            "required": [
+              "command",
+              "workingDir",
+              "framework"
+            ]
+          }
+        }
+      }
+    },
+    "serverInfo": {
+      "name": "test-runner",
+      "version": "0.1.0"
+    }
+  },
+  "jsonrpc": "2.0",
+  "id": 1
+}
+TOOLS_LIST_REPLY:
+{
+  "result": {
+    "tools": [
+      {
+        "name": "run_tests",
+        "description": "Run tests and capture output",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "command": {
+              "type": "string",
+              "description": "Test command to execute (e.g., \"bats tests/*.bats\")"
+            },
+            "workingDir": {
+              "type": "string",
+              "description": "Working directory for test execution"
+            },
+            "framework": {
+              "type": "string",
+              "enum": [
+                "bats",
+                "pytest",
+                "flutter",
+                "jest",
+                "go",
+                "rust",
+                "generic"
+              ],
+              "description": "Testing framework being used"
+            },
+            "outputDir": {
+              "type": "string",
+              "description": "Directory to store test results"
+            },
+            "timeout": {
+              "type": "number",
+              "description": "Test execution timeout in milliseconds (default: 300000)"
+            },
+            "env": {
+              "type": "object",
+              "description": "Environment variables for test execution",
+              "additionalProperties": {
+                "type": "string"
+              }
+            },
+            "securityOptions": {
+              "type": "object",
+              "description": "Security options for command execution",
+              "properties": {
+                "allowSudo": {
+                  "type": "boolean",
+                  "description": "Allow sudo commands (default: false)"
+                },
+                "allowSu": {
+                  "type": "boolean",
+                  "description": "Allow su commands (default: false)"
+                },
+                "allowShellExpansion": {
+                  "type": "boolean",
+                  "description": "Allow shell expansion like $() or backticks (default: true)"
+                },
+                "allowPipeToFile": {
+                  "type": "boolean",
+                  "description": "Allow pipe to file operations (default: false)"
+                }
+              }
+            }
+          },
+          "required": [
+            "command",
+            "workingDir",
+            "framework"
+          ]
+        }
+      }
+    ]
+  },
+  "jsonrpc": "2.0",
+  "id": 2
+}
