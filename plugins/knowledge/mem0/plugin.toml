@@ -1,0 +1,96 @@
+# Mem0 MCP plugin manifest (master-plan §14.1 category = "knowledge").
+#
+# pinned 2026-05-08: mem0-mcp-server v0.2.1 (mem0-ai/mem0-mcp-server)
+#   source          : https://github.com/mem0-ai/mem0-mcp-server
+#   pypi package    : https://pypi.org/project/mem0-mcp-server/
+#   pinned tag      : 0.2.1 — pypi `latest` published 2025-12-06 by the
+#                     official Mem0 team (deshrajdry, parthshr370;
+#                     Apache-2.0 license; metadata Author: Mem0).
+#   binary launch   : `uvx mem0-mcp-server@0.2.1` — `uvx` (from Astral
+#                     uv >= 0.4) installs the pinned pypi package into
+#                     an ephemeral isolated env and runs the
+#                     `mem0-mcp-server` console-script entry-point. The
+#                     server speaks JSON-RPC 2.0 over stdio.
+#   advertised tools: add_memory, search_memories, get_memories,
+#                     get_memory, update_memory, delete_memory,
+#                     delete_all_memories, list_entities,
+#                     delete_entities (9 total — verified end-to-end
+#                     via PluginManager::health_check; see
+#                     crates/ucil-daemon/tests/g3_plugin_manifests.rs).
+#                     CRUD vocabulary mapping (master-plan §3.1
+#                     line 312 → upstream tool names):
+#                       store    → add_memory
+#                       retrieve → get_memory / search_memories
+#                       list     → get_memories / list_entities
+#   transport       : stdio (master-plan §13; no HTTP in Phase 3).
+#   API keys        : `MEM0_API_KEY` is REQUIRED for tool invocations
+#                     (semantic embedding + storage). However, the MCP
+#                     `tools/list` round-trip works without the key —
+#                     upstream emits a WARNING ("MEM0_API_KEY is not
+#                     set; Smithery health checks will pass, but every
+#                     tool invocation will fail until a key is supplied
+#                     via session config or env vars") but advertises
+#                     all tools. UCIL's PluginManager::health_check
+#                     therefore succeeds without an API key (scope_in
+#                     #17(d) constraint satisfied).
+#
+# Why mem0-mcp-server (pypi) and not the archived mem0ai/mem0-mcp repo:
+# the canonical upstream MCP server has migrated from the archived
+# (2026-03-24) github.com/mem0ai/mem0-mcp repo to the actively
+# maintained pypi `mem0-mcp-server` package shipped by the same Mem0
+# team (Apache-2.0). The archived repo's installation docs now
+# redirect to "the official cloud-hosted MCP server" — UCIL prefers
+# the local-installable `uvx mem0-mcp-server` path because it's the
+# same pattern as `npx -y codebase-memory-mcp` and avoids a hard
+# dependency on Mem0's hosted SaaS.
+#
+# Why uvx and not pip + binary-on-PATH: `uvx` is the canonical
+# Astral-uv tool-runner (parallel to `npx` for npm) and isolates each
+# pinned version into its own ephemeral env, avoiding dependency
+# clashes with whatever `mem0ai` the operator already has installed
+# globally. Mirrors the `npx -y <pkg>@<pin>` reproducibility shape
+# used by the structural and search plugin manifests (P2-W6-F05/F06).
+#
+# Optional Python SDK: master-plan §3.1 line 312 lists Mem0 as
+# "Python SDK + MCP server". The Python SDK (`pip install mem0ai`)
+# is out of scope for this manifest (which only declares the MCP
+# transport); see scripts/devtools/install-mem0-mcp.sh for the
+# optional SDK install hint.
+#
+# Languages: empty list — agent memory is text-keyed (natural language
+# observations and conversation snippets), not code-language-keyed.
+# An empty `[capabilities] languages` declaration is the deliberate
+# language-agnostic signal, mirroring the ripgrep manifest (P2-W6-F02).
+#
+# G3 Knowledge source per master-plan §5.3 lines 463-475 — agent-
+# memory complement to codebase-memory. Where codebase-memory holds
+# structural knowledge derived from the source tree, mem0 holds
+# semantic knowledge derived from the agent's interactions over
+# time, with three-tier scoping (user/session/agent per master-plan
+# §3.1 line 312).
+#
+# Reproducibility: a moving `latest` or branch ref is deliberately
+# avoided per .claude/rules/commit-style.md. The pypi package version
+# is pinned to an immutable release tag. When upstream cuts a v1.x
+# with breaking tool-surface changes, supersede this manifest in a
+# new ADR and bump the pin.
+
+[plugin]
+name = "mem0"
+version = "0.2.1"
+description = "Three-tier agent memory (user/session/agent) with self-editing conflict resolution (G3 source per master-plan §5.3)."
+
+[capabilities]
+provides = ["knowledge.memory_crud", "knowledge.memory_search"]
+languages = []
+
+[transport]
+type = "stdio"
+command = "uvx"
+args = [
+    "mem0-mcp-server@0.2.1",
+]
+
+[lifecycle]
+hot_cold = true
+idle_timeout_minutes = 10
