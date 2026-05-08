@@ -3112,3 +3112,611 @@ pub async fn test_lancedb_indexer_handle_processes_events() {
          to index_paths and produce ≥1 row; got {count}"
     );
 }
+
+// ── G3 (Knowledge) parallel orchestrator + entity-keyed merger
+// acceptance test (P3-W9-F07 / WO-0070) ────────────────────────────────────
+//
+// Per `DEC-0007` (frozen-selector module-root placement), the
+// acceptance test `test_g3_parallel_merge` lives at the MODULE ROOT
+// of `executor.rs` — NOT inside `mod tests {}` — so the
+// `feature-list.json` selector
+// `-p ucil-daemon executor::test_g3_parallel_merge` resolves cleanly
+// without a `tests::` intermediate (parallel to
+// `executor::test_g1_parallel_execution` from WO-0047).
+//
+// Per `DEC-0008` §4 the local `TestG3Source` impl below is UCIL-
+// internal — NOT a mock of any external wire format.  Production
+// wiring of real subprocess clients (e.g. `CodebaseMemoryG3Source`
+// calling the F05 plugin via `tokio::process::Command`,
+// `Mem0G3Source` calling the F06 plugin) is deferred to a follow-up
+// production-wiring WO that bundles G3 into the cross-group
+// executor.
+
+/// Frozen acceptance selector for feature `P3-W9-F07` — see
+/// `ucil-build/feature-list.json` entry for
+/// `-p ucil-daemon executor::test_g3_parallel_merge`.
+///
+/// Drives [`crate::g3::execute_g3`] + [`crate::g3::merge_g3_by_entity`]
+/// over UCIL-internal [`crate::g3::G3Source`] impls and asserts
+/// eight properties (SA1..SA8):
+///
+/// * **SA1 — Parallelism**: 3 sources each `Sleep(200 ms, …)` produce
+///   `wall_elapsed_ms in [180, 700)` (lower bound proves at least one
+///   source's sleep elapsed; upper bound proves serial 3×200 ms = 600 ms
+///   plus noise did not happen → parallelism confirmed).
+/// * **SA2 — Newest-wins-on-conflict**: two sources return the same
+///   entity but different facts; the merger picks the newer
+///   observation.
+/// * **SA3 — Highest-confidence-on-agreement**: two sources return the
+///   same entity and same fact with different confidences; the merger
+///   reports the higher confidence and `agreement_count = 2`.
+/// * **SA4 — Different-entities-union**: two sources return distinct
+///   entities; both appear in the merged output.
+/// * **SA5 — Partial-Errored**: 1 of 3 sources errors; the merger
+///   succeeds without that source's contributions.
+/// * **SA6 — Partial-TimedOut**: 1 of 3 sources sleeps >
+///   `G3_PER_SOURCE_DEADLINE`; the per-source timeout fires before
+///   the master deadline.
+/// * **SA7 — Master-deadline-trip**: tight `master_deadline = 100 ms`
+///   with 7 s sleepers trips master, `wall_elapsed_ms < 2000 ms`.
+/// * **SA8 — Empty-source**: zero observations → `merged.is_empty()`
+///   and `total_observations_in == 0`.
+#[cfg(test)]
+#[allow(clippy::too_many_lines, clippy::missing_panics_doc)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+pub async fn test_g3_parallel_merge() {
+    use std::time::Instant;
+
+    use crate::g3::{
+        execute_g3, merge_g3_by_entity, G3FactObservation, G3Outcome, G3Query, G3Source,
+        G3SourceOutput, G3SourceStatus, G3_PER_SOURCE_DEADLINE,
+    };
+
+    /// Behaviour switches for the per-test [`G3Source`] impl below.
+    ///
+    /// `(entity, fact, confidence, observed_ts_ns)` tuples are
+    /// converted to [`G3FactObservation`] inside `execute` so each
+    /// scenario can be expressed as flat literals at the call site.
+    #[derive(Clone)]
+    enum TestBehaviour {
+        ReturnObservations(Vec<(String, String, f64, u128)>),
+        Sleep(Duration, Vec<(String, String, f64, u128)>),
+        Error(String),
+        LongSleep(Duration),
+        Empty,
+    }
+
+    /// Local [`G3Source`] impl driving the per-scenario behaviour.
+    /// Per `DEC-0008` §4 this is a UCIL-internal trait (the
+    /// dependency-inversion seam), so a local impl in a test is not a
+    /// mock of any external wire format — the same shape as the
+    /// `TestG1Source` impl at executor.rs:2158 above.
+    struct TestG3Source {
+        id: String,
+        behaviour: TestBehaviour,
+    }
+
+    impl TestG3Source {
+        fn build_observations(
+            id: &str,
+            tuples: &[(String, String, f64, u128)],
+        ) -> Vec<G3FactObservation> {
+            tuples
+                .iter()
+                .map(|(entity, fact, confidence, ts)| G3FactObservation {
+                    source_id: id.to_owned(),
+                    entity: entity.clone(),
+                    fact: fact.clone(),
+                    confidence: *confidence,
+                    observed_ts_ns: *ts,
+                    validity_window: None,
+                })
+                .collect()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl G3Source for TestG3Source {
+        fn source_id(&self) -> &str {
+            &self.id
+        }
+
+        async fn execute(&self, _query: &G3Query) -> G3SourceOutput {
+            match &self.behaviour {
+                TestBehaviour::ReturnObservations(tuples) => G3SourceOutput {
+                    source_id: self.id.clone(),
+                    status: G3SourceStatus::Available,
+                    elapsed_ms: 0,
+                    observations: Self::build_observations(&self.id, tuples),
+                    error: None,
+                },
+                TestBehaviour::Sleep(d, tuples) => {
+                    let start = Instant::now();
+                    tokio::time::sleep(*d).await;
+                    let elapsed_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+                    G3SourceOutput {
+                        source_id: self.id.clone(),
+                        status: G3SourceStatus::Available,
+                        elapsed_ms,
+                        observations: Self::build_observations(&self.id, tuples),
+                        error: None,
+                    }
+                }
+                TestBehaviour::Error(msg) => G3SourceOutput {
+                    source_id: self.id.clone(),
+                    status: G3SourceStatus::Errored,
+                    elapsed_ms: 0,
+                    observations: vec![],
+                    error: Some(msg.clone()),
+                },
+                TestBehaviour::LongSleep(d) => {
+                    tokio::time::sleep(*d).await;
+                    // The orchestrator's per-source timeout must fire
+                    // before this branch returns; if the test ever
+                    // sees `Available` here, the timeout wrapper has
+                    // regressed (an M1-style mutation would land us
+                    // here).
+                    G3SourceOutput {
+                        source_id: self.id.clone(),
+                        status: G3SourceStatus::Available,
+                        elapsed_ms: u64::try_from(d.as_millis()).unwrap_or(u64::MAX),
+                        observations: vec![],
+                        error: None,
+                    }
+                }
+                TestBehaviour::Empty => G3SourceOutput {
+                    source_id: self.id.clone(),
+                    status: G3SourceStatus::Available,
+                    elapsed_ms: 0,
+                    observations: vec![],
+                    error: None,
+                },
+            }
+        }
+    }
+
+    let q = G3Query {
+        entities: vec!["login_handler".to_owned()],
+        max_results: 16,
+        min_confidence: 0.0,
+    };
+
+    // ── SA1 — Parallelism ─────────────────────────────────────────────
+    //
+    // Three sources each Sleep(200 ms, ...) → wall in [180, 700).
+    // Lower bound proves at least one source's 200 ms sleep elapsed.
+    // Upper bound proves serial 3×200 ms = 600 ms plus noise did not
+    // happen → parallelism confirmed (dual-bound discipline per
+    // WO-0043 lessons).
+    let sources_sa1: Vec<Box<dyn G3Source + Send + Sync + 'static>> = vec![
+        Box::new(TestG3Source {
+            id: "alpha".to_owned(),
+            behaviour: TestBehaviour::Sleep(
+                Duration::from_millis(200),
+                vec![("a".to_owned(), "fa".to_owned(), 0.5, 100)],
+            ),
+        }),
+        Box::new(TestG3Source {
+            id: "beta".to_owned(),
+            behaviour: TestBehaviour::Sleep(
+                Duration::from_millis(200),
+                vec![("b".to_owned(), "fb".to_owned(), 0.5, 100)],
+            ),
+        }),
+        Box::new(TestG3Source {
+            id: "gamma".to_owned(),
+            behaviour: TestBehaviour::Sleep(
+                Duration::from_millis(200),
+                vec![("c".to_owned(), "fc".to_owned(), 0.5, 100)],
+            ),
+        }),
+    ];
+    let outcome_sa1: G3Outcome =
+        execute_g3(q.clone(), sources_sa1, Duration::from_millis(5_000)).await;
+    assert!(
+        outcome_sa1.wall_elapsed_ms >= 180,
+        "(SA1) parallel wall >= 180 ms; left: {}, right: 180 (proves at \
+         least one 200 ms sleep elapsed)",
+        outcome_sa1.wall_elapsed_ms
+    );
+    // Upper bound 500 ms (NOT the spec'd 700 ms): the WO scope_in #9
+    // wrote "in [180, 700)" but 700 lets a sequential 3×200=600 ms
+    // execution slip through, defeating the M1 mutation contract.
+    // Tightened to 500 ms — covers a noisy parallel run (~250-300 ms)
+    // while reliably catching sequential execution (≥600 ms).
+    assert!(
+        outcome_sa1.wall_elapsed_ms < 500,
+        "(SA1) parallel wall < 500 ms; left: {}, right: 500 (proves \
+         serial 3x200=600 ms did NOT happen → parallelism confirmed)",
+        outcome_sa1.wall_elapsed_ms
+    );
+    assert!(
+        !outcome_sa1.master_timed_out,
+        "(SA1) master_timed_out must be false on a 200 ms-per-source happy \
+         path; left: true, right: false"
+    );
+    assert_eq!(
+        outcome_sa1.results.len(),
+        3,
+        "(SA1) outcome.results must contain exactly 3 entries (one per source); \
+         left: {}, right: 3",
+        outcome_sa1.results.len()
+    );
+
+    // ── SA2 — Newest-wins-on-conflict ────────────────────────────────
+    //
+    // Two sources return same entity = "login_handler" but different
+    // facts: "uses bcrypt" at ts=100 vs "uses argon2" at ts=200.
+    // Merger conflict-cluster winner is newest_ts; expect
+    // winning_fact == "uses argon2", winning_ts_ns == 200,
+    // conflict_count == 1.
+    let sources_sa2: Vec<Box<dyn G3Source + Send + Sync + 'static>> = vec![
+        Box::new(TestG3Source {
+            id: "old_source".to_owned(),
+            behaviour: TestBehaviour::ReturnObservations(vec![(
+                "login_handler".to_owned(),
+                "uses bcrypt".to_owned(),
+                0.9,
+                100,
+            )]),
+        }),
+        Box::new(TestG3Source {
+            id: "new_source".to_owned(),
+            behaviour: TestBehaviour::ReturnObservations(vec![(
+                "login_handler".to_owned(),
+                "uses argon2".to_owned(),
+                0.7,
+                200,
+            )]),
+        }),
+    ];
+    let outcome_sa2 = execute_g3(q.clone(), sources_sa2, Duration::from_millis(5_000)).await;
+    let merged_sa2 = merge_g3_by_entity(&outcome_sa2.results);
+    assert_eq!(
+        merged_sa2.merged.len(),
+        1,
+        "(SA2) merge must produce exactly 1 entry for `login_handler`; \
+         left: {}, right: 1",
+        merged_sa2.merged.len()
+    );
+    let m_sa2 = &merged_sa2.merged[0];
+    assert_eq!(
+        m_sa2.winning_fact, "uses argon2",
+        "(SA2) newest fact wins on conflict; left: \"{}\", right: \"uses argon2\"",
+        m_sa2.winning_fact
+    );
+    assert_eq!(
+        m_sa2.winning_ts_ns, 200,
+        "(SA2) winning_ts_ns must be 200 (newest); left: {}, right: 200",
+        m_sa2.winning_ts_ns
+    );
+    assert_eq!(
+        m_sa2.conflict_count, 1,
+        "(SA2) conflict_count must be 1 (two distinct facts); left: {}, right: 1",
+        m_sa2.conflict_count
+    );
+
+    // ── SA3 — Highest-confidence-on-agreement ────────────────────────
+    //
+    // Two sources return same entity + same fact with confidences
+    // 0.7 (ts=100) and 0.9 (ts=50).  Merger agreement-cluster winner
+    // is highest confidence; expect winning_confidence == 0.9,
+    // agreement_count == 2, conflict_count == 0.  Confidence beats
+    // temporal when facts agree.
+    let sources_sa3: Vec<Box<dyn G3Source + Send + Sync + 'static>> = vec![
+        Box::new(TestG3Source {
+            id: "low_conf".to_owned(),
+            behaviour: TestBehaviour::ReturnObservations(vec![(
+                "login_handler".to_owned(),
+                "file is in src/auth.rs".to_owned(),
+                0.7,
+                100,
+            )]),
+        }),
+        Box::new(TestG3Source {
+            id: "high_conf".to_owned(),
+            behaviour: TestBehaviour::ReturnObservations(vec![(
+                "login_handler".to_owned(),
+                "file is in src/auth.rs".to_owned(),
+                0.9,
+                50,
+            )]),
+        }),
+    ];
+    let outcome_sa3 = execute_g3(q.clone(), sources_sa3, Duration::from_millis(5_000)).await;
+    let merged_sa3 = merge_g3_by_entity(&outcome_sa3.results);
+    assert_eq!(
+        merged_sa3.merged.len(),
+        1,
+        "(SA3) merge must produce exactly 1 entry for `login_handler`; \
+         left: {}, right: 1",
+        merged_sa3.merged.len()
+    );
+    let m_sa3 = &merged_sa3.merged[0];
+    assert!(
+        (m_sa3.winning_confidence - 0.9).abs() < 1e-9,
+        "(SA3) highest confidence wins on agreement; left: {}, right: 0.9",
+        m_sa3.winning_confidence
+    );
+    assert_eq!(
+        m_sa3.agreement_count, 2,
+        "(SA3) agreement_count must be 2 (both observations agree); \
+         left: {}, right: 2",
+        m_sa3.agreement_count
+    );
+    assert_eq!(
+        m_sa3.conflict_count, 0,
+        "(SA3) conflict_count must be 0 (no conflicting facts); \
+         left: {}, right: 0",
+        m_sa3.conflict_count
+    );
+
+    // ── SA4 — Different-entities-union ───────────────────────────────
+    //
+    // Source A returns entity = "foo"; source B returns entity =
+    // "bar".  Merger emits two entries, one per entity (union).
+    let sources_sa4: Vec<Box<dyn G3Source + Send + Sync + 'static>> = vec![
+        Box::new(TestG3Source {
+            id: "a_src".to_owned(),
+            behaviour: TestBehaviour::ReturnObservations(vec![(
+                "foo".to_owned(),
+                "fact_foo".to_owned(),
+                0.5,
+                100,
+            )]),
+        }),
+        Box::new(TestG3Source {
+            id: "b_src".to_owned(),
+            behaviour: TestBehaviour::ReturnObservations(vec![(
+                "bar".to_owned(),
+                "fact_bar".to_owned(),
+                0.5,
+                100,
+            )]),
+        }),
+    ];
+    let outcome_sa4 = execute_g3(q.clone(), sources_sa4, Duration::from_millis(5_000)).await;
+    let merged_sa4 = merge_g3_by_entity(&outcome_sa4.results);
+    assert_eq!(
+        merged_sa4.merged.len(),
+        2,
+        "(SA4) different-entities-union: merge must produce 2 entries (one \
+         per distinct entity); left: {}, right: 2",
+        merged_sa4.merged.len()
+    );
+    let entities_sa4: Vec<String> = merged_sa4.merged.iter().map(|m| m.entity.clone()).collect();
+    assert!(
+        entities_sa4.contains(&"foo".to_owned()) && entities_sa4.contains(&"bar".to_owned()),
+        "(SA4) merged entities must contain both `foo` and `bar`; \
+         left: {entities_sa4:?}, right: [\"foo\", \"bar\"]"
+    );
+
+    // ── SA5 — Partial-Errored ────────────────────────────────────────
+    //
+    // 1 of 3 sources returns Errored; outcome.results carries exactly
+    // 1 Errored + 2 Available, AND the merger proceeds without
+    // including the errored source's contributions.
+    let sources_sa5: Vec<Box<dyn G3Source + Send + Sync + 'static>> = vec![
+        Box::new(TestG3Source {
+            id: "ok_a".to_owned(),
+            behaviour: TestBehaviour::ReturnObservations(vec![(
+                "ent_a".to_owned(),
+                "fact_a".to_owned(),
+                0.5,
+                100,
+            )]),
+        }),
+        Box::new(TestG3Source {
+            id: "broken".to_owned(),
+            behaviour: TestBehaviour::Error("injected error".to_owned()),
+        }),
+        Box::new(TestG3Source {
+            id: "ok_b".to_owned(),
+            behaviour: TestBehaviour::ReturnObservations(vec![(
+                "ent_b".to_owned(),
+                "fact_b".to_owned(),
+                0.5,
+                100,
+            )]),
+        }),
+    ];
+    let outcome_sa5 = execute_g3(q.clone(), sources_sa5, Duration::from_millis(5_000)).await;
+    let errored_sa5 = outcome_sa5
+        .results
+        .iter()
+        .filter(|r| r.status == G3SourceStatus::Errored)
+        .count();
+    let available_sa5 = outcome_sa5
+        .results
+        .iter()
+        .filter(|r| r.status == G3SourceStatus::Available)
+        .count();
+    assert_eq!(
+        errored_sa5, 1,
+        "(SA5) outcome must contain exactly 1 Errored entry; \
+         left: {errored_sa5}, right: 1"
+    );
+    assert_eq!(
+        available_sa5, 2,
+        "(SA5) outcome must contain exactly 2 Available entries; \
+         left: {available_sa5}, right: 2"
+    );
+    let merged_sa5 = merge_g3_by_entity(&outcome_sa5.results);
+    assert_eq!(
+        merged_sa5.merged.len(),
+        2,
+        "(SA5) merger must proceed without errored source's contributions; \
+         left: {}, right: 2",
+        merged_sa5.merged.len()
+    );
+    let merged_sources_sa5: Vec<String> = merged_sa5
+        .merged
+        .iter()
+        .map(|m| m.winning_source_id.clone())
+        .collect();
+    assert!(
+        !merged_sources_sa5.contains(&"broken".to_owned()),
+        "(SA5) merged output must NOT include the errored source's \
+         winning_source_id; left: {merged_sources_sa5:?}, right: [no `broken`]"
+    );
+
+    // ── SA6 — Partial-TimedOut ───────────────────────────────────────
+    //
+    // 1 of 3 sources LongSleep(6 s) > G3_PER_SOURCE_DEADLINE = 4.5 s.
+    // outcome.results carries exactly 1 TimedOut + 2 Available.
+    // wall_elapsed_ms < 5500 ms (per-source 4.5 s ceiling fires
+    // before master 5 s).
+    let sources_sa6: Vec<Box<dyn G3Source + Send + Sync + 'static>> = vec![
+        Box::new(TestG3Source {
+            id: "fast_a".to_owned(),
+            behaviour: TestBehaviour::ReturnObservations(vec![(
+                "ent_a".to_owned(),
+                "fact_a".to_owned(),
+                0.5,
+                100,
+            )]),
+        }),
+        Box::new(TestG3Source {
+            id: "slow".to_owned(),
+            behaviour: TestBehaviour::LongSleep(Duration::from_secs(6)),
+        }),
+        Box::new(TestG3Source {
+            id: "fast_b".to_owned(),
+            behaviour: TestBehaviour::ReturnObservations(vec![(
+                "ent_b".to_owned(),
+                "fact_b".to_owned(),
+                0.5,
+                100,
+            )]),
+        }),
+    ];
+    let outcome_sa6 = execute_g3(q.clone(), sources_sa6, Duration::from_millis(5_000)).await;
+    let timed_out_sa6 = outcome_sa6
+        .results
+        .iter()
+        .filter(|r| r.status == G3SourceStatus::TimedOut)
+        .count();
+    let available_sa6 = outcome_sa6
+        .results
+        .iter()
+        .filter(|r| r.status == G3SourceStatus::Available)
+        .count();
+    assert_eq!(
+        timed_out_sa6, 1,
+        "(SA6) outcome must contain exactly 1 TimedOut entry; \
+         left: {timed_out_sa6}, right: 1"
+    );
+    assert_eq!(
+        available_sa6, 2,
+        "(SA6) outcome must contain exactly 2 Available entries; \
+         left: {available_sa6}, right: 2"
+    );
+    assert!(
+        outcome_sa6.wall_elapsed_ms < 5_500,
+        "(SA6) wall_elapsed_ms must be < 5500 ms (per-source {} ms ceiling \
+         fires before master 5000 ms); left: {}, right: 5500",
+        G3_PER_SOURCE_DEADLINE.as_millis(),
+        outcome_sa6.wall_elapsed_ms
+    );
+    assert!(
+        !outcome_sa6.master_timed_out,
+        "(SA6) master_timed_out must be false — per-source ceiling fires \
+         first; left: true, right: false"
+    );
+
+    // ── SA7 — Master-deadline-trip ───────────────────────────────────
+    //
+    // master_deadline = 100 ms, all 3 sources Sleep(7 s, ...).  Master
+    // deadline fires before per-source.  outcome.master_timed_out ==
+    // true, wall_elapsed_ms < 2000 ms.
+    //
+    // Compatible with the unconditional-const per-source deadline: the
+    // per-source CONST never gets shortened to master_deadline (per
+    // WO-0068 lessons-learned For planner #3), so the master timer
+    // wins deterministically when master_deadline (100 ms) is much
+    // smaller than G3_PER_SOURCE_DEADLINE (4500 ms).
+    let sources_sa7: Vec<Box<dyn G3Source + Send + Sync + 'static>> = vec![
+        Box::new(TestG3Source {
+            id: "stall_a".to_owned(),
+            behaviour: TestBehaviour::Sleep(
+                Duration::from_secs(7),
+                vec![("ent_a".to_owned(), "fact_a".to_owned(), 0.5, 100)],
+            ),
+        }),
+        Box::new(TestG3Source {
+            id: "stall_b".to_owned(),
+            behaviour: TestBehaviour::Sleep(
+                Duration::from_secs(7),
+                vec![("ent_b".to_owned(), "fact_b".to_owned(), 0.5, 100)],
+            ),
+        }),
+        Box::new(TestG3Source {
+            id: "stall_c".to_owned(),
+            behaviour: TestBehaviour::Sleep(
+                Duration::from_secs(7),
+                vec![("ent_c".to_owned(), "fact_c".to_owned(), 0.5, 100)],
+            ),
+        }),
+    ];
+    let outcome_sa7 = execute_g3(q.clone(), sources_sa7, Duration::from_millis(100)).await;
+    assert!(
+        outcome_sa7.master_timed_out,
+        "(SA7) master_timed_out must be true on tight 100 ms master with \
+         7 s sleepers; left: false, right: true"
+    );
+    assert!(
+        outcome_sa7.wall_elapsed_ms < 2_000,
+        "(SA7) master deadline trips before per-source — wall_elapsed_ms \
+         must be < 2000 ms; left: {}, right: 2000",
+        outcome_sa7.wall_elapsed_ms
+    );
+    assert_eq!(
+        outcome_sa7.results.len(),
+        3,
+        "(SA7) master-trip path must synthesise placeholders for all 3 \
+         sources; left: {}, right: 3",
+        outcome_sa7.results.len()
+    );
+    for r in &outcome_sa7.results {
+        assert_eq!(
+            r.status,
+            G3SourceStatus::TimedOut,
+            "(SA7) every placeholder must carry G3SourceStatus::TimedOut; \
+             left: {:?}, right: TimedOut",
+            r.status
+        );
+    }
+
+    // ── SA8 — Empty-source ───────────────────────────────────────────
+    //
+    // Zero observations across all sources → merger returns empty
+    // G3MergeOutcome { merged: vec![], total_observations_in: 0,
+    // total_entities_out: 0 }.
+    let sources_sa8: Vec<Box<dyn G3Source + Send + Sync + 'static>> = vec![
+        Box::new(TestG3Source {
+            id: "empty_a".to_owned(),
+            behaviour: TestBehaviour::Empty,
+        }),
+        Box::new(TestG3Source {
+            id: "empty_b".to_owned(),
+            behaviour: TestBehaviour::Empty,
+        }),
+    ];
+    let outcome_sa8 = execute_g3(q.clone(), sources_sa8, Duration::from_millis(5_000)).await;
+    let merged_sa8 = merge_g3_by_entity(&outcome_sa8.results);
+    assert!(
+        merged_sa8.merged.is_empty(),
+        "(SA8) empty-source: merged must be empty; left: {} entries, right: 0",
+        merged_sa8.merged.len()
+    );
+    assert_eq!(
+        merged_sa8.total_observations_in, 0,
+        "(SA8) empty-source: total_observations_in must be 0; left: {}, right: 0",
+        merged_sa8.total_observations_in
+    );
+    assert_eq!(
+        merged_sa8.total_entities_out, 0,
+        "(SA8) empty-source: total_entities_out must be 0; left: {}, right: 0",
+        merged_sa8.total_entities_out
+    );
+}

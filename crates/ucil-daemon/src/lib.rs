@@ -156,6 +156,7 @@
 pub mod branch_manager;
 pub mod executor;
 pub mod g2_search;
+pub mod g3;
 pub mod lancedb_indexer;
 pub mod lifecycle;
 pub mod plugin_manager;
@@ -185,6 +186,8 @@ pub use branch_manager::{BranchManager, BranchManagerError, BranchTableInfo, cod
 pub use executor::{enrich_find_definition, execute_g1, fuse_g1, Caller, EnrichedFindDefinition, ExecutorError, G1Conflict, G1FusedEntry, G1FusedLocation, G1FusedOutcome, G1FusionEntry, G1Outcome, G1Query, G1Source, G1ToolKind, G1ToolOutput, G1ToolStatus, HoverDoc, HoverFetchError, HoverSource, IngestPipeline, SerenaHoverClient, G1_MASTER_DEADLINE, G1_PER_SOURCE_DEADLINE, SOURCE_TOOL, TREE_SITTER_VALID_FROM};
 #[rustfmt::skip]
 pub use g2_search::{G2SearchError, G2SourceFactory, G2SourceProvider, LancedbProvider, ProbeProvider, RipgrepProvider};
+#[rustfmt::skip]
+pub use g3::{execute_g3, merge_g3_by_entity, G3FactObservation, G3MergeOutcome, G3MergedFact, G3Outcome, G3Query, G3Source, G3SourceOutput, G3SourceStatus, G3_MASTER_DEADLINE, G3_PER_SOURCE_DEADLINE};
 #[rustfmt::skip]
 pub use lancedb_indexer::{ChunkIndexerError, CodeRankEmbeddingSource, EmbeddingSource, EmbeddingSourceError, IndexerHandle, IndexerState, IndexerStats, LancedbChunkIndexer};
 #[rustfmt::skip]

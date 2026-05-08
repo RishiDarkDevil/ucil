@@ -1,65 +1,12 @@
 # Coverage Gate — ucil-daemon
 
 - **Verdict**: FAIL
-- **Min line coverage**: 85%
-- **Min branch coverage**: 75%
-- **Generated**: 2026-05-08T00:15:39Z
+- **Min line coverage**: 80%
+- **Min branch coverage**: 70%
+- **Generated**: 2026-05-08T01:39:45Z
 
-## Summary
-
-| Metric       | Value |
-|--------------|-------|
-| Line         | 0% (floor 85%) |
-| Branch       | _unavailable (toolchain)_ |
-
-## Raw JSON
+`cargo llvm-cov report` failed after profraw prune. Tail of log:
 
 ```
-{
-  "branches": {
-    "count": 0,
-    "covered": 0,
-    "notcovered": 0,
-    "percent": 0
-  },
-  "functions": {
-    "count": 0,
-    "covered": 0,
-    "percent": 0
-  },
-  "instantiations": {
-    "count": 0,
-    "covered": 0,
-    "percent": 0
-  },
-  "lines": {
-    "count": 0,
-    "covered": 0,
-    "percent": 0
-  },
-  "mcdc": {
-    "count": 0,
-    "covered": 0,
-    "notcovered": 0,
-    "percent": 0
-  },
-  "regions": {
-    "count": 0,
-    "covered": 0,
-    "notcovered": 0,
-    "percent": 0
-  }
-}
+error: failed to merge profile data: not found *.profraw files in /home/rishidarkdevil/Desktop/ucil-wt/WO-0070/target; this may occur if target directory is accidentally cleared, or running report subcommand without running any tests or binaries
 ```
-
-## Failures
-
-
-- Line coverage 0% < floor 85% (delta: 85pp).
-
-## Why this is failing
-
-Coverage below the floor means code paths exist that no test ever
-exercises. Combine this with mutation-gate: if a new file has 95% line
-coverage but 40% mutation score, the tests run the lines without
-asserting on their effects. Address both dimensions.
