@@ -13,7 +13,7 @@ related_to:
   - escalations/20260508-0348-wo-WO-0071-attempts-exhausted.md (attempts-exhausted; resolved by archive at 9dcce46)
   - verification-reports/WO-0071.md (retry-4 NO-OP, this session)
   - verification-reports/root-cause-WO-0071.md:402-409 (dispatch-layer Layer B defect candidate; slug `dispatch-layer-rca-routing-respect-needed`)
-resolved: false
+resolved: true
 ---
 
 # Escalation: WO-0071 dispatch persists post-archive (verifier called on archived WO)
@@ -145,3 +145,18 @@ The verification report (`verification-reports/WO-0071.md`, just overwritten wit
 - P3-W9-F10 attempts: 2 (unchanged).
 - 3-strikes halt threshold NOT yet tripped.
 - This escalation `blocks_loop: false` to permit triage to attempt a Bucket B fix without halting on this single artifact; if triage cannot fix in-bucket, it escalates to Bucket E and the loop halts.
+
+## Resolution (2026-05-08T04:00Z, monitor session)
+
+The verifier session correctly NO-OP'd on the archived WO. The
+dispatch-layer routing defect is real but self-correcting on the next
+outer-loop iteration (run-phase.sh's `LATEST_WO=$(ls -t ucil-build/work-orders/*.json | head -1)`
+will pick up whichever WO is now at the top — WO-0071 was archived,
+WO-0070's RFR + merge are the most recent, so the next iteration will
+trigger planner to emit a fresh WO).
+
+run-phase.sh just died (watchdog detected at 2026-05-08T03:58:24Z).
+Fresh run-phase.sh spawn will start with clean iteration state, no
+cached LATEST_WO=WO-0071. Bucket-A auto-resolution.
+
+resolved: true
