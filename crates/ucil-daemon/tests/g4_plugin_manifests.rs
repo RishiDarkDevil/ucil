@@ -1,11 +1,16 @@
 //! End-to-end integration tests for the on-disk codegraphcontext G4
-//! (Architecture) plugin manifest (P3-W9-F08).
+//! (Architecture) plugin manifest (P3-W9-F08) AND the parse-only
+//! dependency-cruiser G4 manifest (P3-W10-F14, WO-0086).
 //!
-//! Each test loads the on-disk manifest at
+//! Each MCP-server test loads the on-disk manifest at
 //! `plugins/architecture/<name>/plugin.toml`, drives the manifest's
 //! `transport.command` as a real subprocess via
 //! [`ucil_daemon::PluginManager::health_check_with_timeout`], and
 //! asserts the live `tools/list` reply contains an expected tool name.
+//! The parse-only `dependency_cruiser_manifest_parses` test (DEC-0009
+//! declarative-sentinel transport) only asserts the manifest's static
+//! shape — dep-cruiser is a CLI tool, not an MCP server, so spawning
+//! `depcruise --version` would not yield JSON-RPC.
 //!
 //! Mocking `tokio::process::Command`, the spawned MCP server, or the
 //! JSON-RPC dialogue is forbidden — the WO-0069 contract carried by
@@ -151,6 +156,62 @@ mod g4_plugin_manifests {
                 .any(|t| t == "analyze_code_relationships"),
             "expected `analyze_code_relationships` tool in advertised set, got: {:?}",
             health.tools,
+        );
+    }
+
+    // DEC-0009 (search-code-in-process-ripgrep, generalised): dependency-
+    // cruiser is a CLI invocation, not an MCP server. The `[transport]`
+    // table is a declarative sentinel that satisfies the `PluginManifest`
+    // schema but is never spawned. This test is therefore PARSE-ONLY —
+    // calling `PluginManager::health_check` here would spawn
+    // `depcruise --version`, which exits without speaking JSON-RPC and
+    // would (correctly) fail. The runtime path for `architecture.dependency`
+    // queries against dep-cruiser is `tokio::process::Command::new("depcruise")`
+    // directly (see scripts/verify/P3-W10-F14.sh for the smoke harness).
+    #[test]
+    fn dependency_cruiser_manifest_parses() {
+        let manifest = PluginManifest::from_path(
+            repo_root().join("plugins/architecture/dependency-cruiser/plugin.toml"),
+        )
+        .expect("dependency-cruiser manifest must parse cleanly");
+
+        assert_eq!(
+            manifest.plugin.name, "dependency-cruiser",
+            "(SA1) plugin.name must equal dependency-cruiser; observed {:?}",
+            manifest.plugin.name,
+        );
+        assert!(
+            manifest
+                .capabilities
+                .provides
+                .contains(&"architecture.dependency".to_string()),
+            "(SA2) capabilities.provides must include architecture.dependency; observed {:?}",
+            manifest.capabilities.provides,
+        );
+        assert!(
+            manifest
+                .capabilities
+                .languages
+                .contains(&"javascript".to_string())
+                && manifest
+                    .capabilities
+                    .languages
+                    .contains(&"typescript".to_string()),
+            "(SA3) capabilities.languages must include javascript and typescript; observed {:?}",
+            manifest.capabilities.languages,
+        );
+        assert_eq!(
+            manifest.transport.kind, "stdio",
+            "(SA4) transport.type must be stdio (declarative sentinel per DEC-0009); observed {:?}",
+            manifest.transport.kind,
+        );
+        let lifecycle = manifest
+            .lifecycle
+            .as_ref()
+            .expect("(SA5) dependency-cruiser manifest must declare a [lifecycle] section");
+        assert!(
+            !lifecycle.hot_cold,
+            "(SA6) lifecycle.hot_cold must be false (dep-cruiser is per-query spawn-and-exit); observed true",
         );
     }
 }

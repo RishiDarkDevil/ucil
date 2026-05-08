@@ -1,0 +1,63 @@
+# Zoekt plugin manifest (master-plan §14.1 category = "search").
+#
+# Pinned 2026-05-09: Zoekt commit 2a1cee1ac057de4d43c0ce316b11fd3648c9ee25 # gitleaks:allow
+#   source           : https://github.com/sourcegraph/zoekt
+#   binary launch    : `zoekt-index` (build trigram index) +
+#                      `zoekt` (query) — both Go binaries on system PATH;
+#                      NO MCP server. Master-plan §17 line 1675 places
+#                      this manifest under `plugins/search/zoekt/`.
+#   capability       : `search.text` — multi-repo trigram-indexed text
+#                      search complementing ripgrep at scale (master-plan
+#                      §4.2 line 300 — Zoekt P1).
+#
+# DEC-0009 (search-code-in-process-ripgrep, generalised): Zoekt is an
+# external-service / CLI tool, NOT an MCP server. The runtime path is
+# `zoekt-index` (offline indexer) + `zoekt` (query) directly via
+# `tokio::process::Command::new("zoekt")` (a future WO will wire
+# `ZoektG2Source` against the G2 executor). This manifest exists as
+# DECLARATIVE METADATA so the planning layer can enumerate Zoekt as a
+# `search.text` provider alongside ripgrep, ast-grep, and probe.
+#
+# Note on transport sentinel: Zoekt is in fact HTTP API per master-plan
+# §4.2 (a `zoekt-webserver` daemon serving a query frontend), but the
+# `[transport]` section schema requires `type` + `command`. The fields
+# below (`type = "stdio"`, `command = "zoekt"`, `args = ["--help"]`)
+# parse cleanly through `PluginManifest::from_path` but are NEVER spawned
+# as an MCP server. The runtime invocation pathway is via the `zoekt`
+# CLI binary (which queries an in-process trigram index built by
+# `zoekt-index`), NOT via stdio JSON-RPC. UCIL does not currently start
+# the `zoekt-webserver` daemon — index storage is per-query via the
+# `zoekt` CLI in offline mode (master-plan §17).
+#
+# Skip env-var convention: scripts/verify/P3-W10-F15.sh introduces the
+# search-group skip env-var `UCIL_SKIP_SEARCH_PLUGIN_E2E` (parallel to
+# `UCIL_SKIP_ARCHITECTURE_PLUGIN_E2E` from WO-0072 and
+# `UCIL_SKIP_QUALITY_PLUGIN_E2E` from WO-0080). One env-var per plugin
+# group; verifier MUST NOT set it.
+#
+# Reproducibility: sourcegraph/zoekt does not cut formal semver release
+# tags (verified 2026-05-09 via `gh api repos/sourcegraph/zoekt/tags`
+# returning empty). The version above is pinned to a 7+ char commit-SHA
+# from `git ls-remote https://github.com/sourcegraph/zoekt main` /
+# `https://github.com/sourcegraph/zoekt/commit/<sha>` captured at
+# WO-execution time. Floating refs (`@main`, `@master`, `@HEAD`) are
+# forbidden per .claude/rules/commit-style.md and master-plan §13.
+# Bump in a new ADR when upstream cuts a meaningful breaking change.
+
+[plugin]
+name = "zoekt"
+version = "2a1cee1ac057de4d43c0ce316b11fd3648c9ee25" # gitleaks:allow
+description = "Trigram-indexed search for multi-repo scale; HTTP API per master-plan §4.2; in-process per DEC-0009 (manifest is metadata)."
+
+[capabilities]
+provides = ["search.text"]
+languages = []
+
+[transport]
+type = "stdio"
+command = "zoekt"
+args = ["--help"]
+
+[lifecycle]
+hot_cold = false
+idle_timeout_minutes = 0

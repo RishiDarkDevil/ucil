@@ -27,9 +27,12 @@
 //! `scope_in`.
 //!
 //! Tests are wrapped in `mod plugin_manifests` so nextest reports them
-//! as `plugin_manifests::ast_grep_manifest_health_check` and
-//! `plugin_manifests::probe_manifest_health_check`, matching the
-//! WO-0044 acceptance selectors. Same wrapper pattern as the existing
+//! as `plugin_manifests::ast_grep_manifest_health_check`,
+//! `plugin_manifests::probe_manifest_health_check`,
+//! `plugin_manifests::ripgrep_manifest_parses` (parse-only per DEC-0009),
+//! and `plugin_manifests::zoekt_manifest_parses` (parse-only per DEC-0009;
+//! WO-0086 / P3-W10-F15), matching the WO-0044 / WO-0051 / WO-0086
+//! acceptance selectors. Same wrapper pattern as the existing
 //! `mod plugin_manager` block in `tests/plugin_manager.rs:21`
 //! (DEC-0007 frozen-selector module-root placement).
 
@@ -189,6 +192,54 @@ mod plugin_manifests {
         assert!(
             !lifecycle.hot_cold,
             "lifecycle.hot_cold must be false (ripgrep is per-query spawn-and-exit); observed true",
+        );
+    }
+
+    // DEC-0009 (search-code-in-process-ripgrep, generalised): Zoekt is an
+    // external-service / CLI tool, NOT an MCP server. The manifest's
+    // [transport] table is a declarative sentinel that satisfies the
+    // `PluginManifest` schema but is never spawned. This test is therefore
+    // PARSE-ONLY — calling `PluginManager::health_check` here would spawn
+    // `zoekt --help`, which exits without speaking JSON-RPC and would
+    // (correctly) fail. The runtime path for `search.text` queries against
+    // Zoekt is `zoekt-index` (offline indexer) + `zoekt` CLI directly
+    // (see scripts/verify/P3-W10-F15.sh for the smoke harness).
+    #[test]
+    fn zoekt_manifest_parses() {
+        let manifest =
+            PluginManifest::from_path(repo_root().join("plugins/search/zoekt/plugin.toml"))
+                .expect("zoekt manifest must parse cleanly");
+
+        assert_eq!(
+            manifest.plugin.name, "zoekt",
+            "(SA1) plugin.name must equal zoekt; observed {:?}",
+            manifest.plugin.name,
+        );
+        assert!(
+            manifest
+                .capabilities
+                .provides
+                .contains(&"search.text".to_string()),
+            "(SA2) capabilities.provides must include search.text; observed {:?}",
+            manifest.capabilities.provides,
+        );
+        assert!(
+            manifest.capabilities.languages.is_empty(),
+            "(SA3) capabilities.languages must be empty (zoekt is language-agnostic trigram); observed {:?}",
+            manifest.capabilities.languages,
+        );
+        assert_eq!(
+            manifest.transport.kind, "stdio",
+            "(SA4) transport.type must be stdio (declarative sentinel per DEC-0009); observed {:?}",
+            manifest.transport.kind,
+        );
+        let lifecycle = manifest
+            .lifecycle
+            .as_ref()
+            .expect("(SA5) zoekt manifest must declare a [lifecycle] section");
+        assert!(
+            !lifecycle.hot_cold,
+            "(SA6) lifecycle.hot_cold must be false (zoekt index queries are per-call from UCIL's planner); observed true",
         );
     }
 }
