@@ -2,7 +2,7 @@
 id: 20260508T1435Z-wo-0081-dec-0024-tool-surface-mismatch
 date: 2026-05-08T14:35Z
 authored_by: WO-0081 executor
-blocks_loop: true
+blocks_loop: false
 severity: high
 requires_planner_action: true
 requires_user_action: true
@@ -133,4 +133,24 @@ re-work — the executor will land:
 - New test pinning on `run_tests` (the upstream literal) AND on
   framework enum coverage `>=6` instead of tool count `>=6`.
 
-resolved: false
+resolved: true
+
+## Resolution (2026-05-08T14:50Z, monitor session, user-authorized)
+
+**Option A accepted.** Authored DEC-0025 (`ucil-build/decisions/DEC-0025-correct-test-runner-mcp-tool-surface.md`)
+which amends DEC-0024 with the corrected source data:
+
+- Manifest target: `@iflow-mcp/mcp-test-runner@0.2.1` (SHA `d6ccbd99...`)
+- Plugin name: `test-runner` (matches `serverInfo.name`)
+- AC #4 amended: assert `run_tests` advertised AND framework enum ≥ 6
+  values from the canonical set, instead of `tools.len() >= 6`
+
+WO-0081's current JSON still references DEC-0024's incorrect ACs — it
+will be archived so the planner re-emits a fresh WO with DEC-0025-corrected
+scope on the next iteration.
+
+The executor's empirical work was exemplary. The "live-capture-before-
+implement" pattern caught two material errors at zero cost. This pattern
+should be applied to all future manifest-revival WOs.
+
+resolved: true
