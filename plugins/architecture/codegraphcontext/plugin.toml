@@ -1,0 +1,122 @@
+# CodeGraphContext MCP plugin manifest (master-plan §14.1 category = "architecture").
+#
+# pinned 2026-05-08: codegraphcontext v0.4.7 (Shashankss1205/CodeGraphContext)
+#   source          : https://github.com/Shashankss1205/CodeGraphContext
+#   pypi package    : https://pypi.org/project/codegraphcontext/
+#   pinned tag      : 0.4.7 — pypi `latest` published 2026-04 by upstream
+#                     maintainer (MIT license; canonical Python MCP server
+#                     for the dependency-graph + blast-radius feature).
+#   binary launch   : `uvx --with falkordblite codegraphcontext@0.4.7 mcp start`
+#                     — `uvx` (from Astral uv >= 0.4) installs the pinned
+#                     pypi package into an ephemeral isolated env and
+#                     runs the `codegraphcontext` console-script entry-
+#                     point with the `mcp start` subcommand. The `--with
+#                     falkordblite` is load-bearing: bare
+#                     `uvx codegraphcontext@0.4.7 mcp start` errors out
+#                     asking for `pip install falkordblite` because the
+#                     server reads `~/.codegraphcontext/.env` for its
+#                     embedded FalkorDB-Lite store; uvx isolation needs
+#                     the dep declared explicitly so it's available in
+#                     the ephemeral env. Embedded FalkorDB-Lite means
+#                     NO external Redis/FalkorDB container is required
+#                     for tools/list — server runs entirely local.
+#   advertised tools: add_code_to_graph, check_job_status, list_jobs,
+#                     find_code, analyze_code_relationships,
+#                     watch_directory, execute_cypher_query,
+#                     add_package_to_graph, find_dead_code,
+#                     calculate_cyclomatic_complexity,
+#                     find_most_complex_functions,
+#                     list_indexed_repositories, delete_repository,
+#                     visualize_graph_query, list_watched_paths,
+#                     unwatch_directory, load_bundle,
+#                     search_registry_bundles, get_repository_stats,
+#                     discover_codegraph_contexts, switch_context,
+#                     generate_report, find_java_spring_endpoints,
+#                     find_java_spring_beans, find_datasource_nodes
+#                     (25 total — verified end-to-end via
+#                     PluginManager::health_check; see
+#                     crates/ucil-daemon/tests/g4_plugin_manifests.rs).
+#                     Master-plan §4.4 line 326 claims "14 languages"
+#                     for CodeGraphContext; the upstream binary supports
+#                     a broader language set today and the assertion in
+#                     the integration test is pinned on a specific tool
+#                     name (`analyze_code_relationships`) rather than
+#                     count or language list, mirroring the WO-0069
+#                     codebase-memory + mem0 rationale (count / language
+#                     drifts on benign upstream additions; tool-name
+#                     pin surfaces real tool-surface drift loudly).
+#   transport       : stdio (master-plan §13; no HTTP in Phase 3).
+#   API keys        : NONE required for `tools/list` and the indexing/
+#                     query ops — processing is entirely local with
+#                     embedded FalkorDB-Lite. No OpenAI / Anthropic
+#                     key needed (mirrors codebase-memory in this
+#                     respect; unlike mem0's MEM0_API_KEY contract
+#                     for tool invocations).
+#
+# Establishing the `architecture.*` capability namespace: parallel to
+# `search.*` (probe; P2-W6-F06), `navigate.*` (scip; P2-W7-F08), and
+# `knowledge.*` (codebase-memory; P3-W9-F05 + mem0; P3-W9-F06). G4
+# Architecture sources advertise capabilities under the `architecture.*`
+# prefix; subsequent G4 plugins (gitnexus, dep-cruiser, axon, deptry,
+# nx, bazel — see master-plan §14.1 line 1677) follow the same
+# convention. CodeGraphContext is the first G4 source landing under
+# this namespace and establishes the dependency-graph + blast-radius
+# vocabulary for future G4 plugins to extend.
+#
+# G4 Architecture source per master-plan §5.4 lines 477-499 — the G4
+# group queries all architecture stores, takes the union of results,
+# and the agent synthesizes the final view (mirroring G3's
+# parallel-then-merge pattern but with set-union rather than temporal
+# priority). CodeGraphContext sits at master-plan §4.4 line 326 as
+# P0 priority — the canonical first G4 plugin to land. Future G4
+# entries (deptry, dep-cruiser for npm; gitnexus for diff impact; nx,
+# bazel for build graphs) extend the architecture.* namespace.
+#
+# Reproducibility: a moving `latest` or branch ref is deliberately
+# avoided per .claude/rules/commit-style.md. The pypi package version
+# is pinned to an immutable release tag so the manifest produces
+# byte-identical health checks across CI machines and operator
+# workstations. When upstream cuts a v0.5.x with breaking tool-surface
+# changes, supersede this manifest in a new ADR and bump the pin.
+
+[plugin]
+name = "codegraphcontext"
+version = "0.4.7"
+description = "Code dependency graph + blast-radius analysis. MIT license. G4 source per master-plan §4.4 line 326 + §5.4."
+
+[capabilities]
+provides = [
+    "architecture.dependency_graph",
+    "architecture.blast_radius",
+]
+languages = [
+    "python",
+    "javascript",
+    "typescript",
+    "rust",
+    "go",
+    "java",
+    "c",
+    "cpp",
+    "ruby",
+    "php",
+    "csharp",
+    "kotlin",
+    "scala",
+    "swift",
+]
+
+[transport]
+type = "stdio"
+command = "uvx"
+args = [
+    "--with",
+    "falkordblite",
+    "codegraphcontext@0.4.7",
+    "mcp",
+    "start",
+]
+
+[lifecycle]
+hot_cold = true
+idle_timeout_minutes = 10
