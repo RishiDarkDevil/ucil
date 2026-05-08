@@ -14,6 +14,7 @@ pub mod incremental;
 pub mod knowledge_graph;
 pub mod otel;
 pub mod schema_migration;
+pub mod tier_merger;
 pub mod types;
 
 /// Crate version, identical to the `Cargo.toml` package version.

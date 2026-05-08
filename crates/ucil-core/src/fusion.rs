@@ -654,6 +654,250 @@ pub fn classify_query(tool_name: &str, reason_keywords: &[&str]) -> ClassifierOu
     }
 }
 
+// ── Conflict resolution (P3-W10-F10) ──────────────────────────────────────────
+//
+// Master-plan §18 Phase 3 Week 10 deliverable #4 (line 1811):
+//
+// > "Conflict resolution: agent-based with source authority as soft guidance"
+//
+// The agent layer (a `ConflictMediator` LLM agent, Phase 3.5+) consumes the
+// deterministic [`resolve_conflict`] surface as its input — when the
+// deterministic resolver returns [`ConflictResolution::Resolved`] there is
+// nothing for the agent to mediate; when it returns
+// [`ConflictResolution::Unresolvable`] the agent layer reads the
+// retained candidate slate and picks the winner with semantic context the
+// deterministic resolver lacks.
+//
+// The source-authority hierarchy `LSP/AST > SCIP > KG > text` (master-plan
+// §18 line 1811) is implemented as a `#[derive(Ord)]`-able enum where the
+// LOWEST discriminant is the MOST authoritative source.  Determinism + the
+// `min()` reduction does the work; no tracing, no IO, no async.
+//
+// Production-side wiring of this resolver into the daemon's response-
+// assembly pipeline is OUT OF SCOPE for this WO (deferred to the consumer
+// WO that lands the F09 quality-maximalist response assembly + F11 bonus-
+// context selector — both of which depend on F01 Aider repo-map first).
+
+/// Source-authority hierarchy for conflict resolution per master-plan §18
+/// Phase 3 Week 10 deliverable #4 (line 1811): "LSP/AST > SCIP > KG > text".
+///
+/// The discriminant order is `LspAst = 0` < `Scip = 1` < `Kg = 2` <
+/// `Text = 3` so the natural derived `Ord` produces
+/// `LspAst < Scip < Kg < Text` — the LOWEST discriminant is the MOST
+/// authoritative source.  The [`resolve_conflict`] reducer uses
+/// `.iter().map(|c| c.source).min()` to pick the highest-priority tier;
+/// inverting the discriminant order would silently invert the precedence
+/// (the M1 verifier mutation exercises exactly this failure mode).
+///
+/// `Copy` is sound — the enum carries no fields.  The hash + comparison
+/// derives are cheap and let downstream consumers index into a
+/// `BTreeMap<SourceAuthority, _>` if they need to bin candidates by tier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum SourceAuthority {
+    /// LSP/AST tier — the most authoritative source (semantic compiler-
+    /// grade signal: LSP `textDocument/definition`, tree-sitter AST nodes,
+    /// rust-analyzer symbol resolution).
+    LspAst,
+    /// SCIP tier — symbol-coverage-information-protocol indexes that
+    /// pre-compute cross-file reference graphs.  Slightly less
+    /// authoritative than live LSP/AST because SCIP indexes can lag
+    /// behind in-flight edits.
+    Scip,
+    /// Knowledge-graph tier — the cold-tier curated facts persisted in
+    /// `memory.db`.  Authoritative for high-level architecture +
+    /// convention claims but lower-trust than compiler signal for raw
+    /// symbol resolution.
+    Kg,
+    /// Plain-text tier — ripgrep / Probe / regex matches on raw file
+    /// content.  The lowest-authority tier — text matches drive search
+    /// candidates but never override structural signal.
+    Text,
+}
+
+/// One candidate in a conflict-resolution input slate.
+///
+/// `value` is the candidate payload (the disputed field — typically a
+/// symbol name, a file path, a definition location, …).  `source` is the
+/// candidate's [`SourceAuthority`] tier.  `confidence` is the candidate-
+/// originating tier's self-reported certainty in `[0.0, 1.0]` — used by
+/// [`resolve_conflict`] only as the tie-break within a single tier (a
+/// higher-authority tier with low confidence still beats a lower-
+/// authority tier with high confidence per master-plan §18 line 1811's
+/// "source authority as soft guidance" hierarchy).
+///
+/// The struct is generic over `T` so the same surface fits any
+/// disputed-payload shape — `&'static str` in the frozen test, more
+/// elaborate in the daemon-side consumer.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConflictCandidate<T> {
+    /// The disputed payload value.
+    pub value: T,
+    /// The candidate's source-authority tier.
+    pub source: SourceAuthority,
+    /// The candidate-originating tier's self-reported confidence in
+    /// `[0.0, 1.0]`.
+    pub confidence: f64,
+}
+
+/// Result of [`resolve_conflict`] over a slate of candidates.
+///
+/// `Resolved` carries the winning value + winning source + winning
+/// confidence — the deterministic resolver could pick a single dominant
+/// candidate.
+///
+/// `Unresolvable` carries the FULL retained candidate slate (NOT just the
+/// tied-top-tier subset — lower-tier candidates are preserved so the
+/// downstream agent-mediator surface can read the full slate).  The
+/// `reason` is a short human-readable string ("empty input" / "tied at
+/// tier {source:?}") naming WHY the deterministic resolver could not
+/// pick a winner.  The agent-mediator (Phase 3.5+) reads `Unresolvable`
+/// and consumes its semantic context to break the tie.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConflictResolution<T> {
+    /// The resolver picked a single dominant candidate.
+    Resolved {
+        /// The winning value.
+        value: T,
+        /// The winning candidate's source tier.
+        source: SourceAuthority,
+        /// The winning candidate's confidence.
+        confidence: f64,
+    },
+    /// The resolver could not pick a single winner — the retained
+    /// candidate slate is forwarded to the agent-mediator surface.
+    Unresolvable {
+        /// The retained candidate slate (preserves all input candidates
+        /// including lower-tier candidates).
+        candidates: Vec<ConflictCandidate<T>>,
+        /// Short human-readable reason naming why resolution failed.
+        reason: String,
+    },
+}
+
+/// Resolve a slate of [`ConflictCandidate`]s by source-authority hierarchy.
+///
+/// Implements feature `P3-W10-F10` per master-plan §18 Phase 3 Week 10
+/// deliverable #4 (line 1811): "LSP/AST > SCIP > KG > text".  Issued by
+/// `WO-0084`.
+///
+/// Algorithm:
+///
+/// 1. **Empty input** → [`ConflictResolution::Unresolvable`] with empty
+///    `candidates` and `reason = "empty input"`.
+/// 2. **Single candidate** → [`ConflictResolution::Resolved`] with that
+///    candidate's value/source/confidence.
+/// 3. **Multi-candidate** → find the highest-priority [`SourceAuthority`]
+///    (smallest discriminant); collect all candidates at that priority.
+///    - If they all carry the same `value` (per `T: PartialEq`) →
+///      [`ConflictResolution::Resolved`] with the highest-confidence
+///      member of the tied-tier subset.
+///    - If values differ at the top tier →
+///      [`ConflictResolution::Unresolvable`] with the FULL input slate
+///      retained (lower-tier candidates included) and `reason` of the
+///      form `"tied at tier {top_source:?}"`.
+///
+/// Authority-precedence dominates raw confidence: a `LspAst` candidate
+/// with `confidence = 0.5` BEATS a `Text` candidate with
+/// `confidence = 0.99` per master-plan §18 line 1811 ("source authority
+/// as soft guidance" — soft for the agent layer, hard for the
+/// deterministic reducer).
+///
+/// The function is pure: no IO, no async, no logging.  No `tracing`
+/// span — the §15.2 carve-out applies (pure-deterministic CPU-bound
+/// module per `WO-0067` §`lessons_applied` #5).
+///
+/// # Examples
+///
+/// ```
+/// use ucil_core::fusion::{resolve_conflict, ConflictCandidate, ConflictResolution, SourceAuthority};
+///
+/// // LSP/AST beats Text even at much lower confidence.
+/// let lsp = ConflictCandidate {
+///     value: "Symbol::Foo",
+///     source: SourceAuthority::LspAst,
+///     confidence: 0.5,
+/// };
+/// let text = ConflictCandidate {
+///     value: "Symbol::Bar",
+///     source: SourceAuthority::Text,
+///     confidence: 0.99,
+/// };
+/// let outcome = resolve_conflict(&[lsp.clone(), text]);
+/// assert!(matches!(
+///     outcome,
+///     ConflictResolution::Resolved { source: SourceAuthority::LspAst, .. }
+/// ));
+/// ```
+#[must_use]
+pub fn resolve_conflict<T: Clone + PartialEq>(
+    candidates: &[ConflictCandidate<T>],
+) -> ConflictResolution<T> {
+    // Step 1: empty input.
+    if candidates.is_empty() {
+        return ConflictResolution::Unresolvable {
+            candidates: Vec::new(),
+            reason: "empty input".to_owned(),
+        };
+    }
+
+    // Step 2: single candidate — short-circuit before the .min() reduction
+    // so the common single-source path is one allocation.
+    if candidates.len() == 1 {
+        let c = &candidates[0];
+        return ConflictResolution::Resolved {
+            value: c.value.clone(),
+            source: c.source,
+            confidence: c.confidence,
+        };
+    }
+
+    // Step 3: multi-candidate.  Find the highest-priority source tier.
+    // Manual loop avoids `.min().unwrap()` panic paths — `candidates[0]`
+    // is safe by structural invariant (steps 1 + 2 short-circuit empty
+    // and single-candidate inputs, so length >= 2 here).
+    let mut top_source = candidates[0].source;
+    for c in &candidates[1..] {
+        if c.source < top_source {
+            top_source = c.source;
+        }
+    }
+
+    // Collect candidates at the top tier (non-empty by construction —
+    // `top_source` came from a candidate above).
+    let top_tier: Vec<&ConflictCandidate<T>> = candidates
+        .iter()
+        .filter(|c| c.source == top_source)
+        .collect();
+
+    // Sub-step 3a: all top-tier values agree → resolve to the highest-
+    // confidence top-tier candidate.
+    let first_value = &top_tier[0].value;
+    if top_tier.iter().all(|c| c.value == *first_value) {
+        // Pick the highest-confidence member of the tied-tier subset
+        // via a manual loop — avoids `max_by(...).unwrap()` panic paths
+        // and the `clippy::missing_panics_doc` lint.
+        let mut winner: &ConflictCandidate<T> = top_tier[0];
+        for c in &top_tier[1..] {
+            if c.confidence > winner.confidence {
+                winner = *c;
+            }
+        }
+        return ConflictResolution::Resolved {
+            value: winner.value.clone(),
+            source: winner.source,
+            confidence: winner.confidence,
+        };
+    }
+
+    // Sub-step 3b: top-tier values disagree → emit Unresolvable retaining
+    // the FULL input slate (lower-tier candidates preserved for the
+    // agent-mediator surface).
+    ConflictResolution::Unresolvable {
+        candidates: candidates.to_vec(),
+        reason: format!("tied at tier {top_source:?}"),
+    }
+}
+
 // ── Frozen acceptance test ────────────────────────────────────────────────────
 //
 // Per `DEC-0007`, the frozen acceptance selector lives at MODULE ROOT —
@@ -1017,5 +1261,190 @@ fn test_deterministic_classifier() {
         wire, "\"find_definition\"",
         "(SA6) FindDefinition wire-format must equal \"find_definition\" \
          (the §6.2 row label); got {wire}"
+    );
+}
+
+// ── Frozen acceptance test — P3-W10-F10 conflict resolution ───────────────────
+//
+// Per `DEC-0007`, the frozen selector lives at MODULE ROOT so the
+// `cargo test -p ucil-core fusion::test_conflict_resolution` selector
+// substring-match resolves uniquely without traversing a `mod tests {}`
+// barrier.  Sub-assertions are SA1..SA6 panic-tagged so failure
+// messages map back to a specific assertion-of-record.
+
+#[cfg(test)]
+#[test]
+#[allow(clippy::too_many_lines, clippy::float_cmp)]
+fn test_conflict_resolution() {
+    // ── SA1: empty input → Unresolvable {} with reason "empty input" ─
+    let empty: Vec<ConflictCandidate<&'static str>> = Vec::new();
+    let out = resolve_conflict(&empty);
+    assert_eq!(
+        out,
+        ConflictResolution::Unresolvable {
+            candidates: Vec::new(),
+            reason: "empty input".to_owned(),
+        },
+        "(SA1) empty input must yield Unresolvable {{ candidates: [], \
+         reason: \"empty input\" }}; left: {out:?}, right: \
+         Unresolvable {{ candidates: [], reason: \"empty input\" }}"
+    );
+
+    // ── SA2: single-candidate input → Resolved with that candidate ──
+    let single = ConflictCandidate {
+        value: "a",
+        source: SourceAuthority::Kg,
+        confidence: 0.5,
+    };
+    let out = resolve_conflict(std::slice::from_ref(&single));
+    assert_eq!(
+        out,
+        ConflictResolution::Resolved {
+            value: "a",
+            source: SourceAuthority::Kg,
+            confidence: 0.5,
+        },
+        "(SA2) single-candidate input must yield Resolved with that \
+         candidate's fields; left: {out:?}, right: Resolved {{ value: \
+         \"a\", source: Kg, confidence: 0.5 }}"
+    );
+
+    // ── SA3: multi-tier non-conflict — LSP/AST wins over KG by authority ─
+    //
+    // LSP/AST candidate (high authority, high confidence) co-exists with
+    // a KG candidate (lower authority, lower confidence) carrying a
+    // different value — LSP/AST wins because it is the higher-authority
+    // tier.  This SA pairs with the M1 mutation contract (inverting the
+    // .min() → .max() reduction flips this assertion: a Text/KG winner
+    // would surface, contradicting §18 line 1811).
+    let candidates_sa3 = [
+        ConflictCandidate {
+            value: "a",
+            source: SourceAuthority::LspAst,
+            confidence: 0.9,
+        },
+        ConflictCandidate {
+            value: "b",
+            source: SourceAuthority::Kg,
+            confidence: 0.6,
+        },
+    ];
+    let out = resolve_conflict(&candidates_sa3);
+    assert_eq!(
+        out,
+        ConflictResolution::Resolved {
+            value: "a",
+            source: SourceAuthority::LspAst,
+            confidence: 0.9,
+        },
+        "(SA3) cross-tier authority precedence — LSP/AST beats KG by \
+         §18 line 1811 hierarchy; left: {out:?}, right: Resolved {{ \
+         value: \"a\", source: LspAst, confidence: 0.9 }}"
+    );
+
+    // ── SA4: tied top tier with disagreeing values → Unresolvable ───
+    //
+    // Two candidates both at the same top tier (LspAst) but carrying
+    // different values — the deterministic resolver cannot pick a
+    // winner; the slate is forwarded to the agent-mediator surface.
+    let candidates_sa4 = [
+        ConflictCandidate {
+            value: "a",
+            source: SourceAuthority::LspAst,
+            confidence: 0.9,
+        },
+        ConflictCandidate {
+            value: "b",
+            source: SourceAuthority::LspAst,
+            confidence: 0.85,
+        },
+    ];
+    let out = resolve_conflict(&candidates_sa4);
+    match &out {
+        ConflictResolution::Unresolvable { candidates, reason } => {
+            assert_eq!(
+                candidates.len(),
+                2,
+                "(SA4) tied-top-tier Unresolvable must retain BOTH \
+                 candidates; left: {} candidates, right: 2 candidates; \
+                 outcome={out:?}",
+                candidates.len(),
+            );
+            assert!(
+                reason.contains("tied at tier"),
+                "(SA4) Unresolvable.reason must contain \"tied at tier\" \
+                 substring; left: {reason:?}, right: substring \"tied \
+                 at tier\""
+            );
+        }
+        ConflictResolution::Resolved { .. } => panic!(
+            "(SA4) tied-top-tier disagreeing values must yield Unresolvable; \
+             left: {out:?}, right: Unresolvable {{ candidates: [...], \
+             reason: \"tied at tier LspAst\" }}"
+        ),
+    }
+
+    // ── SA5: tied top tier with AGREEING values → Resolved (highest conf) ─
+    //
+    // Two candidates both at the same top tier (LspAst), carrying the
+    // SAME value but different confidences — the deterministic resolver
+    // picks the highest-confidence member of the tied-tier subset.
+    let candidates_sa5 = [
+        ConflictCandidate {
+            value: "a",
+            source: SourceAuthority::LspAst,
+            confidence: 0.9,
+        },
+        ConflictCandidate {
+            value: "a",
+            source: SourceAuthority::LspAst,
+            confidence: 0.92,
+        },
+    ];
+    let out = resolve_conflict(&candidates_sa5);
+    assert_eq!(
+        out,
+        ConflictResolution::Resolved {
+            value: "a",
+            source: SourceAuthority::LspAst,
+            confidence: 0.92,
+        },
+        "(SA5) tied-top-tier agreeing values — highest confidence wins; \
+         left: {out:?}, right: Resolved {{ value: \"a\", source: \
+         LspAst, confidence: 0.92 }}"
+    );
+
+    // ── SA6: cross-tier dominance — authority beats raw confidence ──
+    //
+    // LSP/AST candidate at low confidence (0.5) BEATS a Text candidate
+    // at very high confidence (0.99).  Authority precedence dominates
+    // raw confidence per §18 line 1811 ("source authority as soft
+    // guidance" — soft for the agent layer, hard for the deterministic
+    // reducer).  This SA pairs with the M1 mutation contract: inverting
+    // the source-tier ordering would surface the Text candidate.
+    let candidates_sa6 = [
+        ConflictCandidate {
+            value: "a",
+            source: SourceAuthority::LspAst,
+            confidence: 0.5,
+        },
+        ConflictCandidate {
+            value: "b",
+            source: SourceAuthority::Text,
+            confidence: 0.99,
+        },
+    ];
+    let out = resolve_conflict(&candidates_sa6);
+    assert_eq!(
+        out,
+        ConflictResolution::Resolved {
+            value: "a",
+            source: SourceAuthority::LspAst,
+            confidence: 0.5,
+        },
+        "(SA6) cross-tier dominance — LspAst@0.5 beats Text@0.99; \
+         left: {out:?}, right: Resolved {{ value: \"a\", source: \
+         LspAst, confidence: 0.5 }} (authority dominates confidence \
+         per §18 line 1811)"
     );
 }
