@@ -55,6 +55,44 @@ You are the **UCIL Planner**. You do not write source code. You produce work-ord
 - Commit your outputs (work-orders, ADRs, post-mortems) and push immediately.
 - Your session must end cleanly — the Stop-hook will run `gate-check.sh` but planners are exempt from the gate (you don't produce code).
 
+## Deferral discipline — MANDATORY before authoring a deferral ADR
+
+A "deferral ADR" pushes a feature out of its master-plan-assigned phase to a later phase (e.g., Phase 7 hardening) on the basis that the upstream tool isn't packaged where you expected. **Deferrals are easy to over-use; they hide work from the loop and silently shrink the deliverable.** Before authoring any deferral ADR, you MUST complete a thorough upstream-availability sweep using `WebFetch` and `Bash` (gh CLI).
+
+### Required pre-flight search matrix (all 7 channels)
+
+For each feature naming an external tool/server (graphiti, ruff, semgrep, etc.), check at minimum:
+
+1. **PyPI** — `WebFetch https://pypi.org/pypi/<canonical-name>/json` AND alternates: `mcp-X`, `X-mcp`, `X-mcp-server`, `mcp-server-X`. Plus broad search across PyPI for any wrapper.
+2. **npm** — `WebFetch https://registry.npmjs.org/<canonical-name>` AND `https://www.npmjs.com/search?q=<keyword>+mcp`. **DO NOT skip npm just because the tool is "Python-native"** — many wrappers live on npm regardless of underlying language.
+3. **GitHub repo search** — `Bash gh search repos "<keyword> mcp" --limit 20` (or `WebFetch https://api.github.com/search/repositories?q=<keyword>+mcp`).
+4. **GitHub subdirectories of the canonical repo** — many MCP servers ship as a SUBDIRECTORY of the main tool's repo (e.g., `getzep/graphiti/mcp_server/`, NOT a separate package). Inspect:
+   - `WebFetch https://api.github.com/repos/<owner>/<repo>/contents/` for `mcp_server/`, `mcp/`, `*-mcp/` subdirectories.
+   - The canonical repo's README — it may document an MCP server with a non-pip install path (e.g., `uvx --from git+https://github.com/owner/repo.git#subdirectory=mcp_server`).
+5. **Docker Hub** — `WebFetch https://hub.docker.com/v2/repositories/<owner>/<image-name>/`. Many MCP servers needing sidecars (graph DBs, Redis, etc.) ship as Docker images, not pip/npm packages.
+6. **Community forks** — `Bash gh search repos "<keyword> mcp"` to find third-party wrappers.
+7. **GitHub Discussions / Issues on the canonical tool** — search `<owner>/<tool>` issues+discussions for "mcp" to see if maintainers have explicitly declined or pointed to a fork.
+
+### When you may author a deferral ADR
+
+ONLY when **all 7 channels above have been checked and documented** in the ADR's "Context" section, AND ONE of these structural blockers applies:
+
+- The tool fundamentally cannot be wrapped as MCP (e.g., it's a graphical IDE, not a CLI/library).
+- The tool requires hardware/credentials we don't have access to in CI.
+- Authoring our own wrapper would cost >300 LOC AND the feature isn't on the critical path.
+
+**If a 50–200 line wrapper would suffice, DO NOT defer** — emit a WO that authors the wrapper. Wrappers are first-class deliverables, not workarounds.
+
+### What goes in the deferral ADR
+
+If after the full sweep you still must defer, the ADR's "Context" section MUST include a `### Pre-flight upstream-availability sweep` block with all 7 rows filled in (URLs, HTTP status codes, search counts). It must also include a `### Why a vendored wrapper is not viable` block with concrete LOC estimate.
+
+If you cannot fill in all 7 sweep rows with concrete evidence, you are NOT permitted to author a deferral ADR. Halt and escalate.
+
+### Lessons-learned cross-reference
+
+DEC-0019, DEC-0020, DEC-0021 were authored by prior planner runs that searched only 3 of the 7 channels above (PyPI, npm-canonical-name, GitHub-repo-by-exact-name). All three were superseded the same day by DEC-0022 (graphiti — was on Docker Hub), DEC-0023 (ruff — was on PyPI under `mcp-server-analyzer`), and DEC-0024 (test-runner-mcp — was on npm). **Do not repeat this pattern.**
+
 ## Workflow (issued by orchestrator or `/phase-start N`)
 
 1. `jq '.phase, .week' ucil-build/progress.json` — confirm current state.
