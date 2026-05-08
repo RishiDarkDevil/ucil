@@ -1,0 +1,273 @@
+# test-runner MCP plugin manifest (master-plan §14.1 category =
+# "testing"). Sibling of plugins/testing/mcp-pytest-runner/plugin.toml.
+#
+# pinned 2026-05-08: @iflow-mcp/mcp-test-runner@0.2.1
+#   source          : https://github.com/privsim/mcp-test-runner
+#                     (upstream of record; the privsim org has NEVER
+#                     published to npm under their own name — see
+#                     §Provenance below).
+#   npm package     : https://www.npmjs.com/package/@iflow-mcp/mcp-test-runner
+#                     (third-party scoped mirror published 2026-01-08
+#                     by `chatflowdev`; the only npm-published surface).
+#   pinned semver   : 0.2.1 — npm `latest` for
+#                     `@iflow-mcp/mcp-test-runner`; versions seen via
+#                     `npm view @iflow-mcp/mcp-test-runner versions`:
+#                       ['0.2.0', '0.2.1']
+#                     — 0.2.1 is the most-recent immutable release tag.
+#                     Pre-release tags are deliberately NOT consumed;
+#                     only immutable release tags get pinned per
+#                     .claude/rules/commit-style.md +
+#                     master-plan §13.
+#   pinned SHA      : d6ccbd99f3c9b599216e3d9f655b6cb22e33867f
+#                     (defensive SHA pin per master-plan §13 +
+#                     DEC-0025 §Rationale — the iflow-mcp mirror has
+#                     low star count (~16) and only 2 published
+#                     versions; SHA-pinning protects against silent
+#                     republication). SHA cited from DEC-0025 §Context.
+#   binary launch   : `npx -y @iflow-mcp/mcp-test-runner@0.2.1` —
+#                     `npx` ships with Node.js. The `-y` flag
+#                     auto-confirms the package install on first
+#                     invocation; subsequent invocations hit the
+#                     npm cache. The server speaks JSON-RPC 2.0 over
+#                     stdio. The npx-managed package bundles
+#                     @modelcontextprotocol/sdk + transitive deps;
+#                     the operator does not need to install or
+#                     manage these deps separately. NO `--mcp` /
+#                     `mcp start` subcommand needed — the binary IS
+#                     the MCP server (mirrors mcp-pytest-runner +
+#                     Semgrep-MCP shapes). The serverInfo carried
+#                     back in the `initialize` response identifies
+#                     the server as `test-runner` (NOT
+#                     `@iflow-mcp/mcp-test-runner` / NOT
+#                     `mcp-test-runner`) — see §Provenance below for
+#                     the npm-package-name vs serverInfo.name
+#                     asymmetry.
+#   advertised tools: run_tests
+#                     (1 total — single-tool dispatcher pattern;
+#                     framework selection is via the tool's
+#                     `framework` input arg per the inputSchema enum.
+#                     Verified end-to-end via
+#                     PluginManager::health_check; see
+#                     crates/ucil-daemon/tests/g8_plugin_manifests.rs).
+#                     Live tools/list capture at the pinned version
+#                     2026-05-08:
+#                       1. run_tests
+#                          description: "Run tests and capture
+#                            output"
+#                          input schema (subset): {
+#                            command: string (required)         e.g. "bats tests/*.bats",
+#                            workingDir: string (required),
+#                            framework: enum (required) ∈ {bats,
+#                              pytest, flutter, jest, go, rust,
+#                              generic} — 7 values,
+#                            outputDir?: string,
+#                            timeout?: number (default 300000ms),
+#                            env?: object<string, string>,
+#                            securityOptions?: { allowSudo?: bool,
+#                              allowSu?: bool, allowShellExpansion?:
+#                              bool, allowPipeToFile?: bool },
+#                          }
+#                     The integration test pins on `run_tests` (the
+#                     canonical upstream literal) as the M2-mutation
+#                     target — `run_tests` is the master-plan §4.8
+#                     line 405 entry-point for the F07 spec
+#                     ("unified test execution covers Rust (cargo
+#                     nextest), Python (pytest), and TypeScript
+#                     (vitest) via MCP protocol"). The verify script
+#                     additionally inspects the inputSchema's
+#                     framework enum and asserts ≥6 framework values
+#                     are present from the canonical set {bats,
+#                     pytest, flutter, jest, go, rust, cargo,
+#                     generic, vitest} — this enforces the F07
+#                     functional spec at the JSON-Schema level.
+#                     Note: snake_case `run_tests` is the upstream
+#                     literal as emitted by `tools/list` — preferred
+#                     over kebab-case translation per WO-0074
+#                     scope_in #1 lesson + WO-0076 scope_in §11
+#                     lesson + WO-0077 §planner lesson #1.
+#                     The upstream README at
+#                     https://github.com/privsim/mcp-test-runner
+#                     does enumerate the tool surface in the
+#                     §"Available Tools" section; the live
+#                     tools/list capture corroborates the README
+#                     and is the load-bearing source of truth (per
+#                     WO-0076 scope_in §11 + WO-0077 scope_in #11
+#                     Live-tool-name capture protocol).
+#   transport       : stdio (master-plan §13; no HTTP in Phase 3).
+#   API keys        : NONE — test-runner runs entirely locally; no
+#                     network calls; no auth required. The wrapper
+#                     internally shells out to the framework-
+#                     specific test runner CLI (cargo / pytest /
+#                     vitest / go / bats / flutter / jest) at
+#                     tool-call time only — those are SECONDARY
+#                     operator-state CLI deps that are NOT
+#                     initialize-time requirements (per DEC-0025
+#                     §Decision point 2 + WO-0082 scope_in #6).
+#                     The cargo-test (initialize-time `tools/list`
+#                     handshake) requires NONE of them.
+#
+# Working-directory invariant: the upstream `run_tests` tool accepts
+# an explicit `workingDir` argument (REQUIRED per the inputSchema)
+# so the spawned binary's cwd does not affect tool output as long as
+# the operator passes an absolute path. The integration test +
+# verify script's tools/list smoke do NOT exercise tools/call so
+# cwd is irrelevant; if the verify script's optional secondary
+# tools/call smoke is exercised, it copies the workspace's existing
+# crates into a `mktemp -d` tmpdir BEFORE invoking the binary
+# (per WO-0074 §executor #5 + WO-0076 scope_in #5/#16 + WO-0077
+# scope_in #16) — the workspace + tests/fixtures/** stay read-only.
+#
+# Establishing test-runner's place in the `testing.*` capability
+# namespace: parallel to `search.*` (probe; P2-W6-F06),
+# `navigate.*` (scip; P2-W7-F08), `knowledge.*` (codebase-memory;
+# P3-W9-F05 + mem0; P3-W9-F06), `architecture.*` (codegraphcontext;
+# P3-W9-F08), `context.*` (Context7 + Repomix; P3-W10-F02/F03),
+# `platform.*` (GitHub + Git + Filesystem; P3-W10-F05/F06/F07),
+# and `quality.*` (ESLint + Semgrep + Ruff; P3-W11-F02/F04/F05).
+# G8 Testing sources advertise capabilities under the `testing.*`
+# prefix; subdivisions per source. test-runner is the multi-
+# language unified-execution half of the G8 group (G8 sibling:
+# mcp-pytest-runner, the pytest-specialised half from F08); the
+# framework dispatcher pattern (one tool, framework-enum arg)
+# means the test-runner provides the unified-execution capability
+# `testing.run` (single entry); the framework selection happens at
+# tool-call time via the `framework` input arg, NOT at
+# capability-namespace time. Future G8 entries (Bazel-runner,
+# ts-runner, junit-runner, gradle-runner, etc. — master-plan §14.1
+# + DEC-0025 §Consequences) extend the testing.* namespace
+# consistently.
+#
+# Provenance — chain of corrections (DEC-0021 → DEC-0024 →
+# DEC-0025 — see ucil-build/decisions/ for the full ADR thread):
+#
+#   DEC-0021 (2026-05-04, accepted): Defer test-runner-mcp from
+#     Phase 3 to Phase 4/7 hardening — pre-flight upstream-
+#     availability sweep (PyPI-404 + npm-search + GitHub-search
+#     triad) found no canonical MCP server published to PyPI/npm
+#     under the `test-runner-mcp` name, and the planner's revisit
+#     trigger demanded a canonical upstream emerge before revival.
+#
+#   DEC-0024 (2026-05-08, accepted): Revive test-runner-mcp via
+#     npm — research report claimed `test-runner-mcp` was
+#     published on npm by privsim and exposed a 6-tool surface.
+#     ADR amended below.
+#
+#   DEC-0025 (2026-05-08, accepted, AMENDS DEC-0024): Correct
+#     DEC-0024's two material errors uncovered by the WO-0081
+#     executor's pre-flight live-capture validation:
+#
+#       (Error 1) Bare `test-runner-mcp` is NOT on npm:
+#         `npm view test-runner-mcp version` returns 404. The
+#         only related npm publication is the third-party scoped
+#         mirror `@iflow-mcp/mcp-test-runner@0.2.1` — published
+#         by `chatflowdev`, NOT by upstream `privsim`. DEC-0024's
+#         research report conflated the GitHub repo path
+#         (`privsim/mcp-test-runner`) with an npm package name.
+#
+#       (Error 2) Upstream advertises ONE `run_tests` tool with
+#         a framework enum, NOT six separate framework-specific
+#         tools. Live `tools/list` against
+#         `npx -y @iflow-mcp/mcp-test-runner@0.2.1`:
+#           tools[]: 1 entry, name = run_tests
+#           inputSchema.framework: enum=["bats", "pytest",
+#             "flutter", "jest", "go", "rust", "generic"]
+#           serverInfo.name = "test-runner"
+#           serverInfo.version = "0.1.0"
+#         The upstream `src/index.ts` at every commit in repo
+#         history (back to `463bd5d6` 2025-01-18 "init") confirms
+#         the single-tool-with-framework-enum pattern has ALWAYS
+#         been the design. DEC-0024 §Decision point 3 mistook the
+#         framework enum (7 values) for a 6-tool surface.
+#
+#   Lessons-learned — the executor's empirical-validation pattern
+#   (run `npx` + `tools/list` and capture the live surface BEFORE
+#   sealing the manifest) caught both errors at zero cost.
+#   Web-search alone is insufficient — search snippets can
+#   conflate GitHub repo paths with npm package names AND can
+#   misread JSON-Schema enum values for tool counts. The same
+#   live-capture protocol applies to all manifest-revival WOs.
+#
+# Npm-package-name vs serverInfo.name asymmetry (per WO-0077
+# §planner lesson `Capture BOTH PyPI/npm package name AND
+# serverInfo.name`): npm package = `@iflow-mcp/mcp-test-runner`;
+# runtime `serverInfo.name = "test-runner"` per DEC-0025 §Context.
+# Manifest's `[plugin] name` field is `test-runner` (matches the
+# runtime serverInfo.name); the install string references the
+# npm package; the integration test asserts on `health.name ==
+# "test-runner"` (the live serverInfo.name carried by
+# PluginManager::health_check). Three distinct names are tracked
+# verbatim in this manifest's top-of-file rustdoc; future planner
+# regressions on the same upstream can verify which surface is
+# canonical from this single source of truth.
+#
+# G8 Testing source per master-plan §5.8 + §3.1 line 314 + §4.8
+# line 405 — the G8 group queries all test-runner stores in
+# parallel and the agent synthesizes a unified test-discovery +
+# selective-re-run packet for the active task. test-runner sits
+# at master-plan §4.8 line 405 as P0 priority — the multi-
+# language unified-execution test-runner plugin to land alongside
+# mcp-pytest-runner (the pytest-specialised half from F08) and
+# future Bazel / ts / junit / gradle entries.
+#
+# Master-plan §4.8 line 405 mandate: "unified test execution
+# covers Rust (cargo nextest), Python (pytest), and TypeScript
+# (vitest) via MCP protocol" — the iflow-mcp `run_tests`
+# dispatcher with `framework={rust, pytest, jest}` (and four
+# more: bats, flutter, go, generic) covers all three required
+# frameworks AND four additional framework families. Per
+# DEC-0025 §Rationale, the master-plan mandate is functional
+# NOT structural; the single-tool dispatcher satisfies the
+# spec.
+#
+# Reproducibility: a moving `latest` version tag is deliberately
+# avoided per .claude/rules/commit-style.md. The npm package
+# version is pinned to an immutable release tag so the manifest
+# produces byte-identical health checks across CI machines and
+# operator workstations. When upstream cuts a v0.3.x with
+# breaking tool-surface changes, supersede this manifest in a
+# new ADR and bump the pin.
+
+[plugin]
+name = "test-runner"
+category = "testing"
+priority = "P0"
+version = "0.2.1"
+description = "Multi-language unified test execution via MCP — single-tool dispatcher with framework enum per DEC-0025. G8 source per master-plan §3.1 line 314 + §4.8 line 405 + §5.8 (npm @iflow-mcp/mcp-test-runner)."
+
+[capabilities]
+provides = [
+    "testing.run",
+]
+languages = [
+    "rust",
+    "python",
+    "typescript",
+    "javascript",
+    "go",
+    "shell",
+    "dart",
+]
+
+[capabilities.activation]
+on_language = [
+    "rust",
+    "python",
+    "typescript",
+    "javascript",
+    "go",
+    "shell",
+    "dart",
+]
+on_tool = ["check_quality", "review_changes", "run_tests"]
+
+[transport]
+type = "stdio"
+command = "npx"
+args = [
+    "-y",
+    "@iflow-mcp/mcp-test-runner@0.2.1",
+]
+
+[lifecycle]
+hot_cold = true
+idle_timeout_minutes = 10
