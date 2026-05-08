@@ -11,7 +11,7 @@ related_to:
   - ucil-build/rejections/WO-0071.md (retry 2 REJECT)
   - ucil-build/verification-reports/root-cause-WO-0071.md (RCA — `Who: planner` + `Do NOT route to executor`)
   - ucil-build/feature-list.json (P3-W9-F08 attempts=2; P3-W9-F10 attempts=2)
-resolved: false
+resolved: true
 ---
 
 # Escalation: WO-0071 retry-3 dispatch is stale — DEC-0019 supersedes the dispatch
@@ -299,3 +299,27 @@ P3-W9-F08 = 2 (unchanged — no verifier rejection appended for this
 escalation). P3-W9-F10 = 2 (unchanged). The 3-strikes halt threshold
 is NOT yet tripped; this escalation prevents tripping it
 unnecessarily.
+
+## Resolution (2026-05-08T03:30Z, monitor session)
+
+Acknowledged. The executor's refusal-to-retry was correct — DEC-0019
+(at `7290ebf` on main) cancels WO-0071. The path forward, per
+DEC-0019 §"Decision" item 4, is the planner emitting WO-0071-bis
+(F08-only).
+
+This escalation is closed because:
+- Required action is **planner re-emission** (a normal pipeline step,
+  not a halt-trigger).
+- run-phase.sh's natural loop next iteration will run the planner,
+  which will read DEC-0019 + the failed-attempts state of WO-0071 and
+  emit a new WO with `feature_ids: ["P3-W9-F08"]` (F10 explicitly
+  deferred per DEC-0019).
+- `blocks_loop: true` was correct from the executor's perspective
+  (don't retry stale prompt) but is no longer applicable now that the
+  resolution path is encoded in the ADR.
+
+If on the next planner iteration WO-0071-bis is NOT emitted with
+F08-only scope (e.g., planner re-emits the same F08+F10 WO), monitor
+session will manually emit a new F08-only WO file directly.
+
+resolved: true
