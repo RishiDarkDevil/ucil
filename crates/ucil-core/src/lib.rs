@@ -8,6 +8,7 @@
 #![deny(rustdoc::broken_intra_doc_links)]
 
 pub mod ceqp;
+pub mod context_compiler;
 pub mod cross_group;
 pub mod fusion;
 pub mod incremental;
@@ -27,6 +28,12 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 // returns all 8 new fusion symbols on the same line.
 #[rustfmt::skip]
 pub use fusion::{fuse_g2_rrf, rrf_weight, G2FusedHit, G2FusedOutcome, G2Hit, G2Source, G2SourceResults, G2_RRF_K};
+// Single-line per AC22 / AC03 (WO-0087) — `#[rustfmt::skip]` blocks the
+// 100-col wrap so `grep -qE '^pub use context_compiler::\{' …` matches
+// without depending on rustfmt's wrapping heuristic.  P3-W10-F01 lands
+// the public surface for downstream G5/G3/G4 consumer WOs.
+#[rustfmt::skip]
+pub use context_compiler::{RankedSymbol, RepoMap, RepoMapError, RepoMapOptions};
 // Single-line per AC22 (WO-0056) — `#[rustfmt::skip]` blocks the
 // 100-col wrap so `grep -nE 'execute_cross_group|fuse_cross_group|GroupExecutor|...'`
 // returns all 14 cross-group symbols on the same line. P3-W9-F03 / F04
