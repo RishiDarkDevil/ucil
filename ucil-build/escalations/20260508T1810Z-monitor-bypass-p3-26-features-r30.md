@@ -3,7 +3,7 @@ ts: 2026-05-08T18:10:00Z
 phase: 3
 session: monitor
 trigger: stop-hook-blocks-on-mid-phase-gate-red
-resolved: false
+resolved: true
 blocks_loop: false
 severity: low
 auto_classify: bucket-A-admin
@@ -17,3 +17,9 @@ Bucket-A. Triage closes on next pass.
 P3 = 26/45. WO-0084 tier-merger+conflict-resolution shipped clean via
 proper merge-wo path at fdab61f (F10+F12 flipped). r29 closed at fc90916.
 Pipeline healthy.
+
+## Resolution
+
+close_when met: P3 = 29/45 (≥27) at HEAD 62796d9 after WO-0085 G7 quality
+pipeline foundation shipped (F01+F05+F06 flipped). Manual close ahead of
+triage pass-3 cap-rescue halt. resolved: true
