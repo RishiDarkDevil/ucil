@@ -1,0 +1,186 @@
+# mcp-pytest-runner MCP plugin manifest (master-plan §14.1 category =
+# "testing").
+#
+# pinned 2026-05-08: mcp-pytest-runner v0.2.1
+#   source          : https://pypi.org/project/mcp-pytest-runner/
+#   pypi package    : https://pypi.org/project/mcp-pytest-runner/
+#   pinned tag      : 0.2.1 — PyPI `latest` for mcp-pytest-runner;
+#                     versions seen via the JSON API at
+#                     `https://pypi.org/pypi/mcp-pytest-runner/json`:
+#                       ['0.1.0', '0.2.0', '0.2.1']
+#                     — 0.2.1 is the most-recent immutable release tag.
+#                     PyPI summary: "MCP server providing opinionated
+#                     pytest execution interface for AI agents". Pre-
+#                     release tags are deliberately NOT consumed; only
+#                     immutable release tags get pinned per
+#                     .claude/rules/commit-style.md.
+#   binary launch   : `uvx mcp-pytest-runner@0.2.1` — `uvx` (ships with
+#                     `uv`) downloads + caches the pypi package and
+#                     runs the package's console-script entry-point.
+#                     The server speaks JSON-RPC 2.0 over stdio. No
+#                     `--mcp` / `mcp start` subcommand needed: the
+#                     binary IS the MCP server (mirrors Semgrep MCP
+#                     shape from WO-0076). The serverInfo carried back
+#                     in the `initialize` response identifies the
+#                     server as `pytest-mcp` (NOT `mcp-pytest-runner`)
+#                     — the package on PyPI is named
+#                     `mcp-pytest-runner` but its serverInfo.name is
+#                     `pytest-mcp`. This is upstream's choice and
+#                     matches what AI clients see when they connect.
+#   advertised tools: execute_tests, discover_tests
+#                     (2 total — verified end-to-end via
+#                     PluginManager::health_check; see
+#                     crates/ucil-daemon/tests/g8_plugin_manifests.rs).
+#                     Live tools/list capture at the pinned version
+#                     2026-05-08:
+#                       1. execute_tests
+#                          description: "Execute pytest tests with
+#                            filtering and output options"
+#                          input schema (subset): {
+#                            node_ids?: string[],
+#                            markers?: string,
+#                            keywords?: string,
+#                            verbosity?: int (-2..2),
+#                            failfast?: bool,
+#                            maxfail?: int,
+#                            show_capture?: bool,
+#                            timeout?: int,
+#                          }
+#                       2. discover_tests
+#                          description: "Discover available tests in
+#                            the project"
+#                          input schema (subset): {
+#                            path?: string,
+#                            pattern?: string,
+#                          }
+#                     The integration test pins on `discover_tests`
+#                     (the upstream literal that maps verbatim to our
+#                     declared `testing.pytest.discover` capability)
+#                     as the canonical M2-mutation target — pytest
+#                     discovery is the master-plan §4.8 line 405 entry-
+#                     point for the F08 spec ("pytest hierarchical
+#                     test discovery and selective re-run by node ID
+#                     verified on the fixture python-project"). The
+#                     verify script's tool-level smoke also exercises
+#                     `execute_tests` against a SUBSET of the
+#                     discovered node IDs (per F08 spec line). Note:
+#                     snake_case `discover_tests` / `execute_tests`
+#                     are the upstream literals as emitted by
+#                     `tools/list` — preferred over kebab-case
+#                     translation per WO-0074 scope_in #1 lesson +
+#                     WO-0076 scope_in §11 lesson.
+#                     The upstream README at
+#                     https://pypi.org/project/mcp-pytest-runner/
+#                     does NOT enumerate the tool names; the live
+#                     tools/list capture is the only source of truth
+#                     (per WO-0076 scope_in §11 + WO-0077 scope_in
+#                     #11 Live-tool-name capture protocol).
+#                     The discovered-test response uses the canonical
+#                     pytest node-ID format (`tests/test_x.py::test_y`
+#                     or `path::ClassName::method_name` for method-
+#                     style tests) wrapped in a per-test struct:
+#                       { node_id, module, class_, function, file,
+#                         line }
+#                     The `node_id` field is the load-bearing pytest
+#                     selector; the integration test + verify script
+#                     extract this field for the selective-run smoke.
+#   transport       : stdio (master-plan §13; no HTTP in Phase 3).
+#   API keys        : NONE — mcp-pytest-runner runs entirely locally;
+#                     no network calls; no auth required. The upstream
+#                     binary delegates to a local pytest invocation
+#                     against the spawned binary's cwd (or against an
+#                     explicitly-passed path via `discover_tests`'s
+#                     `path` argument). Reproducible across CI runs
+#                     against a mktemp -d copy of
+#                     tests/fixtures/python-project (with a fabricated
+#                     conftest.py inserting `src/` onto sys.path —
+#                     the fixture's pyproject.toml declares the
+#                     `python_project` package under
+#                     `src/python_project/` but does NOT carry an
+#                     installed-mode `pip install -e .` artifact, so
+#                     pytest cannot import the test modules without
+#                     a sys.path nudge; the integration test + verify
+#                     script BOTH fabricate `conftest.py` in the
+#                     tmpdir copy, NOT in the read-only fixture).
+#
+# Working-directory invariant: the upstream `discover_tests` tool
+# accepts an explicit `path` argument so the spawned binary's cwd
+# does not affect tool output as long as the path is absolute.
+# However, pytest itself discovers tests RELATIVE to the cwd's
+# pyproject.toml `[tool.pytest.ini_options]` configuration (testpaths
+# + rootdir). The integration test + verify script BOTH copy
+# `tests/fixtures/python-project` into a `mktemp -d` tmpdir BEFORE
+# invoking the upstream binary (per WO-0074 §executor #5 + WO-0075
+# §executor #5 + WO-0076 scope_in #5/#16) — the fixture stays read-
+# only even if the upstream writes side-files (e.g., .pytest_cache,
+# .ruff_cache) into the working directory.
+#
+# Establishing the `testing.*` capability namespace: parallel to
+# `search.*` (probe; P2-W6-F06), `navigate.*` (scip; P2-W7-F08),
+# `knowledge.*` (codebase-memory; P3-W9-F05 + mem0; P3-W9-F06),
+# `architecture.*` (codegraphcontext; P3-W9-F08), `context.*`
+# (Context7 + Repomix; P3-W10-F02/F03), `platform.*` (GitHub + Git +
+# Filesystem; P3-W10-F05/F06/F07), and `quality.*` (ESLint + Semgrep;
+# P3-W11-F02/F04). G8 Testing sources advertise capabilities under
+# the `testing.*` prefix; subdivisions per source are
+# `testing.pytest.*`. mcp-pytest-runner is the pytest half of the G8
+# group; future G8 entries (test-runner-mcp deferred per DEC-0021;
+# pytest-mcp Pytest-plugin variant per master-plan §4.8 line 404 +
+# Vitest / cargo-nextest / Go MCP servers when they emerge) extend
+# the testing.* namespace consistently.
+#
+# test-runner-mcp deferred per DEC-0021 (Phase 4/7 hardening): no
+# canonical upstream MCP server published to PyPI/npm/GitHub at this
+# date; the planner's pre-flight upstream-availability sweep
+# (PyPI-404 + npm-search + GitHub-search triad) is documented in
+# DEC-0021. F07 is excluded from this manifest set; re-emerges via
+# the DEC-0021 §Revisit-trigger when a canonical server emerges.
+# Lineage chain: DEC-0019 (graphiti deferral) → DEC-0020 (Ruff MCP
+# deferral) → DEC-0021 (test-runner-mcp deferral) — three sequential
+# upstream-availability-driven preemptive deferrals establishing the
+# convention.
+#
+# G8 Testing source per master-plan §5.8 — the G8 group queries all
+# test-runner stores in parallel and the agent synthesizes a unified
+# test-discovery + selective-re-run packet for the active task.
+# mcp-pytest-runner sits at master-plan §3.1 line 314 + §4.8 line 405
+# as P0 priority — the canonical pytest test-runner plugin to land
+# alongside future test-runner-mcp / pytest-mcp / Vitest / Go entries.
+#
+# Reproducibility: a moving `latest` version tag is deliberately
+# avoided per .claude/rules/commit-style.md. The pypi package version
+# is pinned to an immutable release tag so the manifest produces
+# byte-identical health checks across CI machines and operator
+# workstations. When upstream cuts a v0.3.x with breaking tool-
+# surface changes, supersede this manifest in a new ADR and bump the
+# pin.
+
+[plugin]
+name = "mcp-pytest-runner"
+category = "testing"
+priority = "P0"
+version = "0.2.1"
+description = "Python pytest test discovery + selective execution via mcp-pytest-runner (MIT license; pypi). G8 source per master-plan §3.1 line 314 + §4.8 line 405 + §5.8."
+
+[capabilities]
+provides = [
+    "testing.pytest.discover",
+    "testing.pytest.run",
+    "testing.pytest.run_node_id",
+]
+languages = ["python"]
+
+[capabilities.activation]
+on_language = ["python"]
+on_tool = ["check_quality", "review_changes", "run_tests"]
+
+[transport]
+type = "stdio"
+command = "uvx"
+args = [
+    "mcp-pytest-runner@0.2.1",
+]
+
+[lifecycle]
+hot_cold = true
+idle_timeout_minutes = 10
