@@ -1810,10 +1810,10 @@
         "P2-W6-F01"
       ],
       "passes": false,
-      "last_verified_ts": null,
-      "last_verified_by": null,
-      "last_verified_commit": null,
-      "attempts": 0,
+      "last_verified_ts": "2026-05-08T02:19:46Z",
+      "last_verified_by": "verifier-f3b49d6b-6566-48ea-a844-8a5ec5d96563",
+      "last_verified_commit": "d795bc0880ef6f3a7ec5450d3c7610b1d846b9c6",
+      "attempts": 1,
       "blocked_reason": null
     },
     {
@@ -1857,10 +1857,10 @@
         "P2-W6-F01"
       ],
       "passes": false,
-      "last_verified_ts": null,
-      "last_verified_by": null,
-      "last_verified_commit": null,
-      "attempts": 0,
+      "last_verified_ts": "2026-05-08T02:19:46Z",
+      "last_verified_by": "verifier-f3b49d6b-6566-48ea-a844-8a5ec5d96563",
+      "last_verified_commit": "d795bc0880ef6f3a7ec5450d3c7610b1d846b9c6",
+      "attempts": 1,
       "blocked_reason": null
     },
     {
