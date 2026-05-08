@@ -1,0 +1,210 @@
+# Semgrep MCP plugin manifest (master-plan §14.1 category = "quality").
+#
+# pinned 2026-05-08: semgrep-mcp v0.8.1
+#   source          : https://github.com/semgrep/mcp
+#   pypi package    : https://pypi.org/project/semgrep-mcp/
+#   pinned tag      : 0.8.1 — pypi tag published by Semgrep on
+#                     2025-09-09 (MIT license; canonical Python MCP
+#                     server for Semgrep static analysis).
+#                     Pre-release tags are deliberately NOT consumed:
+#                     only immutable release tags get pinned per
+#                     .claude/rules/commit-style.md.
+#   binary launch   : `uvx semgrep-mcp@0.8.1` — `uvx` (from `uv`)
+#                     downloads + caches the pypi package into an
+#                     isolated venv and runs the `semgrep-mcp`
+#                     console-script entry-point. The server speaks
+#                     JSON-RPC 2.0 over stdio (the upstream's
+#                     default transport per
+#                     `semgrep-mcp --help`; the package also
+#                     supports `streamable-http` via `-t` but stdio
+#                     is the master-plan §13 requirement for
+#                     Phase 3 plugins).
+#
+# DISCLOSED DEVIATION FROM WO-0076 SCOPE_IN #2 PRESCRIPTION:
+#   The WO-0076 work-order prescribed `semgrep-mcp@0.9.0` (latest
+#   PyPI release, 2025-09-29). Live `tools/list` capture against
+#   `uvx semgrep-mcp@0.9.0` confirmed that v0.9.0 has been
+#   functionally deprecated upstream — the server advertises ONLY a
+#   single tool, `deprecation_notice`, whose response routes users
+#   to either (a) the hosted `mcp.semgrep.ai` Streamable-HTTP MCP
+#   surface or (b) the bundled `semgrep mcp -t stdio` subcommand
+#   on the Semgrep CLI itself. The historical scan-tool surface
+#   (`semgrep_scan`, `security_check`, `semgrep_findings`,
+#   `semgrep_scan_with_custom_rule`, `semgrep_scan_local`,
+#   `semgrep_rule_schema`, `get_supported_languages`,
+#   `get_abstract_syntax_tree` — 8 tools total) was removed from
+#   v0.9.0's tool catalog and is no longer reachable via the PyPI
+#   `uvx` launch path.
+#
+#   v0.8.1 (released 2025-09-09; immediate predecessor of v0.9.0)
+#   is the LAST PyPI release that still exposes the canonical 8-
+#   tool scan surface. Pinning to v0.8.1 preserves the WO-0076 F04
+#   acceptance criterion ("≥1 security finding using the OWASP rule
+#   set") without changing the upstream package, transport, or auth
+#   model.  All other criteria from WO-0076 scope_in #2 are
+#   satisfied verbatim:
+#     - Same package (`semgrep-mcp` on PyPI) and same vendor
+#       (semgrep.com / Semgrep Inc.).
+#     - Same transport (`stdio`).
+#     - Same launch shape (`uvx <pkg>@<version>`).
+#     - Same operator-state requirement (Semgrep CLI must be on
+#       PATH or located via `SEMGREP_PATH` env var) — applies
+#       verbatim to v0.8.1 and v0.9.0 alike since the dependency
+#       on the CLI binary lives in semgrep_mcp.semgrep.mk_context's
+#       lifespan call to `semgrep --pro --version`, NOT in any
+#       version-specific code.
+#     - Same MIT license.
+#     - Same documented OWASP-class default-ruleset support
+#       (`p/owasp-top-ten` available as the `config` argument to
+#       the `semgrep_scan` tool).
+#
+#   The WO RFR §"Disclosed Deviations" documents this pivot in
+#   full; the live tool-name capture for both versions is recorded
+#   under §"Live tool name capture" so the verifier can
+#   independently re-validate.
+#
+#   advertised tools: semgrep_scan, security_check,
+#                     semgrep_scan_with_custom_rule,
+#                     semgrep_scan_local, semgrep_findings,
+#                     semgrep_rule_schema, get_supported_languages,
+#                     get_abstract_syntax_tree
+#                     (8 total — verified end-to-end via live
+#                     `tools/list` capture against
+#                     `uvx semgrep-mcp@0.8.1`; recorded in
+#                     crates/ucil-daemon/tests/g7_plugin_manifests.rs
+#                     test panic-body strings + WO-0076 RFR
+#                     §"Live tool name capture"). The integration
+#                     test pins on `semgrep_scan` — the canonical
+#                     scan tool that maps verbatim to our declared
+#                     `quality.semgrep.scan` capability and is the
+#                     strongest detection signal for upstream
+#                     renames mirroring the WO-0072 / WO-0074 /
+#                     WO-0075 rationale (snake_case `semgrep_scan`
+#                     is the upstream literal as emitted by
+#                     `tools/list` — preferred over kebab-case
+#                     translation per WO-0074 scope_in #1 lesson).
+#                     Tool input schema (semgrep_scan):
+#                       code_files: array<{filename: str,
+#                                          content: str}> (required)
+#                       config: optional<str> (e.g. "p/owasp-top-ten",
+#                                              "auto")
+#                     The upstream README at
+#                     https://github.com/semgrep/mcp does NOT
+#                     enumerate the tool name; the live tools/list
+#                     capture is the only source of truth.
+#   transport       : stdio (master-plan §13; no HTTP in Phase 3).
+#   API keys        : NONE for the basic OWASP SAST scan (Semgrep
+#                     ships with the free OWASP Top-10 ruleset
+#                     `p/owasp-top-ten` plus `p/security-audit`
+#                     and many other community rulesets — no
+#                     auth required). An OPTIONAL `SEMGREP_APP_TOKEN`
+#                     env var enables the Semgrep AppSec Platform
+#                     Pro engine for advanced cross-file taint
+#                     tracking + supply-chain scans, but is NOT
+#                     required for the WO-0076 F04 verify script's
+#                     basic-scan smoke. The integration test +
+#                     verify script BOTH operate without a token
+#                     per the WO-0076 lessons_applied §WO-0069
+#                     §planner: API-key-presence short-circuit
+#                     gate is N/A as load-bearing here.
+#   semgrep CLI dep : Semgrep MCP requires the Semgrep CLI binary
+#                     on PATH (or located via the `SEMGREP_PATH`
+#                     env var). The lifespan handler in
+#                     semgrep_mcp.semgrep.mk_context calls
+#                     `semgrep --pro --version` BEFORE the MCP
+#                     server reaches its initialize handshake;
+#                     when the CLI is missing the upstream raises
+#                     `mcp.shared.exceptions.McpError` and the
+#                     integration test / verify script see the
+#                     binary exit before tools/list can complete.
+#                     Operator-state: install the Semgrep CLI via
+#                     `pip install semgrep` (or `uv tool install
+#                     semgrep`, or distro / Homebrew packages).
+#                     The integration test
+#                     (crates/ucil-daemon/tests/g7_plugin_manifests.rs)
+#                     skips gracefully if `semgrep` is not on PATH
+#                     (the SAn-tagged short-circuit pattern from
+#                     WO-0069 §planner Mem0 API-key precedent
+#                     applied to a CLI binary instead of an env
+#                     var). The F04 verify script applies the
+#                     same skip pattern with a clear `[SKIP]`
+#                     diagnostic.
+#
+# Working-directory invariant: the upstream `semgrep_scan` tool
+# does NOT scan the cwd — it scans the `code_files` array
+# argument's inline file contents. The spawned binary's cwd
+# therefore does not affect tool output. The integration test +
+# verify script BOTH copy `tests/fixtures/mixed-project` into a
+# `mktemp -d` tmpdir BEFORE invoking the upstream binary
+# (per WO-0074 §executor #5 + WO-0076 scope_in #5/7) — the
+# fixture stays read-only even if upstream / Semgrep CLI writes
+# side-files (e.g., `.semgrep/`, scan-cache dirs) into the
+# working directory.
+#
+# Establishing the `quality.*` capability namespace: see the
+# matching documentation in plugins/quality/eslint/plugin.toml.
+# Semgrep is the multi-language SAST half of the G7 group;
+# ESLint is the JS/TS lint half. Future G7 entries (Sonarqube,
+# Snyk, OSV, RuboCop, Trivy, TruffleHog, Gitleaks, Biome,
+# DeepSource, Codacy per master-plan §4.7 lines 378-388) extend
+# the quality.* namespace consistently.
+#
+# G7 Quality source per master-plan §5.7 — the G7 group queries
+# all quality stores in parallel and the agent synthesizes a
+# unified diagnostic packet for the active task. Semgrep MCP
+# sits at master-plan §3.1 line 314 + §4.7 line 377 as P0
+# priority — the canonical multi-language SAST plugin to land
+# alongside ESLint.
+#
+# Reproducibility: a moving `latest` dist-tag is deliberately
+# avoided per .claude/rules/commit-style.md. The pypi package
+# version is pinned to an immutable release tag so the manifest
+# produces byte-identical health checks across CI machines and
+# operator workstations. When upstream cuts a v0.10.x with a
+# replacement scan-tool surface (or restores the v0.8.1 tools
+# under v0.9.x+), supersede this manifest in a new ADR and bump
+# the pin.
+
+[plugin]
+name = "semgrep"
+category = "quality"
+priority = "P0"
+version = "0.8.1"
+description = "Multi-language SAST via Semgrep (MIT license; OWASP-default ruleset). G7 source per master-plan §3.1 line 314 + §4.7 line 377 + §5.7."
+
+[capabilities]
+provides = [
+    "quality.semgrep.scan",
+    "quality.semgrep.security_rules",
+    "quality.semgrep.code_quality",
+]
+languages = [
+    "python",
+    "typescript",
+    "javascript",
+    "rust",
+    "go",
+    "java",
+    "c",
+    "cpp",
+    "ruby",
+    "php",
+]
+
+[capabilities.activation]
+on_tool = [
+    "check_quality",
+    "security_scan",
+    "review_changes",
+]
+
+[transport]
+type = "stdio"
+command = "uvx"
+args = [
+    "semgrep-mcp@0.8.1",
+]
+
+[lifecycle]
+hot_cold = true
+idle_timeout_minutes = 10

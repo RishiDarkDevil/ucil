@@ -1,0 +1,130 @@
+# ESLint MCP plugin manifest (master-plan §14.1 category = "quality").
+#
+# pinned 2026-05-08: @eslint/mcp v0.3.5
+#   source          : https://github.com/eslint/rewrite/tree/main/packages/mcp
+#   npm package     : https://www.npmjs.com/package/@eslint/mcp
+#   pinned tag      : 0.3.5 — npm `latest` published by the @eslint
+#                     team on 2026-05-01 (MIT license; canonical Node
+#                     MCP server for ESLint linting). Pre-release tags
+#                     are deliberately NOT consumed: only immutable
+#                     release tags get pinned per
+#                     .claude/rules/commit-style.md.
+#   binary launch   : `npx -y @eslint/mcp@0.3.5` — `npx` downloads +
+#                     caches the npm package and runs the package's
+#                     `mcp` console-script entry-point. The server
+#                     speaks JSON-RPC 2.0 over stdio. No `--mcp` /
+#                     `mcp start` subcommand needed: the binary IS
+#                     the MCP server (mirrors GitHub MCP / Context7
+#                     shape).
+#   advertised tools: lint-files
+#                     (1 total — verified end-to-end via
+#                     PluginManager::health_check; see
+#                     crates/ucil-daemon/tests/g7_plugin_manifests.rs).
+#                     The master-plan §4.7 line 374 vocabulary
+#                     ("ESLint MCP — JS/TS lint") describes the
+#                     capability category independent of the upstream
+#                     literal tool name. The integration test pins on
+#                     `lint-files` (the upstream literal that maps
+#                     verbatim to our declared `quality.eslint.lint`
+#                     capability) — strongest detection signal for
+#                     upstream renames mirroring the WO-0072 /
+#                     WO-0074 / WO-0075 rationale. Note: kebab-case
+#                     `lint-files` is the upstream literal as emitted
+#                     by `tools/list` — preferred over snake-case
+#                     translation per WO-0074 scope_in #1 lesson.
+#                     Tool input schema:
+#                       filePaths: array<string> (absolute paths)
+#                     The upstream README at
+#                     https://github.com/eslint/rewrite/tree/main/packages/mcp
+#                     does NOT enumerate the tool name; the live
+#                     tools/list capture is the only source of truth.
+#   transport       : stdio (master-plan §13; no HTTP in Phase 3).
+#   API keys        : NONE — ESLint MCP runs entirely locally; no
+#                     network calls; no auth required. The upstream
+#                     binary inspects the explicitly-passed file
+#                     paths against a project-local ESLint config
+#                     (eslint.config.js or .eslintrc.* — operator
+#                     state). Reproducible across CI runs against a
+#                     mktemp -d copy of tests/fixtures/typescript-
+#                     project (with an optional fabricated minimal
+#                     eslint.config.js if the lint-files target needs
+#                     enabled rules; the integration test does NOT
+#                     fabricate a config because tools/list does NOT
+#                     exercise file linting — only the F02 verify
+#                     script's tool-level smoke does).
+#
+# Working-directory invariant: the upstream `lint-files` tool accepts
+# absolute file paths via the `filePaths` argument, so the spawned
+# binary's cwd does not affect tool output as long as the file paths
+# are absolute. The integration test + verify script BOTH copy
+# `tests/fixtures/typescript-project` into a `mktemp -d` tmpdir
+# BEFORE invoking the upstream binary (per WO-0074 §executor #5 +
+# WO-0075 scope_in #8) — the fixture stays read-only even if the
+# upstream writes side-files (e.g., .eslintcache) into the working
+# directory.
+#
+# Establishing the `quality.*` capability namespace: parallel to
+# `search.*` (probe; P2-W6-F06), `navigate.*` (scip; P2-W7-F08),
+# `knowledge.*` (codebase-memory; P3-W9-F05 + mem0; P3-W9-F06),
+# `architecture.*` (codegraphcontext; P3-W9-F08), `context.*`
+# (Context7 + Repomix; P3-W10-F02/F03), and `platform.*` (GitHub +
+# Git + Filesystem; P3-W10-F05/F06/F07). G7 Quality sources advertise
+# capabilities under the `quality.*` prefix; subdivisions per source
+# are `quality.eslint.*`, `quality.semgrep.*` (see
+# plugins/quality/semgrep/plugin.toml). ESLint is the JS/TS half of
+# the G7 group; Semgrep is the multi-language SAST half. Future G7
+# entries (Sonarqube, Snyk, OSV, RuboCop, Trivy, TruffleHog,
+# Gitleaks, Biome, DeepSource, Codacy per master-plan §4.7
+# lines 378-388) extend the quality.* namespace consistently.
+#
+# Ruff MCP deferred per DEC-0020 (Phase 4/7 hardening): no canonical
+# upstream MCP server published to PyPI/npm at this date; the
+# planner's pre-flight upstream-availability sweep (PyPI-404 +
+# npm-search + GitHub-search triad) is documented in DEC-0020.
+# F03 is excluded from this manifest set; re-emerges via the
+# DEC-0020 §Revisit-trigger when an Astral or community-canonical
+# server emerges.
+#
+# G7 Quality source per master-plan §5.7 — the G7 group queries all
+# quality stores in parallel and the agent synthesizes a unified
+# diagnostic packet for the active task. ESLint MCP sits at master-
+# plan §3.1 line 313 + §4.7 line 374 as P0 priority — the canonical
+# JS/TS quality plugin to land alongside Semgrep.
+#
+# Reproducibility: a moving `latest` dist-tag is deliberately avoided
+# per .claude/rules/commit-style.md. The npm package version is
+# pinned to an immutable release tag so the manifest produces
+# byte-identical health checks across CI machines and operator
+# workstations. When upstream cuts a v0.4.x with breaking
+# tool-surface changes, supersede this manifest in a new ADR and
+# bump the pin.
+
+[plugin]
+name = "eslint"
+category = "quality"
+priority = "P0"
+version = "0.3.5"
+description = "JavaScript / TypeScript linting via ESLint (MIT license). G7 source per master-plan §3.1 line 313 + §4.7 line 374 + §5.7."
+
+[capabilities]
+provides = [
+    "quality.eslint.lint",
+    "quality.eslint.fix",
+]
+languages = ["javascript", "typescript"]
+
+[capabilities.activation]
+on_language = ["javascript", "typescript"]
+on_tool = ["check_quality", "review_changes"]
+
+[transport]
+type = "stdio"
+command = "npx"
+args = [
+    "-y",
+    "@eslint/mcp@0.3.5",
+]
+
+[lifecycle]
+hot_cold = true
+idle_timeout_minutes = 10
