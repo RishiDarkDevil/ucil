@@ -1,9 +1,9 @@
-//! End-to-end integration tests for the on-disk mcp-pytest-runner G8
-//! (Testing+CI) plugin manifest (P3-W11-F08).
+//! End-to-end integration tests for the on-disk mcp-pytest-runner +
+//! test-runner G8 (Testing+CI) plugin manifests (P3-W11-F07 +
+//! P3-W11-F08).
 //!
-//! Each test loads the on-disk manifest at
-//! `plugins/testing/mcp-pytest-runner/plugin.toml`, drives the
-//! manifest's `transport.command` as a real subprocess via
+//! Each test loads an on-disk manifest under `plugins/testing/...`,
+//! drives the manifest's `transport.command` as a real subprocess via
 //! [`ucil_daemon::PluginManager::health_check_with_timeout`], and
 //! asserts the live `tools/list` reply contains an expected canonical
 //! tool name.
@@ -12,10 +12,11 @@
 //! JSON-RPC dialogue is forbidden — the WO-0069 contract carried by
 //! this WO is precisely that real MCP-server subprocesses speak real
 //! JSON-RPC over stdio exactly the same way a Claude Code / Cursor /
-//! Cline client would consume them at runtime. The test exercises the
+//! Cline client would consume them at runtime. The tests exercise the
 //! full handshake [`ucil_daemon::PluginManager::health_check`] performs
 //! (`initialize` → `notifications/initialized` → `tools/list`) end-to-
-//! end against the real `uvx mcp-pytest-runner@0.2.1` invocation.
+//! end against the real `uvx mcp-pytest-runner@0.2.1` and
+//! `npx -y @iflow-mcp/mcp-test-runner@0.2.1` invocations.
 //!
 //! Set `UCIL_SKIP_EXTERNAL_PLUGIN_TESTS=1` only on truly offline CI
 //! builds (skips ALL external plugin-manifest suites including this
@@ -24,8 +25,12 @@
 //! WO-0069 / WO-0072 / WO-0074 / WO-0075 / WO-0076 regression
 //! coverage without paying the additional ~30-second-cold-cache
 //! uvx fetch for the mcp-pytest-runner pypi package and pytest
-//! transitive deps). The verifier MUST NOT set EITHER opt-out, per
-//! WO-0077 `scope_in` #10 carry-over (and WO-0076 verifier protocol).
+//! transitive deps OR the cold-cache npx fetch for the
+//! @iflow-mcp/mcp-test-runner npm package and
+//! @modelcontextprotocol/sdk transitive deps). Both tests in this
+//! file honour both env vars; the verifier MUST NOT set EITHER
+//! opt-out, per WO-0077 `scope_in` #10 carry-over and WO-0082
+//! `scope_in` #25 (and WO-0076 verifier protocol).
 //!
 //! pyproject.toml-side note (per the manifest's top-of-file rustdoc
 //! at `plugins/testing/mcp-pytest-runner/plugin.toml`): the upstream
@@ -44,13 +49,14 @@
 //!
 //! Tests are wrapped in `mod g8_plugin_manifests` so nextest reports
 //! them as `g8_plugin_manifests::mcp_pytest_runner_manifest_health_check`
-//! matching the WO-0077 acceptance selector. Same wrapper pattern as
-//! the existing `mod g7_plugin_manifests` block in
+//! and `g8_plugin_manifests::test_runner_manifest_health_check`
+//! matching the WO-0077 + WO-0082 acceptance selectors. Same wrapper
+//! pattern as the existing `mod g7_plugin_manifests` block in
 //! `tests/g7_plugin_manifests.rs:75` (DEC-0007 frozen-selector
 //! module-root placement; carried per WO-0068 lessons §"For planner"
 //! frozen-test selector substring-match REQUIRES module-root
-//! placement). NO `mod tests { ... }` nesting; the test function
-//! lives at `mod g8_plugin_manifests` ROOT per WO-0073 lessons §"For
+//! placement). NO `mod tests { ... }` nesting; the test functions
+//! live at `mod g8_plugin_manifests` ROOT per WO-0073 lessons §"For
 //! planner".
 //!
 //! This file is a peer of `tests/g3_plugin_manifests.rs` (G3 suite),
@@ -77,20 +83,38 @@
 //! source file enforces the discipline at the file level (per
 //! WO-0077 acceptance_criteria).
 //!
-//! test-runner-mcp (P3-W11-F07) deferred per DEC-0021 — chain
-//! DEC-0019 → DEC-0020 → DEC-0021 establishes the upstream-
-//! availability-driven preemptive-deferral convention. F07 is NOT
-//! covered by this suite; its TODO-stub verify script at
-//! `scripts/verify/P3-W11-F07.sh` remains untouched in WO-0077.
+//! test-runner-mcp (P3-W11-F07) revived per DEC-0024 + DEC-0025 —
+//! single-tool dispatcher, `npx -y @iflow-mcp/mcp-test-runner@0.2.1`.
+//! The deferral chain DEC-0019 → DEC-0020 → DEC-0021 (graphiti, ruff,
+//! test-runner-mcp) is fully discharged by the matching revival
+//! chain DEC-0022 (graphiti) → DEC-0023 (ruff) →
+//! DEC-0024+DEC-0025 (test-runner-mcp). The chain-of-corrections is
+//! documented in detail in
+//! `plugins/testing/test-runner/plugin.toml`'s top-of-file rustdoc
+//! §Provenance section: the bare `test-runner-mcp` name is NOT on
+//! npm (404); the only published surface is the third-party scoped
+//! mirror `@iflow-mcp/mcp-test-runner@0.2.1`; upstream advertises
+//! ONE `run_tests` tool with a framework enum (NOT 6 separate
+//! tools as DEC-0024 incorrectly described). DEC-0025 §Decision
+//! point 3 amended DEC-0024 §Decision point 3 — the canonical
+//! assertion is `health.tools.len() == 1` AND `health.tools[0] ==
+//! "run_tests"` (the framework-enum-coverage assertion lives in
+//! the verify script's independent JSON-RPC capture which inspects
+//! the inputSchema; `health.tools` from
+//! `PluginManager::health_check_with_timeout` exposes tool names
+//! only).
 
 mod g8_plugin_manifests {
     use std::path::PathBuf;
 
     use ucil_daemon::{HealthStatus, PluginManager, PluginManifest};
 
-    /// Generous first-run uvx download budget — `uvx <pkg>` may fetch
-    /// the pypi tarball + transitive deps (pytest, pluggy, anyio,
-    /// etc.) on a cold cache. Subsequent runs hit the cache and
+    /// Generous first-run package-manager download budget. `uvx
+    /// <pkg>` (mcp-pytest-runner) may fetch the pypi tarball +
+    /// transitive deps (pytest, pluggy, anyio, etc.) on a cold cache.
+    /// `npx -y <pkg>` (test-runner) may fetch the npm tarball +
+    /// transitive deps (@modelcontextprotocol/sdk, etc.) on a cold
+    /// cache. Subsequent runs hit the local package-manager cache and
     /// complete in well under a second; the production-default
     /// `HEALTH_CHECK_TIMEOUT_MS` (5 s) is therefore fine for steady-
     /// state daemon ticks but inadequate for the very first post-
@@ -194,6 +218,98 @@ mod g8_plugin_manifests {
             health.tools.iter().any(|t| t == "discover_tests"),
             "(SA1) expected `discover_tests` tool in advertised set; got: {:?}; want: \
              \"discover_tests\"",
+            health.tools,
+        );
+    }
+
+    /// End-to-end health check for the test-runner G8 manifest pinned
+    /// to `npx -y @iflow-mcp/mcp-test-runner@0.2.1` per DEC-0025
+    /// §Decision point 1. Mirrors the
+    /// `mcp_pytest_runner_manifest_health_check` shape exactly:
+    /// load manifest, manifest sanity, real-subprocess
+    /// `tools/list` handshake, assertions on the live capture.
+    ///
+    /// DEC-0025 §Decision point 3 (amends DEC-0024) — the canonical
+    /// upstream advertises ONE tool `run_tests` with a framework
+    /// enum, NOT six separate tools. The load-bearing assertion is
+    /// `health.tools.len() == 1` AND `health.tools[0] ==
+    /// "run_tests"` (the framework-enum-coverage assertion lives
+    /// in the verify script's independent JSON-RPC capture which
+    /// inspects the inputSchema; `health.tools` from
+    /// `PluginManager::health_check_with_timeout` exposes tool
+    /// names only — same shape as the
+    /// `mcp_pytest_runner_manifest_health_check` test for F08).
+    ///
+    /// `health.name` reflects the live `serverInfo.name` per the
+    /// `initialize` reply, NOT the manifest's `[plugin] name`
+    /// (these happen to coincide for test-runner — both are
+    /// `"test-runner"` — but tracking the upstream literal verbatim
+    /// guards against silent upstream renames).
+    #[tokio::test]
+    async fn test_runner_manifest_health_check() {
+        if skip_via_env() {
+            return;
+        }
+        let manifest_path = repo_root().join("plugins/testing/test-runner/plugin.toml");
+        let manifest =
+            PluginManifest::from_path(&manifest_path).expect("parse test-runner plugin.toml");
+
+        // Manifest sanity (cheap pre-flight before paying the npx cost).
+        assert_eq!(manifest.plugin.name, "test-runner");
+        assert_eq!(manifest.transport.kind, "stdio");
+        assert!(
+            !manifest.capabilities.provides.is_empty(),
+            "test-runner manifest must declare at least one provided capability",
+        );
+        assert!(
+            manifest
+                .capabilities
+                .provides
+                .iter()
+                .all(|c| c.starts_with("testing.")),
+            "test-runner manifest must declare its capabilities under the testing.* \
+             namespace, got: {:?}",
+            manifest.capabilities.provides,
+        );
+
+        let health = PluginManager::health_check_with_timeout(&manifest, FIRST_RUN_TIMEOUT_MS)
+            .await
+            .expect("health-check test-runner MCP server");
+
+        // `health.name` reflects the live serverInfo.name from the
+        // `initialize` reply per DEC-0025 §Context — both
+        // serverInfo.name and the manifest's [plugin] name field
+        // resolve to the literal "test-runner".
+        assert_eq!(health.name, "test-runner");
+        assert_eq!(
+            health.status,
+            HealthStatus::Ok,
+            "test-runner health-check returned non-Ok status: {:?}",
+            health.status,
+        );
+        // DEC-0025 §Decision point 3: upstream advertises EXACTLY 1
+        // tool — single-tool dispatcher pattern. This load-bearing
+        // assertion catches a regression in either direction
+        // (tool dropped → 0; new sibling tool added → 2+) since
+        // either drift would invalidate the manifest's pinned
+        // tool-surface assumptions and would warrant a fresh ADR
+        // bumping the pin.
+        assert_eq!(
+            health.tools.len(),
+            1,
+            "(SA1) expected exactly 1 tool from test-runner (single-tool dispatcher per \
+             DEC-0025 §Decision point 3); got: {:?}",
+            health.tools,
+        );
+        // The canonical upstream tool name per DEC-0025 §Context.
+        // Snake_case as emitted by tools/list — preferred over
+        // kebab-case translation per WO-0074 scope_in #1 lesson +
+        // WO-0076 scope_in §11 lesson + WO-0077 §planner lesson #1.
+        // M2 mutation target — see WO-0082 RFR §Mutation contract.
+        assert!(
+            health.tools.iter().any(|t| t == "run_tests"),
+            "(SA2) expected `run_tests` tool in advertised set; got: {:?}; want: \
+             \"run_tests\"",
             health.tools,
         );
     }
