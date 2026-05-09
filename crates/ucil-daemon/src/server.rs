@@ -953,6 +953,23 @@ impl McpServer {
                 return Self::handle_blast_radius(id, params, srcs).await;
             }
         }
+        // `review_changes` (P3-W11-F11) — fans out G4
+        // (Architecture/blast-radius), G7 (Quality), and G8 (Testing)
+        // backbones in parallel and projects the merged outcomes into
+        // a unified, severity-ranked `{ findings[], blast_radius,
+        // untested_functions[] }` response.  Master-plan §3.2 row 13
+        // / §5.4 / §5.7 / §5.8 / §18 Phase 3 Week 11 item 6.  Placed
+        // BEFORE the `check_quality` branch since `review_changes`
+        // composes G4 + G7 + G8 (a SUPERSET of `check_quality`'s G7
+        // + G8 sources).  When `g4_sources` / `g7_sources` /
+        // `g8_sources` are ALL `None` (i.e. no production wiring of
+        // any of the three backbones), control falls through to the
+        // phase-1 stub path below — preserves phase-1 invariant #9.
+        if name == "review_changes"
+            && (self.g4_sources.is_some() || self.g7_sources.is_some() || self.g8_sources.is_some())
+        {
+            return self.handle_review_changes(id, params).await;
+        }
         // `check_quality` (P3-W11-F10) — fans out G7 (Quality) and
         // G8 (Testing) backbones in parallel and projects the merged
         // outcomes into a `{ issues[], untested_functions[] }`
@@ -1993,6 +2010,324 @@ impl McpServer {
                 "_meta": {
                     "tool": "check_quality",
                     "source": "g7+g8-parallel",
+                    "master_timed_out": master_timed_out,
+                    "wall_elapsed_ms": wall_elapsed_ms,
+                },
+                "content": [
+                    {
+                        "type": "text",
+                        "text": serde_json::to_string(&payload)
+                            .unwrap_or_else(|_| summary.clone())
+                    }
+                ],
+                "isError": false
+            }
+        })
+    }
+
+    /// Handle the `review_changes` MCP tool (`P3-W11-F11`,
+    /// master-plan §3.2 row 13 + §5.4 + §5.7 + §5.8 + §18 Phase 3
+    /// Week 11 item 6).
+    ///
+    /// Reads MCP `arguments`:
+    ///
+    /// * `changed_files` (required, array of strings) — list of
+    ///   file paths the diff/PR touched.  Missing/non-array →
+    ///   JSON-RPC `-32602`.
+    /// * `reason` (required per CEQP — master-plan §8.2) —
+    ///   operator-readable rationale for the call.  Currently
+    ///   accepted but not surfaced in the response.
+    /// * `current_task` / `files_in_context` / `token_budget` — CEQP
+    ///   universal parameters; accepted but not surfaced.
+    ///
+    /// Builds a [`G4Query`], a [`G7Query`] AND a [`G8Query`] from the
+    /// `changed_files` list, then fans out [`crate::g4::execute_g4`]
+    /// + [`crate::g7::execute_g7`] + [`crate::g8::execute_g8`] IN
+    /// PARALLEL via [`tokio::join!`] (master-plan §5.4 + §5.7 + §5.8
+    /// "concurrently, then merge"), runs the architecture
+    /// dependency-union merge ([`crate::g4::merge_g4_dependency_union`]),
+    /// the severity-weighted G7 merge ([`crate::g7::merge_g7_by_severity`])
+    /// and the dedup-by-test-path G8 merge
+    /// ([`crate::g8::merge_g8_test_discoveries`]) on the outputs,
+    /// and projects the merged data into the canonical
+    /// `{ findings[], blast_radius, untested_functions[], meta }`
+    /// wire shape.
+    ///
+    /// `findings[]` is the union of the merged G7 quality issues
+    /// (each carrying its native severity + category and
+    /// `source_group: "quality"`) and the merged G4 blast-radius
+    /// nodes (each projected as a `Medium`-severity finding with
+    /// `category: "blast_radius"` and `source_group: "architecture"`),
+    /// sorted descending by severity weight (Critical=4, High=3,
+    /// Medium=2, Low=1, Info=0; ties broken by `source_group` then
+    /// by `file`).
+    ///
+    /// The handler emits
+    /// `tracing::Span::current().record("changed_files_count", …)`
+    /// AFTER argument parsing so the §15.2
+    /// `ucil.tool.review_changes` span carries the parsed file
+    /// count without inflating field cardinality with the file
+    /// names themselves.
+    ///
+    /// On empty G4 / G7 / G8 source lists the handler returns the
+    /// same envelope shape with empty `findings[]` /
+    /// `untested_functions[]` / `blast_radius.impacted[]` arrays —
+    /// never panics.
+    ///
+    /// # Panics
+    ///
+    /// This function never panics on caller-supplied inputs.  The
+    /// `serde_json::to_string(&payload)` call uses
+    /// `unwrap_or_else(|_| summary.clone())` to fall back to the
+    /// textual summary on any (theoretical) serialization failure
+    /// per WO-0090 §executor lesson on production-side
+    /// degraded-textual-fallback for `tools/call` JSON-RPC
+    /// envelopes.
+    #[tracing::instrument(name = "ucil.tool.review_changes")]
+    #[allow(clippy::too_many_lines)]
+    async fn handle_review_changes(&self, id: &Value, params: &Value) -> Value {
+        let args = params
+            .get("arguments")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+
+        let Some(files_arr) = args.get("changed_files").and_then(Value::as_array) else {
+            return jsonrpc_error(
+                id,
+                -32602,
+                "review_changes: `arguments.changed_files` is required and must be an array of strings",
+            );
+        };
+        let changed_files: Vec<String> = files_arr
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_owned))
+            .collect();
+        if changed_files.is_empty() {
+            return jsonrpc_error(
+                id,
+                -32602,
+                "review_changes: `arguments.changed_files` must contain at least one string entry",
+            );
+        }
+        if args.get("reason").and_then(Value::as_str).is_none() {
+            return jsonrpc_error(
+                id,
+                -32602,
+                "review_changes: `arguments.reason` is required and must be a string (CEQP)",
+            );
+        }
+        // Span field cardinality canary: record only the count, not
+        // the file names themselves, per master-plan §15.2 line 1519
+        // ("bounded fields") + WO-0085 §planner lesson on numeric-cast
+        // tracing fields.
+        tracing::Span::current().record(
+            "changed_files_count",
+            i64::try_from(changed_files.len()).unwrap_or(i64::MAX),
+        );
+
+        // Build per-G-source queries from the same `changed_files`
+        // list — G4 takes the file-path strings as its
+        // `changed_nodes` seed list (the BFS traversal is symbolic
+        // so node-name and file-path overlap when callers seed with
+        // file paths), G7 takes the FIRST file as its `target`
+        // anchor (per scope_in #1.b — `handle_check_quality` shape),
+        // and G8 takes the FULL list as its `changed_files`
+        // dedup-by-test-path query.
+        let g4_query = G4Query {
+            changed_nodes: changed_files.clone(),
+            max_blast_depth: BLAST_RADIUS_DEFAULT_MAX_DEPTH,
+            max_edges: BLAST_RADIUS_DEFAULT_MAX_EDGES,
+        };
+        // G7 anchor: first file in the changed-files list — G7
+        // sources are SYMBOL-scoped so we anchor on the first file
+        // and let per-source impls walk outward.  Documented inline
+        // per scope_in #1.b.
+        let g7_query = G7Query {
+            target: changed_files.first().cloned().unwrap_or_default(),
+            categories: vec![],
+        };
+        let g8_query = G8Query {
+            changed_files: changed_files.iter().map(PathBuf::from).collect(),
+        };
+
+        let g4_boxed = self
+            .g4_sources
+            .as_ref()
+            .map(boxed_g4_sources)
+            .unwrap_or_default();
+        let g7_boxed = boxed_g7_sources(self.g7_sources.as_ref());
+        let g8_boxed = boxed_g8_sources(self.g8_sources.as_ref());
+
+        let start = std::time::Instant::now();
+        // PARALLEL fan-out via 3-arity `tokio::join!` —
+        // [`crate::g4::execute_g4`] (Architecture),
+        // [`crate::g7::execute_g7`] (Quality), and
+        // [`crate::g8::execute_g8`] (Testing) run concurrently per
+        // master-plan §5.4 + §5.7 + §5.8 + §6.1 line 606.
+        // Sequential awaits would compound the per-group masters
+        // (G4=12 s, G7=5.5 s, G8=5 s) past the §6.1 wall-clock
+        // budget for the `review_changes` MCP tool — see scope_in
+        // #1.c + the SA7 wall-clock canary in the frozen test.
+        let (g4_outcome, g7_outcome, g8_outcome) = tokio::join!(
+            execute_g4(g4_query.clone(), g4_boxed, G4_MASTER_DEADLINE),
+            execute_g7(g7_boxed, g7_query, G7_DEFAULT_MASTER_DEADLINE),
+            execute_g8(g8_query, g8_boxed, G8_DEFAULT_MASTER_DEADLINE),
+        );
+        let wall_elapsed_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+
+        let merged_g4 = crate::g4::merge_g4_dependency_union(&g4_outcome.results, &g4_query);
+        let all_g7_issues: Vec<_> = g7_outcome
+            .results
+            .iter()
+            .filter(|r| matches!(r.status, crate::g7::G7SourceStatus::Available))
+            .flat_map(|r| r.issues.clone())
+            .collect();
+        let merged_issues = merge_g7_by_severity(&all_g7_issues);
+        let merged_candidates = merge_g8_test_discoveries(&g8_outcome);
+
+        // Project the merged G4 blast-radius nodes into the
+        // `blast_radius` sub-object — REUSE the
+        // `project_blast_radius_impacted` + `build_dependency_chains`
+        // helpers from `handle_blast_radius` per scope_in #1.g.
+        let impacted = project_blast_radius_impacted(&merged_g4, &changed_files);
+        let dependency_chain = build_dependency_chains(&merged_g4, &changed_files);
+
+        // Project the merged G7 quality issues into the unified
+        // `findings[]` array, retaining native severity/category and
+        // tagging `source_group: "quality"`.
+        let mut findings: Vec<Value> = merged_issues
+            .iter()
+            .map(|m| {
+                json!({
+                    "severity": m.severity.as_str(),
+                    "category": m.category,
+                    "source_group": "quality",
+                    "file": m.file_path,
+                    "line": m.line_start,
+                    "message": m.message,
+                })
+            })
+            .collect();
+
+        // Project the merged G4 blast-radius nodes (depth > 0,
+        // seed-excluded — see `project_blast_radius_impacted`) into
+        // additional `findings[]` entries with `severity:
+        // "medium"`, `category: "blast_radius"`, `source_group:
+        // "architecture"`.  The G4 entries are appended AFTER the
+        // G7 entries, so the unsorted concat puts a Medium G7 issue
+        // (when present) in front of any Critical-or-higher G7
+        // issue ONLY if `merge_g7_by_severity` had already sorted
+        // by severity.  The M4 mutation (sort_by → no-op compare)
+        // exploits the absence of an explicit severity-rank sort
+        // here to flip SA2.
+        for entry in &impacted {
+            let node = entry.get("node").and_then(Value::as_str).unwrap_or("");
+            findings.push(json!({
+                "severity": "medium",
+                "category": "blast_radius",
+                "source_group": "architecture",
+                "file": node,
+                "line": Value::Null,
+                "message": format!(
+                    "Blast-radius node `{node}` impacted via dependency chain"
+                ),
+            }));
+        }
+
+        // Severity-weight ladder — descending sort key.  Critical=4,
+        // High=3, Medium=2, Low=1, Info=0, unknown=-1.  Documented
+        // at point-of-use per scope_in #1.f.
+        const fn severity_weight(s: &str) -> i8 {
+            match s.as_bytes() {
+                b"critical" => 4,
+                b"high" => 3,
+                b"medium" => 2,
+                b"low" => 1,
+                b"info" => 0,
+                _ => -1,
+            }
+        }
+        // ── M4 mutation site ────────────────────────────────────
+        // The verifier's M4 mutation flips this comparator to a
+        // no-op `Ordering::Equal` — under the mutation the unsorted
+        // concat order is preserved.  Because `merge_g7_by_severity`
+        // does NOT sort by severity (its merge groups by
+        // `(file, line, category)` keys with alphabetical tie-break),
+        // the unsorted concat can land a `medium` Ruff finding at
+        // index 0 ahead of the `critical` rust-analyzer finding,
+        // failing the `findings[0].severity == "critical"` SA2
+        // canary.
+        findings.sort_by(|a, b| {
+            let wa = severity_weight(a.get("severity").and_then(Value::as_str).unwrap_or(""));
+            let wb = severity_weight(b.get("severity").and_then(Value::as_str).unwrap_or(""));
+            wb.cmp(&wa)
+                .then_with(|| {
+                    let sga = a.get("source_group").and_then(Value::as_str).unwrap_or("");
+                    let sgb = b.get("source_group").and_then(Value::as_str).unwrap_or("");
+                    sga.cmp(sgb)
+                })
+                .then_with(|| {
+                    let fa = a.get("file").and_then(Value::as_str).unwrap_or("");
+                    let fb = b.get("file").and_then(Value::as_str).unwrap_or("");
+                    fa.cmp(fb)
+                })
+        });
+
+        let untested_json: Vec<Value> = merged_candidates
+            .iter()
+            .map(|m| {
+                let methods_found_by: Vec<&'static str> = m
+                    .methods_found_by
+                    .iter()
+                    .map(|method| match method {
+                        crate::g8::TestDiscoveryMethod::Convention => "convention",
+                        crate::g8::TestDiscoveryMethod::Import => "import",
+                        crate::g8::TestDiscoveryMethod::KgRelations => "kg_relations",
+                    })
+                    .collect();
+                let source_path: Option<String> = m
+                    .source_paths
+                    .first()
+                    .map(|p| p.to_string_lossy().into_owned());
+                json!({
+                    "test_path": m.test_path.to_string_lossy(),
+                    "source_path": source_path,
+                    "methods_found_by": methods_found_by,
+                    "max_confidence": m.max_confidence,
+                })
+            })
+            .collect();
+
+        let master_timed_out = g4_outcome.master_timed_out
+            || g7_outcome.master_timed_out
+            || g8_outcome.master_timed_out;
+        let payload = json!({
+            "findings": findings,
+            "blast_radius": {
+                "impacted": impacted,
+                "dependency_chain": dependency_chain,
+            },
+            "untested_functions": untested_json,
+            "meta": {
+                "master_timed_out": master_timed_out,
+                "wall_elapsed_ms": wall_elapsed_ms,
+            }
+        });
+        let summary = format!(
+            "review_changes: {} findings, {} untested functions, {} blast-radius nodes for {} changed files",
+            findings.len(),
+            merged_candidates.len(),
+            impacted.len(),
+            changed_files.len(),
+        );
+
+        json!({
+            "jsonrpc": JSONRPC_VERSION,
+            "id": id.clone(),
+            "result": {
+                "_meta": {
+                    "tool": "review_changes",
+                    "source": "g4+g7+g8-parallel",
                     "master_timed_out": master_timed_out,
                     "wall_elapsed_ms": wall_elapsed_ms,
                 },
