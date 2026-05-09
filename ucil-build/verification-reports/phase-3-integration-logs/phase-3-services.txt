@@ -1,6 +1,13 @@
-=== docker client + daemon probe ===
+=== docker version ===
 Docker version 29.4.2, build 055a478
-29.4.2
+
+=== docker compose version ===
+Docker Compose version v5.1.3
+
+=== docker buildx version ===
+github.com/docker/buildx v0.33.0 f7897eba028583e0071642db3c011e860444f8cf
+
+=== docker info (head -20) ===
 Client: Docker Engine - Community
  Version:    29.4.2
  Context:    default
@@ -11,12 +18,16 @@ Client: Docker Engine - Community
     Path:     /usr/libexec/docker/cli-plugins/docker-buildx
   compose: Docker Compose (Docker Inc.)
     Version:  v5.1.3
+    Path:     /usr/libexec/docker/cli-plugins/docker-compose
+  model: Docker Model Runner (Docker Inc.)
+    Version:  v1.1.37
+    Path:     /usr/libexec/docker/cli-plugins/docker-model
 
-=== docker compose plugin ===
-Docker Compose version v5.1.3
+Server:
+permission denied while trying to connect to the docker API at unix:///var/run/docker.sock
 
-=== docker/*-compose.yaml inventory ===
+=== compose-file inventory (find . -maxdepth 4) ===
 (end of inventory)
 
-=== docker/ directory ===
-ls: cannot access 'docker': No such file or directory
+=== docker/ dir presence ===
+ls: cannot access 'docker/': No such file or directory
