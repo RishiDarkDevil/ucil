@@ -12,12 +12,28 @@ description = "UCIL cross-crate integration test binaries (tests/integration/*.r
 path = "src/lib.rs"
 
 [[test]]
+name = "test_fusion"
+path = "test_fusion.rs"
+
+[[test]]
 name = "test_lsp_bridge"
 path = "test_lsp_bridge.rs"
 
 [[test]]
 name = "test_plugin_lifecycle"
 path = "test_plugin_lifecycle.rs"
+
+[[test]]
+name = "test_quality_pipeline"
+path = "test_quality_pipeline.rs"
+
+[[test]]
+name = "test_query_pipeline"
+path = "test_query_pipeline.rs"
+
+[[test]]
+name = "test_testing_pipeline"
+path = "test_testing_pipeline.rs"
 
 [dev-dependencies]
 tokio       = { workspace = true }
