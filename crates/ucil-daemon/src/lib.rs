@@ -153,6 +153,7 @@
 #![warn(clippy::all, clippy::pedantic, clippy::nursery)]
 #![deny(rustdoc::broken_intra_doc_links)]
 
+pub mod agent_scheduler;
 pub mod branch_manager;
 pub mod executor;
 pub mod g2_search;
@@ -183,6 +184,8 @@ pub mod watcher;
 #[rustfmt::skip]
 #[cfg(test)] mod test_support;
 
+#[rustfmt::skip]
+pub use agent_scheduler::{AgentScheduler, AgentSchedulerHandle, AgentSchedulerStats, HotArchitectureDeltaRow, HotConventionSignalRow, HotDecisionMaterialRow, HotObservationRow, WarmArchitectureStateRow, WarmConventionRow, WarmDecisionRow, WarmObservationRow, WarmProcessorError, WarmProcessorKind, WarmProcessorSource, WarmPromotionResult, run_architecture_delta_processor, run_convention_signal_processor, run_decision_linker_processor, run_observation_processor, ARCHITECTURE_DELTA_PROCESSOR_INTERVAL, CONVENTION_MIN_EVIDENCE, CONVENTION_SIGNAL_PROCESSOR_INTERVAL, DECISION_LINKER_INTERVAL, OBSERVATION_DEDUP_THRESHOLD, OBSERVATION_PROCESSOR_INTERVAL, WARM_PROCESSOR_BATCH_SIZE, WARM_PROCESSOR_OP_DEADLINE};
 #[rustfmt::skip]
 pub use branch_manager::{BranchManager, BranchManagerError, BranchTableInfo, code_chunks_schema, sanitise_branch_name, ARCHIVE_DIR_NAME};
 #[rustfmt::skip]
