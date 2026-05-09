@@ -1156,10 +1156,10 @@ fn make_assembly_hit(file: &str, score: f64) -> CrossGroupFusedHit {
 /// * SA3 — score 0.05 + 0.00 are below 0.1 threshold; both
 ///   filtered (M2 target: bypass threshold → SA3 fails with 0
 ///   instead of 2).
-/// * SA4 — only file_b.rs at 0.30 survives both filters
+/// * SA4 — only `file_b.rs` at 0.30 survives both filters
 ///   (5 - 2 dedup - 2 filter = 1).
-/// * SA5 — surviving hit is file_b.rs.
-/// * SA6 — token_count is in the plausible range (1, 1000).
+/// * SA5 — surviving hit is `file_b.rs`.
+/// * SA6 — `token_count` is in the plausible range (1, 1000).
 /// * SA7 — conservation invariant:
 ///   `total_input == hits + deduped + filtered`.
 /// * SA8 — boundary inclusion at `fused_score == 0.1` (the hit
