@@ -153,6 +153,7 @@
 #![warn(clippy::all, clippy::pedantic, clippy::nursery)]
 #![deny(rustdoc::broken_intra_doc_links)]
 
+pub mod agent_scheduler;
 pub mod branch_manager;
 pub mod executor;
 pub mod g2_search;
