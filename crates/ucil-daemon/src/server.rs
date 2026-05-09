@@ -1865,11 +1865,7 @@ impl McpServer {
     /// On empty G7 / G8 source lists the handler returns the same
     /// envelope shape with empty `issues[]` / `untested_functions[]`
     /// arrays — never panics.
-    #[tracing::instrument(
-        name = "ucil.tool.check_quality",
-        level = "debug",
-        skip(self, id, params)
-    )]
+    #[tracing::instrument(name = "ucil.tool.check_quality")]
     #[allow(clippy::too_many_lines)]
     async fn handle_check_quality(&self, id: &Value, params: &Value) -> Value {
         let args = params
@@ -1906,12 +1902,13 @@ impl McpServer {
         let g8_boxed = boxed_g8_sources(self.g8_sources.as_ref());
 
         let start = std::time::Instant::now();
-        // PARALLEL fan-out: G7 (Quality) and G8 (Testing) run
-        // concurrently per master-plan §5.7 + §5.8 + §6.1 line 606.
-        // Sequential awaits would compound the per-group masters and
-        // exceed the §6.1 600 ms p50 latency budget for the
-        // `check_quality` MCP tool — see `scope_in` #1 + the SA6
-        // wall-clock canary in the frozen test.
+        // PARALLEL fan-out via `tokio::join!(execute_g7(...), execute_g8(...))`
+        // — G7 (Quality) and G8 (Testing) run concurrently per
+        // master-plan §5.7 + §5.8 + §6.1 line 606.  Sequential awaits
+        // would compound the per-group masters and exceed the §6.1
+        // 600 ms p50 latency budget for the `check_quality` MCP tool —
+        // see `scope_in` #1 + the SA6 wall-clock canary in the frozen
+        // test.
         let (g7_outcome, g8_outcome) = tokio::join!(
             execute_g7(g7_boxed, g7_query, G7_DEFAULT_MASTER_DEADLINE),
             execute_g8(g8_query, g8_boxed, G8_DEFAULT_MASTER_DEADLINE),
@@ -2045,7 +2042,7 @@ impl McpServer {
     /// ...)` field after argument parsing so the §15.2
     /// `ucil.tool.type_check` span carries the operator-readable
     /// file count.
-    #[tracing::instrument(name = "ucil.tool.type_check", level = "debug", skip(self, id, params))]
+    #[tracing::instrument(name = "ucil.tool.type_check")]
     #[allow(clippy::too_many_lines)]
     async fn handle_type_check(&self, id: &Value, params: &Value) -> Value {
         let args = params
@@ -8052,7 +8049,8 @@ async fn test_type_check_tool() {
         (py_url, py_diags),
         (ts_url, ts_diags),
     ];
-    let fake: Arc<dyn SerenaClient + Send + Sync> = Arc::new(ScriptedFakeSerenaClient::new(scripted));
+    let fake: Arc<dyn SerenaClient + Send + Sync> =
+        Arc::new(ScriptedFakeSerenaClient::new(scripted));
     let client = Arc::new(DiagnosticsClient::new(fake));
     let server = McpServer::new().with_diagnostics_client(client);
 
