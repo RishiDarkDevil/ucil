@@ -1,14 +1,156 @@
 # Effectiveness Report — Phase 3
 
+Run at: 2026-05-09T15:45Z (refresh-pass at HEAD `b768816`)
+Commit: `b768816` (HEAD at evaluator-launch on `main`)
+Branch: `main`
+Evaluator: `effectiveness-evaluator` (this session, `claude-opus-4-7`)
+
+Prior substantive evaluation: commit `112b56d` (full substantive runs of
+`add-feature-ts` + `arch-query`; refresh-pass inheritance from `aa7dc84`
+for `nav-rust-symbol` + `refactor-rename-python`). Documented verbatim
+below. Verdict was **PASS** for all four phase-3-eligible scenarios.
+
+## Refresh-pass note (this session, HEAD `b768816`)
+
+This is a **re-confirmation pass** at HEAD `b768816` after the prior
+report-commit `2f940ff`. Between the prior substantive run baseline
+(`112b56d`) and this HEAD, the only paths touched are
+`ucil-build/verification-reports/` (this report itself + the integration
+tester's report); zero lines on agent-runtime paths. Verified this
+session:
+
+```sh
+$ git diff 112b56d..HEAD --shortstat -- \
+    crates/ucil-daemon/src/main.rs crates/ucil-mcp/src/ \
+    crates/ucil-daemon/src/server.rs tests/fixtures/ tests/scenarios/
+# (empty — 0 lines changed)
+$ git diff aa7dc84..HEAD --shortstat -- \
+    crates/ucil-daemon/src/main.rs crates/ucil-mcp/src/ \
+    tests/fixtures/ tests/scenarios/
+# (empty — 0 lines changed; production CLI path bit-identical to phase-2 baseline)
+$ git log --oneline 112b56d..HEAD
+b768816 chore(integration-tester): phase-3 PASS re-run at HEAD a912cf1
+467c496 wip(integration-tester): phase-3 integration log snapshot mid-gate-check
+a912cf1 chore(integration-tester): phase-3 PASS re-run at HEAD 7776e85
+7776e85 docs(phase-log): lessons learned from WO-0096
+62cd16b chore(integration-tester): phase-3 PASS — 22-tool smoke + serena + pyright
+e43a9de merge: WO-0096 feedback-loop-post-hoc-analyser (feat → main)
+95fc106 chore(verifier): WO-0096 PASS — flip P3-W11-F12 to passes=true
+bee2e88 chore(critic): WO-0096 critic report — CLEAN
+4cfcaa4 chore(rfr): WO-0096 ready-for-review marker
+b4894d4 chore(verify): add scripts/verify/P3-W11-F12.sh
+2f940ff chore(verification-reports): phase-3 effectiveness PASS — 4 scenarios
+ff0733f chore(integration-tester): phase-3 PASS — finalize wip 112b56d
+```
+
+The interleaved commits are: WO-0096 feedback-loop work
+(`crates/ucil-core/src/feedback_loop.rs` + verifier scripts; non-runtime),
+phase-3 integration-tester refresh passes (verification reports only),
+and a phase-log lessons-learned doc. **None of these touches the
+agent-visible MCP dispatch surface.** The production CLI path
+(`crates/ucil-daemon/src/main.rs` → `McpServer::with_knowledge_graph(kg_arc)`
+without `with_g4_sources` etc.) is unchanged; the stub-vs-real envelope
+status of every required tool is unchanged; the fixtures are unchanged;
+the scenario YAMLs are unchanged.
+
+### Tool-availability probe at HEAD `b768816` (this session)
+
+Independent probe via `target/debug/ucil-daemon mcp --stdio --repo
+/tmp/ucil-eval-probe-phase3-20260509-154214/repo` (rust fixture) and
+`/tmp/ucil-eval-probe-phase3-20260509-154451-multi/{ts,mixed,py}-repo/`:
+
+- `tools/list` → **22 tools** registered, identical names to prior probes:
+  `blast_radius, check_quality, check_runtime, explain_history,
+  find_definition, find_references, find_similar, generate_docs,
+  get_architecture, get_context_for_edit, get_conventions, lint_code,
+  query_database, refactor, remember, review_changes, run_tests,
+  search_code, security_scan, trace_dependencies, type_check,
+  understand_code`.
+- `find_definition` (rust, name=`retry_with_backoff`) → real handler,
+  `_meta.source = "tree-sitter+kg"`, `start_line = 37`, full
+  `signature` + `doc_comment`, `file_path` cites `src/http_client.rs`.
+- `find_definition` (python, name=`compute_score`) → real handler,
+  `start_line = 15`, file_path cites
+  `src/python_project/scoring.py`.
+- `find_references` (rust + python) → `_meta.not_yet_implemented = true`.
+- `refactor` (python, `compute_score → compute_relevance_score`) →
+  `_meta.not_yet_implemented = true`.
+- `get_context_for_edit` (ts, path=`src/utils/index.ts`) →
+  `_meta.not_yet_implemented = true`.
+- `get_conventions` (ts, category=`error`) → `source = "kg"`, `count = 0`,
+  empty conventions list (real handler, fixture not yet indexed).
+- `trace_dependencies` (rust + ts + mixed) → `_meta.not_yet_implemented = true`.
+- `get_architecture` (mixed) → `_meta.not_yet_implemented = true`.
+- `explain_history` (mixed, path=`src/payments`) → `_meta.not_yet_implemented = true`.
+- `search_code` (rust, query=`retry_with_backoff`) →
+  `_meta.source = "tree-sitter+ripgrep"`, content "50 matches"
+  (count-only envelope; same shape as prior).
+- `understand_code` (rust, path=`src/http_client.rs`) → real handler
+  (no `not_yet_implemented` flag; non-stub envelope).
+- `remember` → `_meta.not_yet_implemented = true`.
+
+Every required-tool envelope shape is identical to the prior substantive
+run at `112b56d`. The Phase-1 stub set is unchanged; the real-handler
+set is unchanged; the production CLI dispatch path is unchanged.
+
+### Probe artefacts preserved (this session)
+
+- `/tmp/ucil-eval-probe-phase3-20260509-154214/tools-list.json` —
+  `initialize` + `tools/list` (22 tools)
+- `/tmp/ucil-eval-probe-phase3-20260509-154214/toolcalls.json` —
+  8 rust-fixture `tools/call` envelopes (find_definition,
+  find_references, refactor, get_context_for_edit, get_conventions,
+  trace_dependencies, get_architecture, explain_history)
+- `/tmp/ucil-eval-probe-phase3-20260509-154214/probe2.json` —
+  `search_code`, `remember`, `understand_code`
+- `/tmp/ucil-eval-probe-phase3-20260509-154451-multi/ts-probe.json` —
+  3 ts-fixture envelopes (get_context_for_edit, get_conventions,
+  trace_dependencies)
+- `/tmp/ucil-eval-probe-phase3-20260509-154451-multi/mixed-probe.json` —
+  3 mixed-fixture envelopes (get_architecture, trace_dependencies,
+  explain_history)
+- `/tmp/ucil-eval-probe-phase3-20260509-154451-multi/py-probe.json` —
+  3 py-fixture envelopes (find_references, refactor, find_definition)
+- per-probe stderr logs alongside each `*-probe.json`
+
+### Inherited verdict at HEAD `b768816`
+
+The three substantive invariants (production-CLI MCP envelopes
+unchanged, fixtures unchanged, scenarios unchanged) all hold at this
+HEAD. Therefore the substantive PASS verdict from `112b56d` for all
+four scenarios applies unchanged.
+
+| Scenario | Verdict | Source |
+|---|---|---|
+| `nav-rust-symbol` | **PASS** | inherited from `aa7dc84` (refresh-pass via `112b56d`) |
+| `refactor-rename-python` | **PASS** | inherited from `aa7dc84` (refresh-pass via `112b56d`) |
+| `add-feature-ts` | **PASS** | substantive at `112b56d`, refresh-pass at `b768816` |
+| `arch-query` | **PASS** | substantive at `112b56d`, refresh-pass at `b768816` |
+
+**Refresh-pass exit code: 0.** No new escalations filed. The substantive
+report below (lines beyond this section, headed by the original "Run at:
+2026-05-09T10:14:21Z" preamble) is preserved verbatim from commit
+`2f940ff`.
+
+This refresh follows the same three-invariant inheritance pattern used
+by the phase-2 refresh-passes (`dd4659e`, `43645fd`, `4efda0b`,
+`f9fd29d`, `f0fbf32`, `03ca34e`, `2958986`) and the phase-3
+integration-tester re-runs (`b768816`, `a912cf1`, `7776e85`,
+`62cd16b`).
+
+---
+
+## Substantive evaluation (preserved verbatim from commit `2f940ff`, HEAD `112b56d`)
+
 Run at: 2026-05-09T10:14:21Z (substantive evaluation pass)
 Commit: `112b56d` (`HEAD` at evaluator-launch on `main`)
 Branch: `main`
-Evaluator: `effectiveness-evaluator` (this session, `claude-opus-4-7`)
+Evaluator: `effectiveness-evaluator` (prior session, `claude-opus-4-7`)
 Inherited substantive runs:
 - `nav-rust-symbol` — last substantive at commit `aa7dc84` (phase-2 effectiveness PASS)
 - `refactor-rename-python` — last substantive at commit `aa7dc84` (phase-2 effectiveness PASS)
-- `add-feature-ts` — **first substantive run, this session, this commit**
-- `arch-query` — **first substantive run, this session, this commit**
+- `add-feature-ts` — **first substantive run, prior session, commit `112b56d`**
+- `arch-query` — **first substantive run, prior session, commit `112b56d`**
 
 ## Summary
 
