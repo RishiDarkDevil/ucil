@@ -990,3 +990,202 @@ where
         error: None,
     })
 }
+
+// ── AgentScheduler — orchestrator ─────────────────────────────────────────
+
+/// Run a single tick of the given [`WarmProcessorKind`] against the
+/// source.
+///
+/// Centralises the per-kind dispatch so the four spawned tasks share
+/// one tick body — variants here become the single point of
+/// modification for any cross-kind tick instrumentation. Wraps the
+/// per-kind result into a [`WarmPromotionResult`] on error so a
+/// transient source failure never kills the spawned task.
+async fn run_kind_tick(
+    kind: WarmProcessorKind,
+    source: &dyn WarmProcessorSource,
+) -> WarmPromotionResult {
+    let result = match kind {
+        WarmProcessorKind::Observation => run_observation_processor(source).await,
+        WarmProcessorKind::ConventionSignal => run_convention_signal_processor(source).await,
+        WarmProcessorKind::ArchitectureDelta => run_architecture_delta_processor(source).await,
+        WarmProcessorKind::DecisionLinker => run_decision_linker_processor(source).await,
+    };
+    result.unwrap_or_else(|err| WarmPromotionResult {
+        kind,
+        hot_rows_examined: 0,
+        warm_rows_inserted: 0,
+        hot_rows_marked_promoted: 0,
+        error: Some(err.to_string()),
+    })
+}
+
+/// Per-kind interval-driven processor task.
+///
+/// Each [`WarmProcessorKind`] runs in its own spawned task driven by
+/// `tokio::time::interval_at(now() + period, period)` so the first
+/// tick fires at `t = period` (NOT at `t = 0`). The task `select!`s
+/// between the cancel-watch channel and the interval; on cancel it
+/// breaks the loop, on tick it runs the per-kind processor and
+/// updates the shared stats. Per master-plan §15.2 line 1521 the
+/// per-tick body emits an `info_span` named
+/// `ucil.agent.warm_processor.tick`.
+async fn processor_task(
+    kind: WarmProcessorKind,
+    source: std::sync::Arc<dyn WarmProcessorSource>,
+    stats: std::sync::Arc<tokio::sync::RwLock<AgentSchedulerStats>>,
+    mut cancel_rx: tokio::sync::watch::Receiver<bool>,
+) {
+    let interval_dur = kind.interval();
+    let start = tokio::time::Instant::now() + interval_dur;
+    let mut interval = tokio::time::interval_at(start, interval_dur);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            biased;
+            res = cancel_rx.changed() => {
+                // The sender was dropped or flipped to true — either
+                // way, exit the task.
+                if res.is_err() || *cancel_rx.borrow() {
+                    break;
+                }
+            }
+            _ = interval.tick() => {
+                let span = tracing::info_span!(
+                    "ucil.agent.warm_processor.tick",
+                    kind = ?kind,
+                );
+                let result = {
+                    let _enter = span.enter();
+                    run_kind_tick(kind, source.as_ref()).await
+                };
+                let mut guard = stats.write().await;
+                let counter = guard.ticks_observed.entry(kind).or_insert(0);
+                *counter = counter.saturating_add(1);
+                guard.last_result.insert(kind, result);
+            }
+        }
+    }
+}
+
+/// Warm-tier promotion scheduler.
+///
+/// Holds an `Arc<dyn WarmProcessorSource>` and per-kind shared stats.
+/// [`AgentScheduler::start`] spawns four interval-driven tasks (one
+/// per [`WarmProcessorKind`]) inside a [`tokio::task::JoinSet`] and
+/// returns an [`AgentSchedulerHandle`] whose
+/// [`AgentSchedulerHandle::shutdown`] cancels the watch channel and
+/// drains the join-set.
+///
+/// `start` does NOT consume `self` — the `AgentScheduler` value can
+/// be cheaply re-cloned (it is `Arc`-backed internally) although in
+/// practice production wiring spawns one scheduler per daemon
+/// instance.
+pub struct AgentScheduler {
+    source: std::sync::Arc<dyn WarmProcessorSource>,
+    stats: std::sync::Arc<tokio::sync::RwLock<AgentSchedulerStats>>,
+}
+
+impl std::fmt::Debug for AgentScheduler {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AgentScheduler").finish_non_exhaustive()
+    }
+}
+
+impl AgentScheduler {
+    /// Build a new scheduler bound to the given source.
+    ///
+    /// The source is held under `Arc<dyn WarmProcessorSource>` so the
+    /// four per-kind tasks can clone it cheaply; the trait's
+    /// `Send + Sync + 'static` bounds make this sound.
+    #[must_use]
+    pub fn new(source: std::sync::Arc<dyn WarmProcessorSource>) -> Self {
+        Self {
+            source,
+            stats: std::sync::Arc::new(tokio::sync::RwLock::new(AgentSchedulerStats::default())),
+        }
+    }
+
+    /// Snapshot the current stats.
+    ///
+    /// Async because the stats live behind a
+    /// `tokio::sync::RwLock`; the `.read().await` is cheap (no
+    /// contention in the steady state).
+    pub async fn stats(&self) -> AgentSchedulerStats {
+        self.stats.read().await.clone()
+    }
+
+    /// Spawn the four per-kind processor tasks and return a handle
+    /// for graceful shutdown.
+    ///
+    /// Master-plan §10 lines 2016-2019 + §18 Phase 3 Week 10 prescribes
+    /// four interval-driven processors; this method spawns them in
+    /// [`WarmProcessorKind::all`] order via
+    /// [`tokio::task::JoinSet::spawn`]. Each task receives a clone of
+    /// the cancel-watch [`tokio::sync::watch::Receiver`] and the
+    /// shared stats `Arc`.
+    #[must_use]
+    pub fn start(&self) -> AgentSchedulerHandle {
+        let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+        let mut join_set = tokio::task::JoinSet::new();
+        for kind in WarmProcessorKind::all() {
+            let source = std::sync::Arc::clone(&self.source);
+            let stats = std::sync::Arc::clone(&self.stats);
+            let rx = cancel_rx.clone();
+            join_set.spawn(processor_task(kind, source, stats, rx));
+        }
+        AgentSchedulerHandle {
+            cancel_tx,
+            join_set,
+        }
+    }
+}
+
+/// Handle returned by [`AgentScheduler::start`] used for graceful
+/// shutdown.
+///
+/// `shutdown(self)` consumes the handle so the cancel signal cannot
+/// be sent twice and the join-set is drained exactly once. The
+/// per-task `tokio::select!` loop watches the cancel channel and
+/// exits its loop on the first flipped value, then the join-set
+/// awaits each task's natural completion. NO `JoinHandle` leaks.
+pub struct AgentSchedulerHandle {
+    cancel_tx: tokio::sync::watch::Sender<bool>,
+    join_set: tokio::task::JoinSet<()>,
+}
+
+impl std::fmt::Debug for AgentSchedulerHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AgentSchedulerHandle")
+            .field("running_tasks", &self.join_set.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl AgentSchedulerHandle {
+    /// Number of tasks still running in the join-set. `0` after
+    /// [`AgentSchedulerHandle::shutdown`] returns successfully.
+    #[must_use]
+    pub fn running_tasks(&self) -> usize {
+        self.join_set.len()
+    }
+
+    /// Flip the cancel watch and drain the four spawned tasks.
+    ///
+    /// # Errors
+    ///
+    /// Currently returns `Ok(())` even if some receivers were dropped
+    /// before the cancel-flip — callers should treat the absence of
+    /// `Err` as "all tasks have exited cleanly". A non-trivial error
+    /// shape is reserved for a follow-up production-wiring WO that
+    /// might introduce per-task panic propagation.
+    pub async fn shutdown(mut self) -> Result<(), WarmProcessorError> {
+        // `Sender::send(true)` only fails if every receiver has been
+        // dropped — which is fine, since the tasks have already
+        // exited. We swallow that error; the join-loop below verifies
+        // the actual exit.
+        let _ = self.cancel_tx.send(true);
+        while self.join_set.join_next().await.is_some() {}
+        Ok(())
+    }
+}
