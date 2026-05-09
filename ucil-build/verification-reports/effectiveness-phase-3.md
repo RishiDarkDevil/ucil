@@ -17,6 +17,20 @@ Prior refresh-passes:
 - `2f940ff` @ HEAD `112b56d` (2026-05-09T10:14Z, original substantive
   pass) — preserved verbatim in the lower half of this document.
 
+Independent re-confirmation pass (this session): commits `a919043` /
+`943e732` (parallel evaluator) already expanded the refresh-pass
+header to HEAD `a977ef9`. This session re-ran the `tools/list` +
+`tools/call` probes from a fresh fixture copy at
+`/tmp/ucil-eval-refresh-phase3/{repo,python-repo,ts-repo,mixed-repo}`
+(probe summary captured at
+`/tmp/ucil-eval-refresh-phase3/probe-summary.txt`) and observed bit-
+identical envelope shapes: `find_definition` real (tree-sitter+kg,
+retry_with_backoff at `src/http_client.rs:37`); `get_conventions` real-
+empty (`source=kg`, `count=0`); `find_references`, `refactor`,
+`get_context_for_edit`, `trace_dependencies`, `get_architecture`,
+`explain_history` all `_meta.not_yet_implemented = true`.
+The substantive PASS verdicts remain valid; **gate verdict: PASS**.
+
 ## Refresh-pass note (this session, HEAD `a977ef9`)
 
 This is a **re-confirmation pass** at HEAD `a977ef9` after the prior
