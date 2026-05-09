@@ -2190,45 +2190,47 @@ impl McpServer {
         let impacted = project_blast_radius_impacted(&merged_g4, &changed_files);
         let dependency_chain = build_dependency_chains(&merged_g4, &changed_files);
 
-        // Project the merged G7 quality issues into the unified
-        // `findings[]` array, retaining native severity/category and
-        // tagging `source_group: "quality"`.
-        let mut findings: Vec<Value> = merged_issues
+        // Project the merged G4 blast-radius nodes (depth > 0,
+        // seed-excluded — see `project_blast_radius_impacted`) FIRST
+        // into the unified `findings[]` array with `severity:
+        // "medium"`, `category: "blast_radius"`, `source_group:
+        // "architecture"`.  G4 nodes go FIRST so the unsorted concat
+        // puts Medium-severity blast-radius rows ahead of the G7
+        // Critical issue — the explicit severity-rank
+        // `findings.sort_by(...)` call below is then load-bearing
+        // for the SA2 `findings[0].severity == "critical"`
+        // descending-sort invariant.  The M4 mutation (sort_by →
+        // no-op `Ordering::Equal` compare) preserves this insertion
+        // order and trips SA2 — see scope_in #7 + AC17.
+        let mut findings: Vec<Value> = impacted
             .iter()
-            .map(|m| {
+            .map(|entry| {
+                let node = entry.get("node").and_then(Value::as_str).unwrap_or("");
                 json!({
-                    "severity": m.severity.as_str(),
-                    "category": m.category,
-                    "source_group": "quality",
-                    "file": m.file_path,
-                    "line": m.line_start,
-                    "message": m.message,
+                    "severity": "medium",
+                    "category": "blast_radius",
+                    "source_group": "architecture",
+                    "file": node,
+                    "line": Value::Null,
+                    "message": format!(
+                        "Blast-radius node `{node}` impacted via dependency chain"
+                    ),
                 })
             })
             .collect();
 
-        // Project the merged G4 blast-radius nodes (depth > 0,
-        // seed-excluded — see `project_blast_radius_impacted`) into
-        // additional `findings[]` entries with `severity:
-        // "medium"`, `category: "blast_radius"`, `source_group:
-        // "architecture"`.  The G4 entries are appended AFTER the
-        // G7 entries, so the unsorted concat puts a Medium G7 issue
-        // (when present) in front of any Critical-or-higher G7
-        // issue ONLY if `merge_g7_by_severity` had already sorted
-        // by severity.  The M4 mutation (sort_by → no-op compare)
-        // exploits the absence of an explicit severity-rank sort
-        // here to flip SA2.
-        for entry in &impacted {
-            let node = entry.get("node").and_then(Value::as_str).unwrap_or("");
+        // Project the merged G7 quality issues, retaining native
+        // severity/category and tagging `source_group: "quality"`.
+        // Appended AFTER the G4 entries — the explicit severity-
+        // rank sort below is what guarantees SA2.
+        for m in &merged_issues {
             findings.push(json!({
-                "severity": "medium",
-                "category": "blast_radius",
-                "source_group": "architecture",
-                "file": node,
-                "line": Value::Null,
-                "message": format!(
-                    "Blast-radius node `{node}` impacted via dependency chain"
-                ),
+                "severity": m.severity.as_str(),
+                "category": m.category,
+                "source_group": "quality",
+                "file": m.file_path,
+                "line": m.line_start,
+                "message": m.message,
             }));
         }
 
