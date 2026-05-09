@@ -1,10 +1,11 @@
 # Phase 3 Integration Report
 
-**Tester session**: itg-3c5071b3-3d2d-4e05-b532-9c7e452c64fb
-**Started at**:     2026-05-09T09:58:49Z
-**Verified at**:    2026-05-09T09:59:05Z
+**Tester session**: itg-2cf3910a-3eaf-4ef2-be22-a2e24028ef29
+**Started at**:     2026-05-09T10:06:29Z
+**Verified at**:    2026-05-09T10:07:21Z
 **Phase**:          3 (Week 1, per `ucil-build/progress.json`)
-**HEAD commit**:    7776e85 (`docs(phase-log): lessons learned from WO-0096`)
+**HEAD commit at start of run**: `a912cf1` (`chore(integration-tester): phase-3 PASS re-run at HEAD 7776e85`)
+**HEAD commit at end of run**:   `467c496` (`wip(integration-tester): phase-3 integration log snapshot mid-gate-check`) — auto-staged log snapshot from the Stop-hook mid-gate-check; no source code touched
 **Verdict**:        PASS
 
 ## Summary
@@ -14,37 +15,37 @@ Serena, LSP, or the UCIL daemon) and the Phase-2 LanceDB / ONNX
 linkage check, and is supposed to layer Postgres / MySQL fixtures
 for G5 database tools plus a GitHub MCP mock per
 `.claude/agents/integration-tester.md`. As with the prior Phase-2
-and Phase-3 reports, no `docker/` directory or `*-compose.yaml`
-files exist anywhere in the repository (consistent with master-plan
-§13 and the comment in `scripts/verify/serena-live.sh`: "No mocks,
-no docker — Phase 1 runs Serena locally via uvx as declared in the
+and Phase-3 reports, no `docker/` directory or `*-compose.yaml` /
+`*-compose.yml` / `compose.y*ml` / `docker-compose.y*ml` files
+exist anywhere in the repository (consistent with master-plan §13
+and the comment in `scripts/verify/serena-live.sh`: "No mocks, no
+docker — Phase 1 runs Serena locally via uvx as declared in the
 plugin manifest. Docker harness lands when a later phase needs
 heavier services"). The G5 database WOs already merged for Phase 3
-use cargo-managed in-process fixtures (`crates/ucil-core/src/g5_database.rs`
-+ sibling tests) — the docker compose harness has not yet been
-added to the repo. There was therefore nothing to
-`docker compose up -d --wait` for this run, and no compose `down`
-or service-log capture was applicable.
+use cargo-managed in-process fixtures (e.g.
+`crates/ucil-core/src/g5_database.rs` + sibling tests) — the docker
+compose harness has not yet been added to the repo. There was
+therefore nothing to `docker compose up -d --wait` for this run,
+and no compose `down` or service-log capture was applicable.
 
-The two source-only commits between this run's HEAD (`7776e85`) and
-the prior verified HEAD (`e43a9de`) are:
+The single source-only delta between this run's start HEAD
+(`a912cf1`) and the prior verified HEAD (`7776e85`) is:
 
-- `62cd16b chore(integration-tester): phase-3 PASS — 22-tool smoke + serena + pyright`
-- `7776e85 docs(phase-log): lessons learned from WO-0096`
+- `a912cf1 chore(integration-tester): phase-3 PASS re-run at HEAD 7776e85`
 
-Both touch `ucil-build/**` only (the prior integration-tester report
-and the WO-0096 lessons-learned addendum). No daemon, Serena adapter,
-pyright bridge, `ucil-core` G5 database, or `ucil-embeddings` source
-changed. This run is therefore a re-confirmation of the Phase-1 / 2
-black-box wrapper under a fresh tester session against a HEAD whose
-acceptance surface is bit-for-bit identical to the prior verified
-HEAD.
+This touches `ucil-build/verification-reports/**` only (the prior
+integration-tester report and its captured logs). No daemon, Serena
+adapter, pyright bridge, `ucil-core` G5 database, or
+`ucil-embeddings` source changed. This run is therefore a
+re-confirmation of the Phase-1 / 2 black-box wrapper under a fresh
+tester session against a HEAD whose acceptance surface is
+bit-for-bit identical to the prior verified HEAD.
 
 The three Phase-1 gate scripts that the prompt requires were run
 from a clean shell with the toolchain captured under "Provenance"
 below:
 
-- `scripts/verify/e2e-mcp-smoke.sh` — **exit 0** (PASS, 964 ms).
+- `scripts/verify/e2e-mcp-smoke.sh` — **exit 0** (PASS, 429 ms; my-session run was 400 ms — the on-disk value reflects a concurrent `scripts/gate-check.sh 3` re-run that fired during this session and overwrote `*.dur`/`*.stdout` with bit-identical-PASS values).
   `cargo build -p ucil-daemon` from a fully warm incremental cache
   (no source delta vs the prior verification HEAD); the daemon
   answered `initialize` and `tools/list` over `ucil-daemon mcp
@@ -57,11 +58,11 @@ below:
   `query_database`, `check_runtime`) advertise the four CEQP
   universal params (`reason`, `current_task`, `files_in_context`,
   `token_budget`).
-- `scripts/verify/serena-live.sh` — **exit 0** (PASS, 3 222 ms).
+- `scripts/verify/serena-live.sh` — **exit 0** (PASS, 3 721 ms; my-session run was 3 222 ms — same concurrent-gate-check overwrite as above).
   Serena v1.0.0 spawned via `uvx` and advertised 20 tools including
   the three required by G1 structural (`find_symbol`,
   `find_referencing_symbols`, `get_symbols_overview`).
-- `scripts/verify/diagnostics-bridge.sh` — **exit 0** (PASS, 420 ms).
+- `scripts/verify/diagnostics-bridge.sh` — **exit 0** (PASS, 418 ms; my-session run was 419 ms — same concurrent-gate-check overwrite as above).
   `pyright` v1.1.409 on PATH at
   `/home/rishidarkdevil/.nvm/versions/node/v22.22.2/bin/pyright`;
   ran `pyright --outputjson __diagnostics_probe.py` against a copy
@@ -73,9 +74,10 @@ Because all three gate scripts pass, the overall verdict is **PASS**.
 
 For wider context: `feature-list.json` shows all 45 Phase-3 features
 already at `passes=true` and verifier-signed at this HEAD (118 / 234
-features green across the workspace), so the Phase-3 acceptance
-surface that this black-box wrapper guards is fully populated
-upstream.
+features green across the workspace; 0 Phase-3 features signed by
+anything other than a `verifier-*` session), so the Phase-3
+acceptance surface that this black-box wrapper guards is fully
+populated upstream.
 
 ## Services
 
@@ -85,14 +87,15 @@ the host's docker client is present (Docker Engine v29.4.2, Buildx
 plugin v0.33.0, Compose plugin v5.1.3) but the daemon socket is
 unreachable from this session (no permission to
 `unix:///var/run/docker.sock`). The `docker/` directory does not
-exist in the repo, and `find . -maxdepth 4 -name "*-compose.yaml"
--o -name "*-compose.yml" -o -name "docker-compose*.y*ml"` returned
-zero hits. Per `.claude/agents/integration-tester.md` Phase-3 should
-add Postgres / MySQL + GitHub MCP mock fixtures, but the
-corresponding compose files have not yet been authored — a known
-carry-over from Phase 2 (see `phase-2-integration.md` § Services
-for the same finding) and from the prior `phase-3-integration.md`
-at `e43a9de`. All G5-database WOs that have shipped to date (e.g.
+exist in the repo, and `find . -maxdepth 4 \( -name "*-compose.yaml"
+-o -name "*-compose.yml" -o -name "docker-compose.y*ml" -o -name
+"compose.y*ml" \)` returned zero hits. Per
+`.claude/agents/integration-tester.md` Phase-3 should add Postgres /
+MySQL + GitHub MCP mock fixtures, but the corresponding compose
+files have not yet been authored — a known carry-over from Phase 2
+(see `phase-2-integration.md` § Services for the same finding) and
+from the prior `phase-3-integration.md` runs at `e43a9de` and
+`7776e85`. All G5-database WOs that have shipped to date (e.g.
 P3-W11 group) use cargo-managed in-process fixtures in their
 `tests/` directories, not real docker daemons.
 
@@ -111,9 +114,9 @@ P3-W11 group) use cargo-managed in-process fixtures in their
 
 | Suite                                          | Passed | Failed | Skipped | Duration |
 |------------------------------------------------|--------|--------|---------|----------|
-| `scripts/verify/e2e-mcp-smoke.sh`              | 1      | 0      | 0       | 964 ms   |
-| `scripts/verify/serena-live.sh`                | 1      | 0      | 0       | 3 222 ms |
-| `scripts/verify/diagnostics-bridge.sh`         | 1      | 0      | 0       | 420 ms   |
+| `scripts/verify/e2e-mcp-smoke.sh`              | 1      | 0      | 0       | 429 ms   |
+| `scripts/verify/serena-live.sh`                | 1      | 0      | 0       | 3 721 ms |
+| `scripts/verify/diagnostics-bridge.sh`         | 1      | 0      | 0       | 418 ms   |
 | LanceDB / ONNX linkage probe (Cargo.lock grep) | 2      | 0      | 0       | <1 ms    |
 
 Per-feature acceptance tests (`cargo nextest`, `pnpm vitest`,
@@ -133,17 +136,17 @@ Per-script captures live in
 ```
 phase-3-integration-logs/
   e2e-mcp-smoke.rc          → 0
-  e2e-mcp-smoke.dur         → 964 (ms)
+  e2e-mcp-smoke.dur         → 429 (ms)
   e2e-mcp-smoke.stdout      → "[e2e-mcp-smoke] building ucil-daemon..."
                               "[e2e-mcp-smoke] OK — 22 tools registered, CEQP params on all, daemon spoke MCP cleanly."
   e2e-mcp-smoke.stderr      → empty
   serena-live.rc            → 0
-  serena-live.dur           → 3222 (ms)
+  serena-live.dur           → 3721 (ms)
   serena-live.stdout        → "[serena-live] spawning Serena via uvx (pinned v1.0.0)..."
                               "[serena-live] OK — Serena v1.0.0 alive, advertises 20 tools including find_symbol find_referencing_symbols get_symbols_overview."
   serena-live.stderr        → empty
   diagnostics-bridge.rc     → 0
-  diagnostics-bridge.dur    → 420 (ms)
+  diagnostics-bridge.dur    → 418 (ms)
   diagnostics-bridge.stdout → "[diagnostics-bridge] OK — pyright returned 1 diagnostic(s) for the probe (severity=error)."
   diagnostics-bridge.stderr → empty
   lancedb-onnx.txt          → Cargo.lock entries (lancedb 0.16.0, ort 2.0.0-rc.12) + ucil-embeddings dep declarations + root workspace.dependencies pins (=2.0.0-rc.12 / 0.16)
@@ -162,11 +165,11 @@ handlers.
 
 ## Provenance
 
-- HEAD at start of run: `7776e857af92d728b161f02be48d7e0c60610dc4` (clean working tree, ahead=0).
-- HEAD at end of run:   `7776e857af92d728b161f02be48d7e0c60610dc4` (no source touched by this session).
+- HEAD at start of run: `a912cf189c3a1240b828edb83d0de2017cc024f1` (clean working tree, ahead=0).
+- HEAD at end of run:   `467c496247c4bf185da1e7b215f247fcb73be30f` (clean working tree, up-to-date with `origin/main`; commit is the auto-generated `wip(integration-tester): ... mid-gate-check` log-snapshot from the Stop-hook, no source touched).
 - Tester role:          `integration-tester` (per `.claude/agents/integration-tester.md`).
 - Phase from progress:  `3` (`jq .phase ucil-build/progress.json`).
 - Toolchain probed:     docker v29.4.2 (buildx v0.33.0, compose v5.1.3, daemon socket unreachable from session); uvx 0.11.6; pyright 1.1.409; cargo 1.94.1; rustc 1.94.1; node v22.22.2.
-- Phase-3 features:     45 / 45 at `passes=true` and verifier-signed in `ucil-build/feature-list.json` at HEAD (118 / 234 across the workspace).
-- Carry-over:           Phase-3 docker fixtures (Postgres / MySQL / GitHub-MCP mock) are still absent from the repo; same finding as `phase-2-integration.md` and the prior `phase-3-integration.md` at `e43a9de`. Bucket B / Bucket D triage candidate; does not block this PASS verdict because the existing G5 WOs use cargo in-process fixtures.
-- Source delta:         two commits since prior verified HEAD `e43a9de` (`62cd16b` integration-tester report, `7776e85` WO-0096 lessons-learned), both `ucil-build/**`-only — no source code changed.
+- Phase-3 features:     45 / 45 at `passes=true` and verifier-signed in `ucil-build/feature-list.json` at HEAD (118 / 234 across the workspace; 0 Phase-3 features signed by anything other than a `verifier-*` session).
+- Carry-over:           Phase-3 docker fixtures (Postgres / MySQL / GitHub-MCP mock) are still absent from the repo; same finding as `phase-2-integration.md` and the prior `phase-3-integration.md` at `e43a9de` and `7776e85`. Bucket B / Bucket D triage candidate; does not block this PASS verdict because the existing G5 WOs use cargo in-process fixtures.
+- Source delta:         one commit since prior verified HEAD `7776e85` (`a912cf1` integration-tester report), `ucil-build/**`-only — no source code changed.
