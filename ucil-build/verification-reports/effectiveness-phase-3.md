@@ -38,6 +38,15 @@ $ git diff aa7dc84..HEAD --shortstat -- \
     tests/fixtures/ tests/scenarios/
 # (empty — 0 lines changed; production CLI path bit-identical to phase-2 baseline)
 $ git log --oneline 112b56d..HEAD
+a977ef9 chore(harness): gitignore *.profraw + coverage-ucil-agents.md regen tick
+c188e9d chore(verification-reports): refresh effectiveness-phase-3.md @ HEAD b768816 — PASS
+75eb527 wip(coverage): coverage-ucil-cli.md mid-gate-check update
+5e61e89 wip(coverage): more coverage reports mid-gate-check update
+8b81083 wip(coverage): coverage reports mid-gate-check update
+c49c5f7 wip(coverage): coverage-ucil-daemon.md mid-gate-check update
+3cbca4c wip(coverage): coverage-ucil-core.md mid-gate-check update
+2f940ff chore(verification-reports): phase-3 effectiveness PASS — 4 scenarios
+ff0733f chore(integration-tester): phase-3 PASS — finalize wip 112b56d
 b768816 chore(integration-tester): phase-3 PASS re-run at HEAD a912cf1
 467c496 wip(integration-tester): phase-3 integration log snapshot mid-gate-check
 a912cf1 chore(integration-tester): phase-3 PASS re-run at HEAD 7776e85
@@ -62,11 +71,13 @@ without `with_g4_sources` etc.) is unchanged; the stub-vs-real envelope
 status of every required tool is unchanged; the fixtures are unchanged;
 the scenario YAMLs are unchanged.
 
-### Tool-availability probe at HEAD `b768816` (this session)
+### Tool-availability probe at HEAD `a977ef9` (this session)
 
-Independent probe via `target/debug/ucil-daemon mcp --stdio --repo
-/tmp/ucil-eval-probe-phase3-20260509-154214/repo` (rust fixture) and
-`/tmp/ucil-eval-probe-phase3-20260509-154451-multi/{ts,mixed,py}-repo/`:
+Independent probe this session via `target/debug/ucil-daemon mcp --stdio
+--repo /tmp/ucil-eval-refresh-phase3/{repo,python-repo,ts-repo,mixed-repo}`
+(rust, python, typescript, mixed fixtures, all four). Identical
+re-confirmation against the prior refresh-pass evidence (HEAD `b768816`,
+preserved below):
 
 - `tools/list` → **22 tools** registered, identical names to prior probes:
   `blast_radius, check_quality, check_runtime, explain_history,
