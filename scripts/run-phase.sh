@@ -59,6 +59,13 @@ Open for human review." > "ucil-build/escalations/$(date -u +%Y%m%dT%H%M%SZ)-max
     exit 1
   fi
 
+  # Per-iteration prune: reclaim disk continuously so merged worktrees
+  # don't accumulate during long sessions. Cheap (no-op when nothing to
+  # prune) and safe (idempotent; never touches active worktree).
+  if [[ -x scripts/prune-merged-worktrees.sh ]]; then
+    scripts/prune-merged-worktrees.sh >/tmp/ucil-prune-iter.log 2>&1 || true
+  fi
+
   # Gate check
   if scripts/gate-check.sh "$PHASE" 2>/dev/null; then
     echo "[run-phase] Gate for phase $PHASE is GREEN — tagging + advancing."

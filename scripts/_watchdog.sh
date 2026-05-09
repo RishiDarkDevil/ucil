@@ -168,6 +168,14 @@ while (( STOP == 0 )); do
   nap "$QUIESCE_WAIT"
   (( STOP == 1 )) && break
 
+  # Disk-watermark prune: before restarting the loop, opportunistically
+  # reclaim merged-worktree disk so a 95%-full disk doesn't crash claude.
+  _USE_PCT=$(df / 2>/dev/null | awk 'NR==2 {gsub("%",""); print $5}' || echo 0)
+  if [[ "$_USE_PCT" -ge 70 ]] && [[ -x "$REPO_ROOT/scripts/prune-merged-worktrees.sh" ]]; then
+    log "disk at ${_USE_PCT}% — running prune-merged-worktrees pre-restart"
+    "$REPO_ROOT/scripts/prune-merged-worktrees.sh" >>/tmp/ucil-watchdog-prune.log 2>&1 || true
+  fi
+
   # Re-check after quiescence
   if loop_alive; then
     log "loop came back on its own; no restart needed"
