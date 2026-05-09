@@ -2588,10 +2588,10 @@
         "P3-W11-F06",
         "P0-W1-F14"
       ],
-      "passes": false,
-      "last_verified_ts": null,
-      "last_verified_by": null,
-      "last_verified_commit": null,
+      "passes": true,
+      "last_verified_ts": "2026-05-09T07:10:42Z",
+      "last_verified_by": "verifier-bbc8d160-8729-4f23-84aa-726966829266",
+      "last_verified_commit": "6157dd9e8d1a4c0bb5b6e9e24e6d8e7515e6130f",
       "attempts": 0,
       "blocked_reason": null
     },
@@ -2610,10 +2610,10 @@
       "dependencies": [
         "P3-W11-F09"
       ],
-      "passes": false,
-      "last_verified_ts": null,
-      "last_verified_by": null,
-      "last_verified_commit": null,
+      "passes": true,
+      "last_verified_ts": "2026-05-09T07:10:42Z",
+      "last_verified_by": "verifier-bbc8d160-8729-4f23-84aa-726966829266",
+      "last_verified_commit": "6157dd9e8d1a4c0bb5b6e9e24e6d8e7515e6130f",
       "attempts": 0,
       "blocked_reason": null
     },
@@ -2656,10 +2656,10 @@
         "P3-W10-F09",
         "P3-W11-F05"
       ],
-      "passes": false,
-      "last_verified_ts": null,
-      "last_verified_by": null,
-      "last_verified_commit": null,
+      "passes": true,
+      "last_verified_ts": "2026-05-09T07:10:42Z",
+      "last_verified_by": "verifier-bbc8d160-8729-4f23-84aa-726966829266",
+      "last_verified_commit": "6157dd9e8d1a4c0bb5b6e9e24e6d8e7515e6130f",
       "attempts": 0,
       "blocked_reason": null
     },
