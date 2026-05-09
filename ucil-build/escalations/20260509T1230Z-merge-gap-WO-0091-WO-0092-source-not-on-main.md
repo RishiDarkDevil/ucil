@@ -108,3 +108,21 @@ limit. Triage cannot Bucket-D convert because the fix isn't a UCIL-source
 bug — it's a harness merge-orchestration gap.
 
 This needs the user.
+
+## Resolution
+
+Both WOs successfully merged via `scripts/merge-wo.sh` after monitor session
+SIGSTOPped run-phase.sh to lock the inter-iteration window:
+
+* WO-0091 → main at `83965dc` (g5.rs new, executor.rs +670, lib.rs auto-merged
+  to keep both `agent_scheduler` and `g5`, P3-W10-F04 flipped)
+* WO-0092 → main at `b3e629f` (server.rs new, P3-W11-F11 flipped)
+* `cargo check -p ucil-daemon --tests` PASS in 3.89s (mem delta +200MB)
+* P3 = 41/45 → 43/45
+
+Key insight: `merge-wo.sh`'s "integrate main into feat first" 3-way merge
+step handles heavily-diverged branches cleanly when the changes are in
+non-overlapping text regions. Cherry-pick was over-cautious — the script
+auto-resolved both lib.rs and feature-list.json without manual intervention.
+
+resolved: true
