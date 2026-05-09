@@ -1,5 +1,11 @@
 #![deny(warnings)]
 #![warn(clippy::all, clippy::pedantic, clippy::nursery)]
+// Each frozen test below carries an explicit Panics-section narrative
+// in its rustdoc plus the standard `(SAn) ...` panic-message body
+// convention from `DEC-0007`; suppressing the auto-emitted Panics-
+// section requirement here matches the WO-0070/0085/0089/0090/0093
+// frozen-test precedent.
+#![allow(clippy::missing_panics_doc, clippy::too_long_first_doc_paragraph)]
 //! `P3-W11-F16` — pure-function fusion engine integration test binary.
 //!
 //! Master-plan §6.2 lines 643-658 — Reciprocal Rank Fusion (`RRF`)
@@ -94,7 +100,7 @@ pub async fn test_fusion_g2_rrf_correctness() {
     let probe_results = G2SourceResults {
         source: G2Source::Probe,
         hits: vec![G2Hit {
-            file_path: location.clone(),
+            file_path: location,
             start_line: 10,
             end_line: 20,
             snippet: "fn util() {} // probe".to_owned(),
