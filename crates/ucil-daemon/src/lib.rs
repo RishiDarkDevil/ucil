@@ -159,6 +159,7 @@ pub mod executor;
 pub mod g2_search;
 pub mod g3;
 pub mod g4;
+pub mod g5;
 pub mod g7;
 pub mod g8;
 pub mod lancedb_indexer;
@@ -196,6 +197,8 @@ pub use g2_search::{G2SearchError, G2SourceFactory, G2SourceProvider, LancedbPro
 pub use g3::{execute_g3, merge_g3_by_entity, G3FactObservation, G3MergeOutcome, G3MergedFact, G3Outcome, G3Query, G3Source, G3SourceOutput, G3SourceStatus, G3_MASTER_DEADLINE, G3_PER_SOURCE_DEADLINE};
 #[rustfmt::skip]
 pub use g4::{execute_g4, merge_g4_dependency_union, G4BlastRadiusEntry, G4DependencyEdge, G4EdgeKind, G4EdgeOrigin, G4Outcome, G4Query, G4Source, G4SourceOutput, G4SourceStatus, G4UnifiedEdge, G4UnionOutcome, G4_MASTER_DEADLINE, G4_PER_SOURCE_DEADLINE};
+#[rustfmt::skip]
+pub use g5::{assemble_g5_context, execute_g5, G5AssembledContext, G5ContextChunk, G5Outcome, G5Query, G5Source, G5SourceKind, G5SourceOutput, G5SourceStatus, G5_MASTER_DEADLINE, G5_PER_SOURCE_DEADLINE};
 #[rustfmt::skip]
 pub use lancedb_indexer::{ChunkIndexerError, CodeRankEmbeddingSource, EmbeddingSource, EmbeddingSourceError, IndexerHandle, IndexerState, IndexerStats, LancedbChunkIndexer};
 #[rustfmt::skip]
