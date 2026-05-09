@@ -3,20 +3,20 @@
 - **Verdict**: FAIL
 - **Min line coverage**: 85%
 - **Min branch coverage**: 75%
-- **Generated**: 2026-05-09T10:20:01Z
+- **Generated**: 2026-05-09T10:25:29Z
 
 `cargo test -p ucil-daemon` failed under coverage instrumentation. Tail of log:
 
 ```
 test crates/ucil-daemon/src/session_ttl.rs - session_ttl (line 16) ... ok
-test crates/ucil-daemon/src/branch_manager.rs - branch_manager::BranchManager::new (line 232) ... ok
+test crates/ucil-daemon/src/g4.rs - g4::merge_g4_dependency_union (line 666) ... ok
 test crates/ucil-daemon/src/g5.rs - g5::assemble_g5_context (line 581) ... ok
+test crates/ucil-daemon/src/g3.rs - g3::merge_g3_by_entity (line 560) ... ok
+test crates/ucil-daemon/src/g8.rs - g8::merge_g8_test_discoveries (line 587) ... ok
+test crates/ucil-daemon/src/g7.rs - g7::merge_g7_by_severity (line 599) ... ok
 test crates/ucil-daemon/src/priority_queue.rs - priority_queue (line 35) ... ok
 test crates/ucil-daemon/src/branch_manager.rs - branch_manager::BranchManager::branch_vectors_dir (line 275) ... ok
-test crates/ucil-daemon/src/g8.rs - g8::merge_g8_test_discoveries (line 587) ... ok
-test crates/ucil-daemon/src/g3.rs - g3::merge_g3_by_entity (line 560) ... ok
-test crates/ucil-daemon/src/g4.rs - g4::merge_g4_dependency_union (line 666) ... ok
-test crates/ucil-daemon/src/g7.rs - g7::merge_g7_by_severity (line 599) ... ok
+test crates/ucil-daemon/src/branch_manager.rs - branch_manager::BranchManager::new (line 232) ... ok
 
 failures:
 
@@ -45,7 +45,7 @@ Couldn't compile the test.
 failures:
     crates/ucil-daemon/src/g5.rs - g5::execute_g5 (line 459)
 
-test result: FAILED. 32 passed; 1 failed; 3 ignored; 0 measured; 0 filtered out; finished in 3.53s
+test result: FAILED. 32 passed; 1 failed; 3 ignored; 0 measured; 0 filtered out; finished in 3.16s
 
 error: doctest failed, to rerun pass `-p ucil-daemon --doc`
 ```
