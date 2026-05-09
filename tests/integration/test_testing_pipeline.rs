@@ -24,10 +24,10 @@
 //! G8 candidates onto `result.content[0].text.untested_functions[]`.
 //!
 //! `run_tests` itself currently falls through to the phase-1
-//! `_meta.not_yet_implemented: true` stub path — its dedicated MCP
-//! handler is a follow-up production-wiring WO. Until that lands,
-//! `check_quality`'s `untested_functions[]` projection is the
-//! canonical surface for asserting G8 dispatch.
+//! `_meta.not_yet_implemented: true` fall-through path — its
+//! dedicated MCP handler is a follow-up production-wiring WO.
+//! Until that lands, `check_quality`'s `untested_functions[]`
+//! projection is the canonical surface for asserting G8 dispatch.
 //!
 //! Sub-assertions (`DEC-0007` SA-numbered):
 //!
