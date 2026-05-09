@@ -107,6 +107,22 @@ sha2.workspace = true
 # via `lancedb` / `lance-*`); the visibility-tier hoist matches WO-0066
 # scope_in 24 ("All required deps already present").
 futures.workspace = true
+# `ucil-lsp-diagnostics` provides `DiagnosticsClient`, `SerenaClient`, the
+# `Diagnostic`/`DiagnosticSeverity`/`Language` data types, and the
+# `lsp_types::Diagnostic` re-export consumed by the F15 `type_check`
+# MCP tool dispatch handler (P3-W11-F15, WO-0090).  The wire surface
+# of the bridge has been stable since WO-0014/WO-0015; this is the
+# first daemon-side consumer.  Sibling-crate path dep, so no new
+# external dep enters the workspace.
+ucil-lsp-diagnostics = { path = "../ucil-lsp-diagnostics" }
+# `lsp-types` is consumed by the F15 `type_check` handler (and by the
+# WO-0090 frozen test) for the public `lsp_types::Diagnostic` /
+# `DiagnosticSeverity` / `NumberOrString` / `Url` types that
+# `DiagnosticsClient::diagnostics` returns and accepts.  The dep is
+# already in the workspace `[workspace.dependencies]` block (used by
+# `ucil-lsp-diagnostics`); the daemon-side use is additive and
+# transitive in `Cargo.lock` already.
+lsp-types = { workspace = true }
 
 [dev-dependencies]
 tempfile.workspace = true

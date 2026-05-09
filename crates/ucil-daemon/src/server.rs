@@ -58,9 +58,14 @@ use crate::g4::{
     execute_g4, G4Query, G4Source, G4SourceOutput, G4SourceStatus, G4UnifiedEdge, G4UnionOutcome,
     G4_MASTER_DEADLINE,
 };
+use crate::g7::{execute_g7, merge_g7_by_severity, G7Query, G7Source, G7_DEFAULT_MASTER_DEADLINE};
+use crate::g8::{
+    execute_g8, merge_g8_test_discoveries, G8Query, G8Source, G8_DEFAULT_MASTER_DEADLINE,
+};
 use crate::lancedb_indexer::EmbeddingSource;
 use crate::text_search::{self, TextMatch, TextSearchError};
 use ucil_core::{fuse_g2_rrf, G2FusedOutcome, G2SourceResults};
+use ucil_lsp_diagnostics::{DiagnosticsClient, Language};
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -511,6 +516,49 @@ pub struct McpServer {
     /// production-wiring WO that bundles G4 into the daemon's startup
     /// orchestrator (WO-0072 / WO-0073 deferral conventions).
     pub g4_sources: Option<Arc<Vec<Arc<dyn G4Source>>>>,
+    /// Optional G7 (Quality) source list — the dependency-inversion
+    /// seam (`DEC-0008` §4) that backs the `check_quality` MCP tool
+    /// (`P3-W11-F10`, master-plan §3.2 row 14 + §5.7).
+    ///
+    /// When present, `tools/call name == "check_quality"` is dispatched
+    /// to [`McpServer::handle_check_quality`], which fans out
+    /// [`crate::g7::execute_g7`] in parallel with
+    /// [`crate::g8::execute_g8`] (G8 sources are paired through
+    /// [`Self::g8_sources`]) and projects the merged outcomes into the
+    /// `{ issues[], untested_functions[], meta }` wire shape.  When
+    /// absent, control falls through to the phase-1
+    /// `_meta.not_yet_implemented: true` stub path so phase-1 invariant
+    /// #9 stays preserved.
+    ///
+    /// Production wiring (real `LspDiagnosticsG7Source` /
+    /// `EslintG7Source` / `RuffG7Source` / `SemgrepG7Source` impls) is
+    /// deferred to a follow-up production-wiring WO per the
+    /// WO-0083 / WO-0085 / WO-0089 deferral conventions.
+    pub g7_sources: Option<Arc<Vec<Arc<dyn G7Source + Send + Sync>>>>,
+    /// Optional G8 (Testing) source list — the dependency-inversion
+    /// seam (`DEC-0008` §4) that pairs with [`Self::g7_sources`] under
+    /// the `check_quality` MCP tool dispatch path
+    /// (`P3-W11-F10`, master-plan §3.2 row 14 + §5.8).  Used by
+    /// [`McpServer::handle_check_quality`] to fan
+    /// [`crate::g8::execute_g8`] out in parallel with G7.
+    ///
+    /// Production wiring (real `ConventionG8Source` / `ImportG8Source`
+    /// / `KgRelationsG8Source` impls) is deferred to a follow-up
+    /// production-wiring WO per the WO-0089 deferral convention.
+    pub g8_sources: Option<Arc<Vec<Arc<dyn G8Source + Send + Sync>>>>,
+    /// Optional [`DiagnosticsClient`] — the dependency-inversion seam
+    /// (`DEC-0008` §4) that backs the `type_check` MCP tool
+    /// (`P3-W11-F15`, master-plan §3.2 row 18).
+    ///
+    /// When present, `tools/call name == "type_check"` is dispatched
+    /// to [`McpServer::handle_type_check`], which calls
+    /// [`DiagnosticsClient::diagnostics`] for each input file, filters
+    /// the returned diagnostics to type errors only, and projects the
+    /// surviving rows into the `{ errors[], meta }` wire shape.  When
+    /// absent, control falls through to the phase-1
+    /// `_meta.not_yet_implemented: true` stub path so phase-1
+    /// invariant #9 stays preserved.
+    pub diagnostics_client: Option<Arc<DiagnosticsClient>>,
 }
 
 impl std::fmt::Debug for McpServer {
@@ -528,6 +576,12 @@ impl std::fmt::Debug for McpServer {
             .field("g2_sources", &self.g2_sources)
             .field("find_similar", &self.find_similar)
             .field("g4_sources", &self.g4_sources.as_ref().map(|s| s.len()))
+            .field("g7_sources", &self.g7_sources.as_ref().map(|s| s.len()))
+            .field("g8_sources", &self.g8_sources.as_ref().map(|s| s.len()))
+            .field(
+                "diagnostics_client",
+                &self.diagnostics_client.as_ref().map(|_| "<attached>"),
+            )
             .finish()
     }
 }
@@ -555,6 +609,9 @@ impl McpServer {
             g2_sources: None,
             find_similar: None,
             g4_sources: None,
+            g7_sources: None,
+            g8_sources: None,
+            diagnostics_client: None,
         }
     }
 
@@ -588,6 +645,9 @@ impl McpServer {
             g2_sources: None,
             find_similar: None,
             g4_sources: None,
+            g7_sources: None,
+            g8_sources: None,
+            diagnostics_client: None,
         }
     }
 
@@ -660,6 +720,65 @@ impl McpServer {
     #[must_use]
     pub fn with_g4_sources(mut self, sources: Arc<Vec<Arc<dyn G4Source>>>) -> Self {
         self.g4_sources = Some(sources);
+        self
+    }
+
+    /// Attach a G7 (Quality) source list so `tools/call name ==
+    /// "check_quality"` is dispatched to
+    /// [`McpServer::handle_check_quality`] (`P3-W11-F10`, master-plan
+    /// §3.2 row 14 + §5.7).  Pairs with [`Self::with_g8_sources`] —
+    /// the handler runs both fan-outs in parallel via
+    /// [`tokio::join!`] before merging the two outcomes.
+    ///
+    /// Builder method — chains off any prior `with_*` setter so the
+    /// daemon's startup orchestrator can attach the source list after
+    /// wiring the KG / G2 / `find_similar` / G4 layers.  When this
+    /// builder is **not** called, the `check_quality` tool falls
+    /// through to the phase-1 `_meta.not_yet_implemented: true` stub
+    /// path so phase-1 invariant #9 stays preserved.  Per `DEC-0008`
+    /// §4 the [`G7Source`] trait is UCIL-internal (the dependency-
+    /// inversion seam); production wiring of real subprocess clients
+    /// (`LspDiagnosticsG7Source`, `EslintG7Source`, `RuffG7Source`,
+    /// `SemgrepG7Source`) is deferred to a follow-up production-
+    /// wiring WO per the WO-0085 backbone deferral convention.
+    #[must_use]
+    pub fn with_g7_sources(mut self, sources: Arc<Vec<Arc<dyn G7Source + Send + Sync>>>) -> Self {
+        self.g7_sources = Some(sources);
+        self
+    }
+
+    /// Attach a G8 (Testing) source list — the partner of
+    /// [`Self::with_g7_sources`] under the `check_quality` MCP tool
+    /// dispatch path (`P3-W11-F10`, master-plan §3.2 row 14 + §5.8).
+    ///
+    /// Builder method — chains off any prior `with_*` setter.  Per
+    /// `DEC-0008` §4 the [`G8Source`] trait is UCIL-internal;
+    /// production wiring of real impls (`ConventionG8Source`,
+    /// `ImportG8Source`, `KgRelationsG8Source`) is deferred to a
+    /// follow-up production-wiring WO per the WO-0089 backbone
+    /// deferral convention.
+    #[must_use]
+    pub fn with_g8_sources(mut self, sources: Arc<Vec<Arc<dyn G8Source + Send + Sync>>>) -> Self {
+        self.g8_sources = Some(sources);
+        self
+    }
+
+    /// Attach a [`DiagnosticsClient`] so `tools/call name ==
+    /// "type_check"` is dispatched to
+    /// [`McpServer::handle_type_check`] (`P3-W11-F15`, master-plan
+    /// §3.2 row 18).  The handler uses the client to issue
+    /// `textDocument/diagnostic` requests for each input file and
+    /// filters the resulting LSP diagnostics to type errors only.
+    ///
+    /// Builder method — chains off any prior `with_*` setter so the
+    /// daemon's startup orchestrator can attach the client after
+    /// wiring the LSP-bridge layer.  When this builder is **not**
+    /// called, the `type_check` tool falls through to the phase-1
+    /// `_meta.not_yet_implemented: true` stub path so phase-1
+    /// invariant #9 stays preserved.
+    #[must_use]
+    pub fn with_diagnostics_client(mut self, client: Arc<DiagnosticsClient>) -> Self {
+        self.diagnostics_client = Some(client);
         self
     }
 
@@ -833,6 +952,24 @@ impl McpServer {
             if let Some(srcs) = self.g4_sources.as_ref() {
                 return Self::handle_blast_radius(id, params, srcs).await;
             }
+        }
+        // `check_quality` (P3-W11-F10) — fans out G7 (Quality) and
+        // G8 (Testing) backbones in parallel and projects the merged
+        // outcomes into a `{ issues[], untested_functions[] }`
+        // response.  Master-plan §3.2 row 14 / §5.7 / §5.8 / §18 Phase
+        // 3 Week 11 item 6.  When `g7_sources` AND `g8_sources` are
+        // both `None` (i.e. no production wiring of either backbone),
+        // control falls through to the phase-1 stub path below.
+        if name == "check_quality" && (self.g7_sources.is_some() || self.g8_sources.is_some()) {
+            return self.handle_check_quality(id, params).await;
+        }
+        // `type_check` (P3-W11-F15) — filters the LSP diagnostics
+        // bridge output to type errors only and projects the surviving
+        // rows into a `{ errors[] }` response.  Master-plan §3.2 row
+        // 18.  When `diagnostics_client` is `None`, control falls
+        // through to the phase-1 stub path below.
+        if name == "type_check" && self.diagnostics_client.is_some() {
+            return self.handle_type_check(id, params).await;
         }
 
         // Phase-1 invariant #9: every tool handler is a stub that
@@ -1694,6 +1831,335 @@ impl McpServer {
             }
         })
     }
+
+    /// Handle the `check_quality` MCP tool (`P3-W11-F10`,
+    /// master-plan §3.2 row 14 + §5.7 + §5.8 + §18 Phase 3 Week 11
+    /// item 6).
+    ///
+    /// Reads MCP `arguments`:
+    ///
+    /// * `target` (required, string) — file path or symbol the
+    ///   quality query is anchored on.  Missing/non-string →
+    ///   JSON-RPC `-32602`.
+    /// * `reason` (required per CEQP — master-plan §8.2) —
+    ///   operator-readable rationale for the call.  Currently
+    ///   accepted but not surfaced in the response.
+    /// * `current_task` / `files_in_context` / `token_budget` — CEQP
+    ///   universal parameters; accepted but not surfaced.
+    ///
+    /// Builds a [`G7Query`] AND a [`G8Query`] from `target`, then
+    /// fans out [`crate::g7::execute_g7`] and [`crate::g8::execute_g8`]
+    /// IN PARALLEL via [`tokio::join!`] (master-plan §5.7 + §5.8
+    /// "concurrently, then merge"), runs the severity-weighted G7
+    /// merge ([`crate::g7::merge_g7_by_severity`]) and the
+    /// dedup-by-test-path G8 merge
+    /// ([`crate::g8::merge_g8_test_discoveries`]) on the outputs,
+    /// and projects the merged data into the canonical
+    /// `{ issues[], untested_functions[], meta }` wire shape.
+    ///
+    /// The handler emits a `tracing::Span::current().record("target",
+    /// ...)` field after argument parsing so the §15.2
+    /// `ucil.tool.check_quality` span carries the operator-readable
+    /// target verbatim.
+    ///
+    /// On empty G7 / G8 source lists the handler returns the same
+    /// envelope shape with empty `issues[]` / `untested_functions[]`
+    /// arrays — never panics.
+    #[tracing::instrument(name = "ucil.tool.check_quality")]
+    #[allow(clippy::too_many_lines)]
+    async fn handle_check_quality(&self, id: &Value, params: &Value) -> Value {
+        let args = params
+            .get("arguments")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+
+        let Some(target) = args.get("target").and_then(Value::as_str) else {
+            return jsonrpc_error(
+                id,
+                -32602,
+                "check_quality: `arguments.target` is required and must be a string",
+            );
+        };
+        let target = target.to_owned();
+        if args.get("reason").and_then(Value::as_str).is_none() {
+            return jsonrpc_error(
+                id,
+                -32602,
+                "check_quality: `arguments.reason` is required and must be a string (CEQP)",
+            );
+        }
+        tracing::Span::current().record("target", target.as_str());
+
+        let g7_query = G7Query {
+            target: target.clone(),
+            categories: vec![],
+        };
+        let g8_query = G8Query {
+            changed_files: vec![PathBuf::from(target.clone())],
+        };
+
+        let g7_boxed = boxed_g7_sources(self.g7_sources.as_ref());
+        let g8_boxed = boxed_g8_sources(self.g8_sources.as_ref());
+
+        let start = std::time::Instant::now();
+        // PARALLEL fan-out via `tokio::join!(execute_g7(...), execute_g8(...))`
+        // — G7 (Quality) and G8 (Testing) run concurrently per
+        // master-plan §5.7 + §5.8 + §6.1 line 606.  Sequential awaits
+        // would compound the per-group masters and exceed the §6.1
+        // 600 ms p50 latency budget for the `check_quality` MCP tool —
+        // see `scope_in` #1 + the SA6 wall-clock canary in the frozen
+        // test.
+        let (g7_outcome, g8_outcome) = tokio::join!(
+            execute_g7(g7_boxed, g7_query, G7_DEFAULT_MASTER_DEADLINE),
+            execute_g8(g8_query, g8_boxed, G8_DEFAULT_MASTER_DEADLINE),
+        );
+        let wall_elapsed_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+
+        let all_g7_issues: Vec<_> = g7_outcome
+            .results
+            .iter()
+            .filter(|r| matches!(r.status, crate::g7::G7SourceStatus::Available))
+            .flat_map(|r| r.issues.clone())
+            .collect();
+        let merged_issues = merge_g7_by_severity(&all_g7_issues);
+        let merged_candidates = merge_g8_test_discoveries(&g8_outcome);
+
+        let issues_json: Vec<Value> = merged_issues
+            .iter()
+            .map(|m| {
+                json!({
+                    "severity": m.severity.as_str(),
+                    "category": m.category,
+                    "file": m.file_path,
+                    "line": m.line_start,
+                    "fix_suggestion": m.fix_suggestions.first(),
+                    "source_tools": m.source_tools,
+                    "message": m.message,
+                    "rule_ids": m.rule_ids,
+                })
+            })
+            .collect();
+        let untested_json: Vec<Value> = merged_candidates
+            .iter()
+            .map(|m| {
+                let methods_found_by: Vec<&'static str> = m
+                    .methods_found_by
+                    .iter()
+                    .map(|method| match method {
+                        crate::g8::TestDiscoveryMethod::Convention => "convention",
+                        crate::g8::TestDiscoveryMethod::Import => "import",
+                        crate::g8::TestDiscoveryMethod::KgRelations => "kg_relations",
+                    })
+                    .collect();
+                let source_path: Option<String> = m
+                    .source_paths
+                    .first()
+                    .map(|p| p.to_string_lossy().into_owned());
+                let source_paths: Vec<String> = m
+                    .source_paths
+                    .iter()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .collect();
+                json!({
+                    "test_path": m.test_path.to_string_lossy(),
+                    "source_path": source_path,
+                    "source_paths": source_paths,
+                    "methods_found_by": methods_found_by,
+                    "max_confidence": m.max_confidence,
+                })
+            })
+            .collect();
+
+        let master_timed_out = g7_outcome.master_timed_out || g8_outcome.master_timed_out;
+        let payload = json!({
+            "issues": issues_json,
+            "untested_functions": untested_json,
+            "meta": {
+                "master_timed_out": master_timed_out,
+                "wall_elapsed_ms": wall_elapsed_ms,
+            }
+        });
+        let summary = format!(
+            "check_quality: {} issues, {} untested functions for `{}`",
+            merged_issues.len(),
+            merged_candidates.len(),
+            target,
+        );
+
+        json!({
+            "jsonrpc": JSONRPC_VERSION,
+            "id": id.clone(),
+            "result": {
+                "_meta": {
+                    "tool": "check_quality",
+                    "source": "g7+g8-parallel",
+                    "master_timed_out": master_timed_out,
+                    "wall_elapsed_ms": wall_elapsed_ms,
+                },
+                "content": [
+                    {
+                        "type": "text",
+                        "text": serde_json::to_string(&payload)
+                            .unwrap_or_else(|_| summary.clone())
+                    }
+                ],
+                "isError": false
+            }
+        })
+    }
+
+    /// Handle the `type_check` MCP tool (`P3-W11-F15`, master-plan
+    /// §3.2 row 18).
+    ///
+    /// Reads MCP `arguments`:
+    ///
+    /// * `files` (required, array of strings) — file paths to type-
+    ///   check.  Missing/non-array → JSON-RPC `-32602`.
+    /// * `reason` (required per CEQP — master-plan §8.2) —
+    ///   operator-readable rationale.  Accepted but not surfaced.
+    /// * `current_task` / `files_in_context` / `token_budget` — CEQP
+    ///   universal parameters; accepted but not surfaced.
+    ///
+    /// For each input file, the handler resolves its [`Language`]
+    /// from the path extension, converts the path to a `file://`
+    /// URL, and calls [`DiagnosticsClient::diagnostics`] to fetch
+    /// the LSP `textDocument/diagnostic` results.  Each returned
+    /// diagnostic is run through [`is_type_error_diagnostic`]: only
+    /// rows with `severity == DiagnosticSeverity::ERROR` AND a
+    /// type-checker source (`rust-analyzer`, `pyright`, `tsserver`,
+    /// `typescript`, `mypy`) OR a language-specific type-error code
+    /// prefix (Rust `E…`, TypeScript `TS2xxx`/`TS7xxx`, Python
+    /// `report…`) survive the filter.  Lint warnings (Warning
+    /// severity) and lint errors with non-type-checker sources (e.g.
+    /// `clippy`) are dropped.
+    ///
+    /// Files lacking an LSP-supported language extension are
+    /// counted in `meta.files_skipped` rather than emitted as an
+    /// error, so a polyglot caller can hand the handler a mixed
+    /// list without per-file pre-filtering.
+    ///
+    /// The handler emits a `tracing::Span::current().record("files",
+    /// ...)` field after argument parsing so the §15.2
+    /// `ucil.tool.type_check` span carries the operator-readable
+    /// file count.
+    #[tracing::instrument(name = "ucil.tool.type_check")]
+    #[allow(clippy::too_many_lines)]
+    async fn handle_type_check(&self, id: &Value, params: &Value) -> Value {
+        let args = params
+            .get("arguments")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+
+        let Some(files_arr) = args.get("files").and_then(Value::as_array) else {
+            return jsonrpc_error(
+                id,
+                -32602,
+                "type_check: `arguments.files` is required and must be an array of strings",
+            );
+        };
+        let files: Vec<String> = files_arr
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_owned))
+            .collect();
+        if args.get("reason").and_then(Value::as_str).is_none() {
+            return jsonrpc_error(
+                id,
+                -32602,
+                "type_check: `arguments.reason` is required and must be a string (CEQP)",
+            );
+        }
+        tracing::Span::current().record("files", files.len());
+
+        let Some(client) = self.diagnostics_client.as_ref() else {
+            return jsonrpc_error(
+                id,
+                -32603,
+                "type_check: no DiagnosticsClient attached to McpServer",
+            );
+        };
+
+        let mut errors: Vec<Value> = Vec::new();
+        let mut files_checked: usize = 0;
+        let mut files_skipped: usize = 0;
+
+        for file in &files {
+            let Some(language) = language_from_path(file) else {
+                files_skipped += 1;
+                continue;
+            };
+            let Some(url) = path_to_file_url(file) else {
+                files_skipped += 1;
+                continue;
+            };
+            files_checked += 1;
+            let Ok(raw) = client.diagnostics(url).await else {
+                continue;
+            };
+            // Filter to type errors only — Error severity AND a
+            // type-checker source / type-error code prefix.  The M3
+            // mutation drops this filter (`.filter(|_| true)`); when
+            // the filter is dropped, lint warnings + non-type-error
+            // sources leak through and the SA1 length assertion
+            // panics.
+            let kept: Vec<lsp_types::Diagnostic> =
+                raw.into_iter().filter(is_type_error_diagnostic).collect();
+            for diag in kept {
+                let line = diag.range.start.line + 1;
+                let severity_str = match diag.severity {
+                    Some(lsp_types::DiagnosticSeverity::ERROR) => "error",
+                    Some(lsp_types::DiagnosticSeverity::WARNING) => "warning",
+                    Some(lsp_types::DiagnosticSeverity::INFORMATION) => "information",
+                    _ => "hint",
+                };
+                errors.push(json!({
+                    "file": file,
+                    "line": line,
+                    "message": diag.message,
+                    "language": language_to_str(language),
+                    "severity": severity_str,
+                    "source": diag.source,
+                }));
+            }
+        }
+
+        let payload = json!({
+            "errors": errors,
+            "meta": {
+                "files_checked": files_checked,
+                "files_skipped": files_skipped,
+            }
+        });
+        let summary = format!(
+            "type_check: {} type error(s) across {} file(s) ({} skipped)",
+            payload
+                .pointer("/errors")
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len),
+            files_checked,
+            files_skipped,
+        );
+
+        json!({
+            "jsonrpc": JSONRPC_VERSION,
+            "id": id.clone(),
+            "result": {
+                "_meta": {
+                    "tool": "type_check",
+                    "source": "lsp-diagnostics-bridge",
+                    "files_checked": files_checked,
+                    "files_skipped": files_skipped,
+                },
+                "content": [
+                    {
+                        "type": "text",
+                        "text": serde_json::to_string(&payload)
+                            .unwrap_or_else(|_| summary.clone())
+                    }
+                ],
+                "isError": false
+            }
+        })
+    }
 }
 
 // ── G4 architecture handler helpers (P3-W10-F16/F17/F18) ────────────────────
@@ -1811,6 +2277,176 @@ fn boxed_g4_sources(
             }) as Box<dyn G4Source + Send + Sync + 'static>
         })
         .collect()
+}
+
+// ── G7 / G8 / DiagnosticsClient helper plumbing (P3-W11-F10/F15) ─────────────
+//
+// Same shape as the `G4SourceArcAdapter` + `boxed_g4_sources` pair
+// above — `crate::g7::execute_g7` and `crate::g8::execute_g8` both
+// consume `Vec<Box<dyn G7Source + Send + Sync + 'static>>` /
+// `Vec<Box<dyn G8Source + Send + Sync + 'static>>` by value, but the
+// daemon's startup orchestrator (and the F10 frozen test) keep a
+// long-lived `Arc<Vec<Arc<dyn G7Source ...>>>` so per-call dispatches
+// share the source list via `Arc::clone`.
+
+/// Adapter delegating to an `Arc<dyn G7Source + Send + Sync>` so the
+/// `boxed_g7_sources` helper can produce the
+/// `Vec<Box<dyn G7Source + Send + Sync + 'static>>` shape that
+/// [`crate::g7::execute_g7`] consumes by value.
+///
+/// Per `DEC-0008` §4 the [`G7Source`] trait is UCIL-internal so this
+/// pattern does not shadow any external wire format.
+struct G7SourceArcAdapter {
+    inner: Arc<dyn G7Source + Send + Sync>,
+}
+
+#[async_trait::async_trait]
+impl G7Source for G7SourceArcAdapter {
+    fn source_id(&self) -> &str {
+        self.inner.source_id()
+    }
+
+    async fn execute(&self, query: &G7Query) -> crate::g7::G7SourceOutput {
+        self.inner.execute(query).await
+    }
+}
+
+/// Build an owned `Vec<Box<dyn G7Source ...>>` from an optional
+/// `Arc<Vec<Arc<dyn G7Source ...>>>`; an absent list yields an empty
+/// vec so [`crate::g7::execute_g7`] still runs end-to-end (with zero
+/// per-source results) on a no-G7-attached `McpServer`.
+fn boxed_g7_sources(
+    sources: Option<&Arc<Vec<Arc<dyn G7Source + Send + Sync>>>>,
+) -> Vec<Box<dyn G7Source + Send + Sync + 'static>> {
+    sources.map_or_else(Vec::new, |srcs| {
+        srcs.iter()
+            .map(|s| {
+                Box::new(G7SourceArcAdapter {
+                    inner: Arc::clone(s),
+                }) as Box<dyn G7Source + Send + Sync + 'static>
+            })
+            .collect()
+    })
+}
+
+/// Adapter delegating to an `Arc<dyn G8Source + Send + Sync>` —
+/// mirrors [`G7SourceArcAdapter`] for the G8 (Testing) lane.
+struct G8SourceArcAdapter {
+    inner: Arc<dyn G8Source + Send + Sync>,
+}
+
+#[async_trait::async_trait]
+impl G8Source for G8SourceArcAdapter {
+    fn source_id(&self) -> String {
+        self.inner.source_id()
+    }
+
+    fn method(&self) -> crate::g8::TestDiscoveryMethod {
+        self.inner.method()
+    }
+
+    async fn execute(&self, query: &G8Query) -> Result<Vec<crate::g8::G8TestCandidate>, String> {
+        self.inner.execute(query).await
+    }
+}
+
+/// Build an owned `Vec<Box<dyn G8Source ...>>` from an optional
+/// `Arc<Vec<Arc<dyn G8Source ...>>>`; an absent list yields an empty
+/// vec so [`crate::g8::execute_g8`] still runs end-to-end on a
+/// no-G8-attached `McpServer`.
+fn boxed_g8_sources(
+    sources: Option<&Arc<Vec<Arc<dyn G8Source + Send + Sync>>>>,
+) -> Vec<Box<dyn G8Source + Send + Sync + 'static>> {
+    sources.map_or_else(Vec::new, |srcs| {
+        srcs.iter()
+            .map(|s| {
+                Box::new(G8SourceArcAdapter {
+                    inner: Arc::clone(s),
+                }) as Box<dyn G8Source + Send + Sync + 'static>
+            })
+            .collect()
+    })
+}
+
+/// Resolve a [`Language`] from a file path's extension.
+///
+/// Returns `None` for files whose extension does not map to one of
+/// the LSP-supported languages — `handle_type_check` counts these in
+/// `meta.files_skipped` rather than emitting an error.
+fn language_from_path(path: &str) -> Option<Language> {
+    let ext = std::path::Path::new(path).extension()?.to_str()?;
+    match ext.to_ascii_lowercase().as_str() {
+        "rs" => Some(Language::Rust),
+        "py" | "pyi" => Some(Language::Python),
+        "ts" | "tsx" | "js" | "jsx" | "mts" | "cts" => Some(Language::TypeScript),
+        "go" => Some(Language::Go),
+        "java" => Some(Language::Java),
+        "c" | "h" => Some(Language::C),
+        "cpp" | "cc" | "cxx" | "hpp" | "hh" | "hxx" => Some(Language::Cpp),
+        _ => None,
+    }
+}
+
+/// Project a [`Language`] back to its lowercase wire-string for the
+/// `type_check` response's `errors[].language` field.
+const fn language_to_str(language: Language) -> &'static str {
+    match language {
+        Language::Python => "python",
+        Language::Rust => "rust",
+        Language::TypeScript => "typescript",
+        Language::Go => "go",
+        Language::Java => "java",
+        Language::C => "c",
+        Language::Cpp => "cpp",
+    }
+}
+
+/// Convert an absolute filesystem path to an `lsp_types::Url` for
+/// dispatch through [`DiagnosticsClient::diagnostics`].
+///
+/// Returns `None` for paths that `Url::from_file_path` rejects (e.g.
+/// non-absolute paths on platforms that require absolute URI bases);
+/// `handle_type_check` counts these in `meta.files_skipped` rather
+/// than emitting an error.
+fn path_to_file_url(path: &str) -> Option<lsp_types::Url> {
+    lsp_types::Url::from_file_path(path).ok()
+}
+
+/// Predicate filter that keeps an LSP [`lsp_types::Diagnostic`] iff
+/// it is a TYPE error per master-plan §3.2 row 18 spec.
+///
+/// A diagnostic is a type error when:
+///
+/// 1. `severity == DiagnosticSeverity::ERROR` — Warning / Information
+///    / Hint diagnostics never qualify regardless of source/code.
+/// 2. EITHER `source` is in the type-checker allow-list
+///    (`rust-analyzer`, `pyright`, `tsserver`, `typescript`, `mypy`)
+///    OR `code` matches one of the language-specific type-error code
+///    prefixes (Rust `E…`, TypeScript `TS2xxx`/`TS7xxx`, Python
+///    `report…`).
+///
+/// Lint errors (Error severity but source = `clippy` / `eslint` /
+/// `ruff` / `semgrep`) are filtered OUT — they belong to the
+/// `check_quality` (G7) lane.
+///
+/// The M3 mutation contract drops this filter entirely
+/// (`.filter(|_| true)`); when the filter is dropped lint errors +
+/// warnings leak into the `errors[]` array and the SA1 length
+/// assertion in `test_type_check_tool` panics.
+fn is_type_error_diagnostic(diag: &lsp_types::Diagnostic) -> bool {
+    if diag.severity != Some(lsp_types::DiagnosticSeverity::ERROR) {
+        return false;
+    }
+    let source_ok = matches!(
+        diag.source.as_deref(),
+        Some("rust-analyzer" | "pyright" | "tsserver" | "typescript" | "mypy"),
+    );
+    let code_ok = matches!(&diag.code, Some(lsp_types::NumberOrString::String(s))
+        if s.starts_with('E')
+            || s.starts_with("TS2")
+            || s.starts_with("TS7")
+            || s.starts_with("report"));
+    source_ok || code_ok
 }
 
 /// Parse `arguments.max_depth` as a `u32` clamped to `[0, 8]`.  Falls
@@ -6948,5 +7584,565 @@ async fn test_blast_radius_tool() {
         Some(false),
         "(SA8) master_timed_out == false; left: {:?}, right: false",
         meta.get("master_timed_out")
+    );
+}
+
+// ── G7 quality MCP tool tests (P3-W11-F10) ────────────────────────────────────
+//
+// One frozen `#[tokio::test]` selector lives at MODULE ROOT (NOT inside
+// any inner `mod tests { … }`) so the substring-match selector
+// `cargo test -p ucil-daemon server::test_check_quality_tool` resolves
+// uniquely without `--exact` per DEC-0007 + WO-0067/0068 lessons §planner.
+//
+// The test injects deterministic in-process `TestG7Source` /
+// `TestG8Source` impls (UCIL's own dependency-inversion seam per
+// DEC-0008 §4 — these are NOT mocks of any external wire format) and
+// exercises `handle_check_quality` end-to-end through `handle_line` so
+// the parallel `tokio::join!` fan-out + merge projection is asserted
+// over the real JSON-RPC envelope.
+
+/// Frozen acceptance test for `P3-W11-F10` (`check_quality`).
+///
+/// Master-plan §3.2 row 14 + §5.7 + §5.8 + §18 Phase 3 Week 11 item 6.
+/// Drives `handle_tools_call` end-to-end through
+/// [`McpServer::handle_check_quality`] with deterministic
+/// in-process [`G7Source`] + [`G8Source`] impls and asserts SA1-SA6:
+///
+/// * **SA1 — Issue count**: 3 G7 issues spanning Critical / High /
+///   Medium severities → `issues[].len() == 3` (after the
+///   severity-weighted merge, which preserves count when groups are
+///   keyed distinct).
+/// * **SA2 — Severity vocabulary canary**: `issues[0].severity ==
+///   "critical"` (lowercase per §5.7 + §12.1 + WO-0085 sentinel-row
+///   precedent).
+/// * **SA3 — Untested-function count**: 2 G8 candidates with distinct
+///   `test_path` values → `untested_functions[].len() == 2` (after
+///   the dedup-by-test-path merge).
+/// * **SA4 — Untested-function path**: `untested_functions[0].test_path`
+///   matches the seeded test path.
+/// * **SA5 — Master deadline did not trip**: both G7 + G8 sources
+///   return immediately under the 5500 ms / 5000 ms masters →
+///   `meta.master_timed_out == false`.
+/// * **SA6 — Parallelism wall-clock canary**:
+///   `meta.wall_elapsed_ms < 5000` ms.  If the parallel `tokio::join!`
+///   regresses to sequential awaits on the per-source 4500 ms
+///   deadlines, this canary trips before either inner timeout fires.
+///
+/// Selector substring-match: `cargo test -p ucil-daemon
+/// server::test_check_quality_tool` resolves uniquely without
+/// `--exact`.
+#[cfg(test)]
+#[allow(clippy::too_many_lines, clippy::missing_panics_doc)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_check_quality_tool() {
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    use crate::g7::{G7Issue, G7SourceOutput, G7SourceStatus, Severity};
+    use crate::g8::{G8TestCandidate, TestDiscoveryMethod};
+
+    /// Local [`G7Source`] impl returning a pre-canned issue list.
+    /// Per `DEC-0008` §4 the [`G7Source`] trait is UCIL-internal so
+    /// this is not a substitute for any external wire format —
+    /// matches the `g7::test_g7_parallel_pipeline` precedent.
+    struct TestG7Source {
+        id: String,
+        issues: Vec<G7Issue>,
+    }
+
+    #[async_trait::async_trait]
+    impl G7Source for TestG7Source {
+        fn source_id(&self) -> &str {
+            &self.id
+        }
+
+        async fn execute(&self, _query: &G7Query) -> G7SourceOutput {
+            G7SourceOutput {
+                source_id: self.id.clone(),
+                status: G7SourceStatus::Available,
+                elapsed_ms: 0,
+                issues: self.issues.clone(),
+                error: None,
+            }
+        }
+    }
+
+    /// Local [`G8Source`] impl returning a pre-canned candidate list.
+    /// Same `DEC-0008` §4 carve-out as `TestG7Source` above.
+    struct TestG8Source {
+        id: String,
+        method: TestDiscoveryMethod,
+        candidates: Vec<G8TestCandidate>,
+    }
+
+    #[async_trait::async_trait]
+    impl G8Source for TestG8Source {
+        fn source_id(&self) -> String {
+            self.id.clone()
+        }
+
+        fn method(&self) -> TestDiscoveryMethod {
+            self.method
+        }
+
+        async fn execute(&self, _query: &G8Query) -> Result<Vec<G8TestCandidate>, String> {
+            Ok(self.candidates.clone())
+        }
+    }
+
+    // Three G7 issues spanning Critical / High / Medium severities,
+    // anchored to distinct `(file_path, line_start, category)` keys
+    // so the severity-weighted merge preserves all three in the
+    // output (no group collapse).
+    let issues = vec![
+        G7Issue {
+            source_tool: "lsp:rust-analyzer".to_owned(),
+            file_path: "src/auth.rs".to_owned(),
+            line_start: Some(10),
+            line_end: Some(10),
+            category: "type_error".to_owned(),
+            severity: Severity::Critical,
+            message: "borrow checker error".to_owned(),
+            rule_id: Some("E0382".to_owned()),
+            fix_suggestion: Some("clone the borrow".to_owned()),
+        },
+        G7Issue {
+            source_tool: "eslint".to_owned(),
+            file_path: "src/auth.rs".to_owned(),
+            line_start: Some(20),
+            line_end: Some(20),
+            category: "lint".to_owned(),
+            severity: Severity::High,
+            message: "no-unused-vars".to_owned(),
+            rule_id: Some("no-unused-vars".to_owned()),
+            fix_suggestion: None,
+        },
+        G7Issue {
+            source_tool: "ruff".to_owned(),
+            file_path: "src/auth.rs".to_owned(),
+            line_start: Some(30),
+            line_end: Some(30),
+            category: "lint".to_owned(),
+            severity: Severity::Medium,
+            message: "F401: unused import".to_owned(),
+            rule_id: Some("F401".to_owned()),
+            fix_suggestion: None,
+        },
+    ];
+
+    // Two G8 candidates with distinct `test_path` values so the
+    // dedup-by-test-path merge produces exactly two output rows.
+    let candidates = vec![
+        G8TestCandidate {
+            test_path: PathBuf::from("tests/test_auth_login.rs"),
+            source_path: Some(PathBuf::from("src/auth.rs")),
+            method: TestDiscoveryMethod::Convention,
+            confidence: 0.95,
+        },
+        G8TestCandidate {
+            test_path: PathBuf::from("tests/test_auth_logout.rs"),
+            source_path: Some(PathBuf::from("src/auth.rs")),
+            method: TestDiscoveryMethod::Import,
+            confidence: 0.85,
+        },
+    ];
+
+    let g7_src: Arc<dyn G7Source + Send + Sync> = Arc::new(TestG7Source {
+        id: "test-g7-source".to_owned(),
+        issues,
+    });
+    let g8_src: Arc<dyn G8Source + Send + Sync> = Arc::new(TestG8Source {
+        id: "test-g8-source".to_owned(),
+        method: TestDiscoveryMethod::Convention,
+        candidates,
+    });
+
+    let server = McpServer::new()
+        .with_g7_sources(Arc::new(vec![g7_src]))
+        .with_g8_sources(Arc::new(vec![g8_src]));
+
+    let request = json!({
+        "jsonrpc": JSONRPC_VERSION,
+        "id": 0xC1,
+        "method": "tools/call",
+        "params": {
+            "name": "check_quality",
+            "arguments": {
+                "target": "src/auth.rs",
+                "reason": "verifier smoke",
+            }
+        }
+    })
+    .to_string();
+    let response = server.handle_line(&request).await;
+    assert_eq!(
+        response.get("error"),
+        None,
+        "(precondition) handler must not return JSON-RPC error: {response}"
+    );
+
+    let text = response
+        .pointer("/result/content/0/text")
+        .and_then(Value::as_str)
+        .expect("(precondition) response must carry result.content[0].text");
+    let parsed: Value = serde_json::from_str(text)
+        .expect("(precondition) result.content[0].text must be valid JSON");
+
+    let issues_arr = parsed
+        .get("issues")
+        .and_then(Value::as_array)
+        .expect("(precondition) parsed payload must carry issues[]");
+    let untested_arr = parsed
+        .get("untested_functions")
+        .and_then(Value::as_array)
+        .expect("(precondition) parsed payload must carry untested_functions[]");
+    let meta = parsed
+        .get("meta")
+        .expect("(precondition) parsed payload must carry meta");
+
+    // ── SA1 — issues[] length == 3 ──────────────────────────────────
+    assert_eq!(
+        issues_arr.len(),
+        3,
+        "(SA1) issues[] length; left: {}, right: 3",
+        issues_arr.len()
+    );
+
+    // ── SA2 — issues[0].severity == "critical" (vocabulary canary) ──
+    assert_eq!(
+        issues_arr[0].get("severity").and_then(Value::as_str),
+        Some("critical"),
+        "(SA2) issues[0].severity == \"critical\"; left: {:?}, right: \"critical\"",
+        issues_arr[0].get("severity")
+    );
+
+    // ── SA3 — untested_functions[] length == 2 ──────────────────────
+    assert_eq!(
+        untested_arr.len(),
+        2,
+        "(SA3) untested_functions[] length; left: {}, right: 2",
+        untested_arr.len()
+    );
+
+    // ── SA4 — untested_functions[0].test_path matches seeded path ──
+    let test_path_0 = untested_arr[0]
+        .get("test_path")
+        .and_then(Value::as_str)
+        .expect("(SA4 precondition) untested_functions[0].test_path must be a string");
+    assert!(
+        test_path_0.contains("tests/test_auth_login.rs")
+            || test_path_0.contains("tests/test_auth_logout.rs"),
+        "(SA4) untested_functions[0].test_path matches a seeded test path; left: {test_path_0:?}, right: one of [tests/test_auth_login.rs, tests/test_auth_logout.rs]"
+    );
+
+    // ── SA5 — meta.master_timed_out == false ────────────────────────
+    assert_eq!(
+        meta.get("master_timed_out").and_then(Value::as_bool),
+        Some(false),
+        "(SA5) meta.master_timed_out == false; left: {:?}, right: false",
+        meta.get("master_timed_out")
+    );
+
+    // ── SA6 — meta.wall_elapsed_ms < 5000 (parallelism canary) ──────
+    let wall_elapsed = meta
+        .get("wall_elapsed_ms")
+        .and_then(Value::as_u64)
+        .expect("(SA6 precondition) meta.wall_elapsed_ms must be a u64");
+    assert!(
+        wall_elapsed < 5000,
+        "(SA6) meta.wall_elapsed_ms < 5000 ms (parallelism canary — sequential awaits would compound G7+G8 per-source deadlines); left: {wall_elapsed}, right: < 5000"
+    );
+}
+
+// ── G7 type_check MCP tool tests (P3-W11-F15) ─────────────────────────────────
+//
+// One frozen `#[tokio::test]` selector lives at MODULE ROOT (NOT inside
+// any inner `mod tests { … }`) so the substring-match selector
+// `cargo test -p ucil-daemon server::test_type_check_tool` resolves
+// uniquely without `--exact` per DEC-0007 + WO-0067/0068 lessons §planner.
+//
+// The test injects a deterministic in-process `ScriptedFakeSerenaClient`
+// (UCIL's own `SerenaClient` trait impl per `DEC-0008` §4
+// dependency-inversion seam — same pattern used by
+// `quality_pipeline.rs`'s test suite, carried forward through
+// WO-0048 / WO-0085 / WO-0089 / WO-0090) and exercises
+// `handle_type_check` end-to-end through `handle_line` so the
+// type-error filter projection is asserted over the real JSON-RPC
+// envelope.
+
+/// Frozen acceptance test for `P3-W11-F15` (`type_check`).
+///
+/// Master-plan §3.2 row 18.  Drives `handle_tools_call` end-to-end
+/// through [`McpServer::handle_type_check`] with a deterministic
+/// in-process `ScriptedFakeSerenaClient` returning a mixed bag of
+/// LSP diagnostics across three files (Rust + Python + TypeScript)
+/// and asserts SA1-SA5:
+///
+/// * **SA1 — Type-error count**: 5 raw diagnostics (3 type errors +
+///   1 warning + 1 clippy lint error) → after filter, 3 type errors
+///   survive in `errors[]`.
+/// * **SA2 — Severity vocabulary canary**: every `errors[].severity
+///   == "error"` (lowercase per §5.7 + §12.1).
+/// * **SA3 — Language coverage**: `errors[].language` covers
+///   `{rust, python, typescript}` — all three type-checker sources
+///   represented.
+/// * **SA4 — Files-checked count**: `meta.files_checked == 3` (the
+///   3 input files all have LSP-supported extensions).
+/// * **SA5 — Files-skipped count**: `meta.files_skipped == 0`.
+///
+/// Selector substring-match: `cargo test -p ucil-daemon
+/// server::test_type_check_tool` resolves uniquely without
+/// `--exact`.
+#[cfg(test)]
+#[allow(clippy::too_many_lines, clippy::missing_panics_doc)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_type_check_tool() {
+    use std::collections::HashSet;
+    use std::sync::{Arc, Mutex};
+
+    use async_trait::async_trait;
+    use lsp_types::{
+        CallHierarchyIncomingCall, CallHierarchyItem, CallHierarchyOutgoingCall,
+        Diagnostic as LspDiagnostic, DiagnosticSeverity, NumberOrString, Position, Range,
+        TypeHierarchyItem, Url,
+    };
+    use ucil_lsp_diagnostics::{DiagnosticsClient, DiagnosticsClientError, SerenaClient};
+
+    /// Helper: construct an `lsp_types::Diagnostic` from a compact
+    /// set of fields.  Mirrors `quality_pipeline::test_fixtures::make_diag`
+    /// but inlined here so the test does not pull a `pub(super)`-only
+    /// helper across module boundaries.
+    fn make_diag(
+        severity: Option<DiagnosticSeverity>,
+        source: Option<&str>,
+        code: Option<NumberOrString>,
+        message: &str,
+    ) -> LspDiagnostic {
+        LspDiagnostic {
+            range: Range::new(Position::new(0, 0), Position::new(0, 1)),
+            severity,
+            code,
+            code_description: None,
+            source: source.map(str::to_owned),
+            message: message.to_owned(),
+            related_information: None,
+            tags: None,
+            data: None,
+        }
+    }
+
+    /// `SerenaClient` impl scripted to return a fixed
+    /// diagnostics-by-URI map.  Per `DEC-0008` §4 the [`SerenaClient`]
+    /// trait is UCIL-internal so this is not a substitute for any
+    /// external wire format — the same structural pattern as
+    /// `quality_pipeline.rs::test_fixtures::ScriptedFakeSerenaClient`
+    /// (now 6 WOs deep through WO-0048 / WO-0085 / WO-0089 / WO-0090).
+    struct ScriptedFakeSerenaClient {
+        diagnostics_by_uri: Mutex<Vec<(Url, Vec<LspDiagnostic>)>>,
+    }
+
+    impl ScriptedFakeSerenaClient {
+        fn new(scripted: Vec<(Url, Vec<LspDiagnostic>)>) -> Self {
+            Self {
+                diagnostics_by_uri: Mutex::new(scripted),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl SerenaClient for ScriptedFakeSerenaClient {
+        async fn diagnostics(
+            &self,
+            uri: Url,
+        ) -> Result<Vec<LspDiagnostic>, DiagnosticsClientError> {
+            let script = self
+                .diagnostics_by_uri
+                .lock()
+                .expect("ScriptedFakeSerenaClient mutex poisoned")
+                .clone();
+            for (scripted_uri, diags) in script {
+                if scripted_uri == uri {
+                    return Ok(diags);
+                }
+            }
+            Ok(Vec::new())
+        }
+
+        async fn call_hierarchy_incoming(
+            &self,
+            _item: CallHierarchyItem,
+        ) -> Result<Vec<CallHierarchyIncomingCall>, DiagnosticsClientError> {
+            Ok(Vec::new())
+        }
+
+        async fn call_hierarchy_outgoing(
+            &self,
+            _item: CallHierarchyItem,
+        ) -> Result<Vec<CallHierarchyOutgoingCall>, DiagnosticsClientError> {
+            Ok(Vec::new())
+        }
+
+        async fn type_hierarchy_supertypes(
+            &self,
+            _item: TypeHierarchyItem,
+        ) -> Result<Vec<TypeHierarchyItem>, DiagnosticsClientError> {
+            Ok(Vec::new())
+        }
+    }
+
+    // Use absolute paths so `Url::from_file_path` returns Ok(_).
+    // Three target files spanning Rust / Python / TypeScript.
+    let rust_path = "/test/src/foo.rs";
+    let py_path = "/test/src/bar.py";
+    let ts_path = "/test/src/baz.ts";
+
+    let rust_url = Url::from_file_path(rust_path)
+        .expect("(precondition) absolute Rust path must convert to Url");
+    let py_url = Url::from_file_path(py_path)
+        .expect("(precondition) absolute Python path must convert to Url");
+    let ts_url = Url::from_file_path(ts_path)
+        .expect("(precondition) absolute TypeScript path must convert to Url");
+
+    // Five raw diagnostics distributed across the three files:
+    //
+    // * Rust file → 3 diagnostics: 1 Error/rust-analyzer (type error,
+    //   KEPT), 1 Error/clippy (lint error, FILTERED), 1
+    //   Warning/rust-analyzer (lint warning, FILTERED)
+    // * Python file → 1 diagnostic: 1 Error/pyright (type error, KEPT)
+    // * TypeScript file → 1 diagnostic: 1 Error/tsserver (type error,
+    //   KEPT)
+    let rust_diags = vec![
+        make_diag(
+            Some(DiagnosticSeverity::ERROR),
+            Some("rust-analyzer"),
+            Some(NumberOrString::String("E0308".to_owned())),
+            "mismatched types: expected `u32`, found `i32`",
+        ),
+        make_diag(
+            Some(DiagnosticSeverity::ERROR),
+            Some("clippy"),
+            Some(NumberOrString::String("clippy::needless_return".to_owned())),
+            "unneeded `return` statement",
+        ),
+        make_diag(
+            Some(DiagnosticSeverity::WARNING),
+            Some("rust-analyzer"),
+            None,
+            "unused variable: `x`",
+        ),
+    ];
+    let py_diags = vec![make_diag(
+        Some(DiagnosticSeverity::ERROR),
+        Some("pyright"),
+        Some(NumberOrString::String("reportGeneralTypeIssues".to_owned())),
+        "Argument of type \"str\" cannot be assigned to parameter of type \"int\"",
+    )];
+    let ts_diags = vec![make_diag(
+        Some(DiagnosticSeverity::ERROR),
+        Some("tsserver"),
+        Some(NumberOrString::String("TS2322".to_owned())),
+        "Type 'string' is not assignable to type 'number'.",
+    )];
+
+    let scripted = vec![
+        (rust_url, rust_diags),
+        (py_url, py_diags),
+        (ts_url, ts_diags),
+    ];
+    let fake: Arc<dyn SerenaClient + Send + Sync> =
+        Arc::new(ScriptedFakeSerenaClient::new(scripted));
+    let client = Arc::new(DiagnosticsClient::new(fake));
+    let server = McpServer::new().with_diagnostics_client(client);
+
+    let request = json!({
+        "jsonrpc": JSONRPC_VERSION,
+        "id": 0xD1,
+        "method": "tools/call",
+        "params": {
+            "name": "type_check",
+            "arguments": {
+                "files": [rust_path, py_path, ts_path],
+                "reason": "verifier smoke",
+            }
+        }
+    })
+    .to_string();
+    let response = server.handle_line(&request).await;
+    assert_eq!(
+        response.get("error"),
+        None,
+        "(precondition) handler must not return JSON-RPC error: {response}"
+    );
+
+    let text = response
+        .pointer("/result/content/0/text")
+        .and_then(Value::as_str)
+        .expect("(precondition) response must carry result.content[0].text");
+    let parsed: Value = serde_json::from_str(text)
+        .expect("(precondition) result.content[0].text must be valid JSON");
+
+    let errors_arr = parsed
+        .get("errors")
+        .and_then(Value::as_array)
+        .expect("(precondition) parsed payload must carry errors[]");
+    let meta = parsed
+        .get("meta")
+        .expect("(precondition) parsed payload must carry meta");
+
+    // ── SA1 — errors[] length == 3 ──────────────────────────────────
+    //
+    // 5 raw diagnostics → 3 type errors after filter (rust-analyzer
+    // E0308 + pyright reportGeneralTypeIssues + tsserver TS2322 all
+    // KEPT; clippy lint error + Warning-severity rust-analyzer all
+    // FILTERED).
+    //
+    // Mutation contract M3: dropping the `is_type_error_diagnostic`
+    // filter (`.filter(|_| true)`) flips this assertion from PASS to
+    // FAIL with `(SA1) errors[] length; left: 5, right: 3`.
+    assert_eq!(
+        errors_arr.len(),
+        3,
+        "(SA1) errors[] length; left: {}, right: 3",
+        errors_arr.len()
+    );
+
+    // ── SA2 — every errors[].severity == "error" ────────────────────
+    for (i, e) in errors_arr.iter().enumerate() {
+        let sev = e.get("severity").and_then(Value::as_str);
+        assert_eq!(
+            sev,
+            Some("error"),
+            "(SA2) errors[{i}].severity == \"error\"; left: {sev:?}, right: \"error\""
+        );
+    }
+
+    // ── SA3 — errors[].language covers {rust, python, typescript} ──
+    let languages: HashSet<String> = errors_arr
+        .iter()
+        .filter_map(|e| e.get("language").and_then(Value::as_str).map(str::to_owned))
+        .collect();
+    let expected: HashSet<String> = ["rust", "python", "typescript"]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(
+        languages, expected,
+        "(SA3) errors[].language covers all 3 languages; left: {languages:?}, right: {expected:?}"
+    );
+
+    // ── SA4 — meta.files_checked == 3 ───────────────────────────────
+    assert_eq!(
+        meta.get("files_checked").and_then(Value::as_u64),
+        Some(3),
+        "(SA4) meta.files_checked == 3; left: {:?}, right: 3",
+        meta.get("files_checked")
+    );
+
+    // ── SA5 — meta.files_skipped == 0 ───────────────────────────────
+    assert_eq!(
+        meta.get("files_skipped").and_then(Value::as_u64),
+        Some(0),
+        "(SA5) meta.files_skipped == 0; left: {:?}, right: 0",
+        meta.get("files_skipped")
     );
 }
