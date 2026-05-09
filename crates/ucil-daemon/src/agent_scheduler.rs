@@ -53,7 +53,7 @@
 //! deps": this module ships the [`WarmProcessorSource`] trait, four
 //! concrete processor functions, and the [`AgentScheduler`]
 //! orchestrator only. NO substitute / placeholder implementations of
-//! SQLite, `KnowledgeGraph`, or `tokio::process::Command` exist on the
+//! `SQLite`, `KnowledgeGraph`, or `tokio::process::Command` exist on the
 //! production path; the trait is the dependency-inversion seam
 //! (`DEC-0008` §4) — production impls MUST own a real
 //! [`ucil_core::knowledge_graph::KnowledgeGraph`] handle. The
@@ -96,7 +96,7 @@ pub const CONVENTION_SIGNAL_PROCESSOR_INTERVAL: Duration = Duration::from_secs(6
 /// Master-plan §10 line 2018 sets
 /// `architecture_delta_processor_interval_sec = 120`. Twice the
 /// observation/convention/decision interval — architecture deltas are
-/// rarer and aggregating them less often keeps SQLite write
+/// rarer and aggregating them less often keeps `SQLite` write
 /// amplification predictable.
 pub const ARCHITECTURE_DELTA_PROCESSOR_INTERVAL: Duration = Duration::from_secs(120);
 
@@ -132,7 +132,7 @@ pub const OBSERVATION_DEDUP_THRESHOLD: f64 = 0.9;
 /// Bounds the per-tick wall-clock cost so a back-log of accumulated
 /// hot rows cannot block the scheduler. Subsequent ticks drain the
 /// remaining rows. A 256-row batch keeps each tick well under
-/// [`WARM_PROCESSOR_OP_DEADLINE`] on cold-cache SQLite reads.
+/// [`WARM_PROCESSOR_OP_DEADLINE`] on cold-cache `SQLite` reads.
 pub const WARM_PROCESSOR_BATCH_SIZE: usize = 256;
 
 /// Per-operation deadline applied to each
@@ -151,7 +151,7 @@ pub const WARM_PROCESSOR_OP_DEADLINE: Duration = Duration::from_secs(30);
 /// processor functions ([`run_observation_processor`], …).
 ///
 /// `#[non_exhaustive]` per `.claude/rules/rust-style.md` §`Errors`
-/// ("libraries: thiserror; #[non_exhaustive]"); future variants for
+/// (libraries: `thiserror`; `non_exhaustive`); future variants for
 /// new failure shapes (e.g. schema-version mismatch) can be added
 /// without breaking downstream `match` arms.
 #[derive(Debug, thiserror::Error)]
@@ -167,7 +167,7 @@ pub enum WarmProcessorError {
     /// [`WARM_PROCESSOR_OP_DEADLINE`].
     #[error("warm processor op deadline exceeded")]
     Timeout,
-    /// A SQLite (or other database) operation failed mid-call.
+    /// A `SQLite` (or other database) operation failed mid-call.
     /// Currently only constructed from production impls; the test
     /// impl uses [`WarmProcessorError::Source`].
     #[error("database error: {0}")]
@@ -248,7 +248,7 @@ impl WarmProcessorKind {
 /// holds in spirit but is not enforced at the type level: clusters
 /// that fall below [`OBSERVATION_DEDUP_THRESHOLD`] are absorbed into
 /// other clusters and the dropped count is implicit.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WarmPromotionResult {
     /// Which processor produced this result.
     pub kind: WarmProcessorKind,
@@ -268,7 +268,7 @@ pub struct WarmPromotionResult {
 ///
 /// `BTreeMap` (not `HashMap`) for deterministic iteration order in
 /// test snapshots. Both maps are keyed by [`WarmProcessorKind`].
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentSchedulerStats {
     /// Number of ticks observed per kind, monotonically increasing.
     pub ticks_observed: BTreeMap<WarmProcessorKind, u64>,
@@ -283,7 +283,7 @@ pub struct AgentSchedulerStats {
 ///
 /// Field names match the SQL schema verbatim so the production
 /// `WarmProcessorSource` adapter is a 1:1 `rusqlite` pluck.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HotObservationRow {
     /// `INTEGER PRIMARY KEY AUTOINCREMENT`.
     pub id: i64,
@@ -301,7 +301,7 @@ pub struct HotObservationRow {
 
 /// Hot-tier `hot_convention_signals` row mirroring master-plan §11
 /// lines 1224-1231.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HotConventionSignalRow {
     /// `INTEGER PRIMARY KEY AUTOINCREMENT`.
     pub id: i64,
@@ -317,7 +317,7 @@ pub struct HotConventionSignalRow {
 
 /// Hot-tier `hot_architecture_deltas` row mirroring master-plan §11
 /// lines 1233-1240.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HotArchitectureDeltaRow {
     /// `INTEGER PRIMARY KEY AUTOINCREMENT`.
     pub id: i64,
@@ -333,7 +333,7 @@ pub struct HotArchitectureDeltaRow {
 
 /// Hot-tier `hot_decision_material` row mirroring master-plan §11
 /// lines 1242-1251.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HotDecisionMaterialRow {
     /// `INTEGER PRIMARY KEY AUTOINCREMENT`.
     pub id: i64,
@@ -528,4 +528,465 @@ pub trait WarmProcessorSource: Send + Sync + 'static {
         &self,
         hot_ids: &[i64],
     ) -> Result<(), WarmProcessorError>;
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────
+
+/// Token-overlap (Jaccard) similarity over whitespace-split tokens.
+///
+/// Used by [`run_observation_processor`] to cluster hot rows whose
+/// `raw_text` overlap meets [`OBSERVATION_DEDUP_THRESHOLD`]. Hand-
+/// rolled instead of a third-party crate per
+/// `.claude/rules/rust-style.md` §`Crate layout` ("keep `ucil-daemon`
+/// lean").
+///
+/// Returns `0.0` for two empty strings. The clamp to `[0.0, 1.0]` is
+/// intrinsic — the ratio is bounded by definition.
+fn jaccard_similarity(a: &str, b: &str) -> f64 {
+    let tokens_a: std::collections::HashSet<&str> = a.split_whitespace().collect();
+    let tokens_b: std::collections::HashSet<&str> = b.split_whitespace().collect();
+    let inter = tokens_a.intersection(&tokens_b).count();
+    let union = tokens_a.union(&tokens_b).count();
+    #[allow(clippy::cast_precision_loss)]
+    if union == 0 {
+        0.0
+    } else {
+        inter as f64 / union as f64
+    }
+}
+
+/// Wrap any [`WarmProcessorSource`] async call in
+/// [`WARM_PROCESSOR_OP_DEADLINE`].
+///
+/// Returns [`WarmProcessorError::Timeout`] on elapse so each
+/// processor can `?`-propagate the error into the per-tick
+/// [`WarmPromotionResult`] without ever forcing the per-op deadline
+/// up to the caller. Mirrors the WO-0068 / G3 / G7 / G8 unconditional
+/// per-op `const`-deadline pattern.
+async fn with_op_deadline<T, F>(fut: F) -> Result<T, WarmProcessorError>
+where
+    F: std::future::Future<Output = Result<T, WarmProcessorError>>,
+{
+    tokio::time::timeout(WARM_PROCESSOR_OP_DEADLINE, fut)
+        .await
+        .unwrap_or_else(|_| Err(WarmProcessorError::Timeout))
+}
+
+/// Derive the `warm_decisions.title` for a hot-decision-material row.
+///
+/// Returns the source `title` when non-empty, the first 80 chars of
+/// the source `description` when `title` is `None` / empty, or an
+/// empty string when both are absent. Extracted into a helper so the
+/// decision-linker tick body avoids the nested `if let / else` shape
+/// that triggers `clippy::option_if_let_else`.
+fn derive_decision_title(title: Option<&String>, description: Option<&String>) -> String {
+    title.filter(|t| !t.is_empty()).map_or_else(
+        || {
+            description
+                .map(|d| d.chars().take(80).collect::<String>())
+                .unwrap_or_default()
+        },
+        Clone::clone,
+    )
+}
+
+/// Cluster a `hot_observations` slice by `(related_symbol,
+/// raw_text-similarity)` ≥ [`OBSERVATION_DEDUP_THRESHOLD`].
+///
+/// Two rows belong to the same cluster iff:
+///
+/// * they share the same `related_symbol` (with `None` treated as a
+///   distinct bucket equal only to other `None` rows), AND
+/// * their `raw_text` Jaccard similarity is ≥
+///   [`OBSERVATION_DEDUP_THRESHOLD`].
+///
+/// Single-pass disjoint-union: each row is added to the first
+/// cluster whose representative satisfies both conditions, otherwise
+/// it starts a new cluster. The resulting cluster vec is ordered by
+/// first appearance — deterministic for any given input order.
+fn cluster_observations(rows: &[HotObservationRow], threshold: f64) -> Vec<Vec<HotObservationRow>> {
+    let mut clusters: Vec<Vec<HotObservationRow>> = Vec::new();
+    'outer: for row in rows {
+        for cluster in &mut clusters {
+            let rep = &cluster[0];
+            if rep.related_symbol == row.related_symbol
+                && jaccard_similarity(&rep.raw_text, &row.raw_text) >= threshold
+            {
+                cluster.push(row.clone());
+                continue 'outer;
+            }
+        }
+        clusters.push(vec![row.clone()]);
+    }
+    clusters
+}
+
+// ── Per-kind processor functions ──────────────────────────────────────────
+
+/// Run one observation-processor tick.
+///
+/// Reads up to [`WARM_PROCESSOR_BATCH_SIZE`] unpromoted
+/// `hot_observations` rows, clusters them via
+/// [`cluster_observations`] under
+/// [`OBSERVATION_DEDUP_THRESHOLD`], inserts one
+/// `warm_observations` row per cluster
+/// (`evidence_count = cluster.len()`), and marks every contributing
+/// hot row as promoted.
+///
+/// Per master-plan §15.2 line 1521 the function carries a
+/// `tracing::instrument` span named `ucil.agent.warm_processor` with
+/// `kind` field. The `kind` field is supplied as a literal so the
+/// span value matches across tick boundaries (the surrounding
+/// scheduler-level tick span carries the same `kind` field for
+/// correlation).
+///
+/// # Errors
+///
+/// Returns [`WarmProcessorError::Source`] /
+/// [`WarmProcessorError::Database`] when the underlying
+/// [`WarmProcessorSource`] call fails, or
+/// [`WarmProcessorError::Timeout`] when any single source call
+/// exceeds [`WARM_PROCESSOR_OP_DEADLINE`].
+#[tracing::instrument(
+    name = "ucil.agent.warm_processor",
+    level = "debug",
+    skip(source),
+    fields(kind = "observation")
+)]
+pub async fn run_observation_processor<S>(
+    source: &S,
+) -> Result<WarmPromotionResult, WarmProcessorError>
+where
+    S: WarmProcessorSource + ?Sized,
+{
+    let kind = WarmProcessorKind::Observation;
+    let hot_rows =
+        with_op_deadline(source.select_unpromoted_observations(WARM_PROCESSOR_BATCH_SIZE)).await?;
+    let hot_rows_examined = hot_rows.len() as u64;
+    if hot_rows.is_empty() {
+        return Ok(WarmPromotionResult {
+            kind,
+            hot_rows_examined: 0,
+            warm_rows_inserted: 0,
+            hot_rows_marked_promoted: 0,
+            error: None,
+        });
+    }
+    let clusters = cluster_observations(&hot_rows, OBSERVATION_DEDUP_THRESHOLD);
+    let mut warm_rows_inserted: u64 = 0;
+    let mut hot_ids_to_promote: Vec<i64> = Vec::with_capacity(hot_rows.len());
+    for cluster in &clusters {
+        // Pick the longest raw_text as the representative summary.
+        let representative = cluster
+            .iter()
+            .max_by_key(|r| r.raw_text.len())
+            .map_or_else(String::new, |r| r.raw_text.clone());
+        let first_seen = cluster
+            .iter()
+            .map(|r| r.created_at.clone())
+            .min()
+            .unwrap_or_default();
+        let last_seen = cluster
+            .iter()
+            .map(|r| r.created_at.clone())
+            .max()
+            .unwrap_or_default();
+        let related_symbols: Vec<String> = {
+            let mut set = std::collections::BTreeSet::new();
+            for row in cluster {
+                if let Some(sym) = &row.related_symbol {
+                    set.insert(sym.clone());
+                }
+            }
+            set.into_iter().collect()
+        };
+        let related_entities = if related_symbols.is_empty() {
+            None
+        } else {
+            Some(serde_json::to_string(&related_symbols).unwrap_or_default())
+        };
+        let warm = WarmObservationRow {
+            text: representative,
+            domains: None,
+            related_entities,
+            severity: None,
+            evidence_count: i64::try_from(cluster.len()).unwrap_or(i64::MAX),
+            first_seen: if first_seen.is_empty() {
+                None
+            } else {
+                Some(first_seen)
+            },
+            last_seen: if last_seen.is_empty() {
+                None
+            } else {
+                Some(last_seen)
+            },
+            confidence: 0.6,
+        };
+        with_op_deadline(source.insert_warm_observation(warm)).await?;
+        warm_rows_inserted += 1;
+        for row in cluster {
+            hot_ids_to_promote.push(row.id);
+        }
+    }
+    with_op_deadline(source.mark_observations_promoted(&hot_ids_to_promote)).await?;
+    let hot_rows_marked_promoted = hot_ids_to_promote.len() as u64;
+    Ok(WarmPromotionResult {
+        kind,
+        hot_rows_examined,
+        warm_rows_inserted,
+        hot_rows_marked_promoted,
+        error: None,
+    })
+}
+
+/// Run one convention-signal-processor tick.
+///
+/// Reads up to [`WARM_PROCESSOR_BATCH_SIZE`] unpromoted
+/// `hot_convention_signals` rows, groups them by `pattern_hash`, and
+/// promotes a group only when its size meets
+/// [`CONVENTION_MIN_EVIDENCE`]. For each qualifying group, inserts
+/// one `warm_conventions` row (`evidence_count` = group size) and
+/// marks every contributing hot row as promoted. Groups under the
+/// threshold are left unpromoted so a future tick can re-evaluate.
+///
+/// # Errors
+///
+/// Returns [`WarmProcessorError::Source`] /
+/// [`WarmProcessorError::Database`] when the underlying
+/// [`WarmProcessorSource`] call fails, or
+/// [`WarmProcessorError::Timeout`] when any single source call
+/// exceeds [`WARM_PROCESSOR_OP_DEADLINE`].
+#[tracing::instrument(
+    name = "ucil.agent.warm_processor",
+    level = "debug",
+    skip(source),
+    fields(kind = "convention_signal")
+)]
+pub async fn run_convention_signal_processor<S>(
+    source: &S,
+) -> Result<WarmPromotionResult, WarmProcessorError>
+where
+    S: WarmProcessorSource + ?Sized,
+{
+    let kind = WarmProcessorKind::ConventionSignal;
+    let hot_rows =
+        with_op_deadline(source.select_unpromoted_convention_signals(WARM_PROCESSOR_BATCH_SIZE))
+            .await?;
+    let hot_rows_examined = hot_rows.len() as u64;
+    if hot_rows.is_empty() {
+        return Ok(WarmPromotionResult {
+            kind,
+            hot_rows_examined: 0,
+            warm_rows_inserted: 0,
+            hot_rows_marked_promoted: 0,
+            error: None,
+        });
+    }
+    let mut groups: BTreeMap<String, Vec<HotConventionSignalRow>> = BTreeMap::new();
+    for row in &hot_rows {
+        groups
+            .entry(row.pattern_hash.clone())
+            .or_default()
+            .push(row.clone());
+    }
+    let mut warm_rows_inserted: u64 = 0;
+    let mut hot_ids_to_promote: Vec<i64> = Vec::new();
+    for (pattern_hash, group) in &groups {
+        if group.len() >= CONVENTION_MIN_EVIDENCE {
+            let examples: Vec<String> = group
+                .iter()
+                .filter_map(|r| r.example_snippet.clone())
+                .collect();
+            let examples_json = if examples.is_empty() {
+                None
+            } else {
+                Some(serde_json::to_string(&examples).unwrap_or_default())
+            };
+            let warm = WarmConventionRow {
+                category: pattern_hash.clone(),
+                pattern_description: format!(
+                    "convention pattern {} observed in {} files",
+                    pattern_hash,
+                    group.len()
+                ),
+                examples: examples_json,
+                evidence_count: i64::try_from(group.len()).unwrap_or(i64::MAX),
+                confidence: 0.5,
+            };
+            with_op_deadline(source.insert_warm_convention(warm)).await?;
+            warm_rows_inserted += 1;
+            for row in group {
+                hot_ids_to_promote.push(row.id);
+            }
+        }
+    }
+    with_op_deadline(source.mark_convention_signals_promoted(&hot_ids_to_promote)).await?;
+    let hot_rows_marked_promoted = hot_ids_to_promote.len() as u64;
+    Ok(WarmPromotionResult {
+        kind,
+        hot_rows_examined,
+        warm_rows_inserted,
+        hot_rows_marked_promoted,
+        error: None,
+    })
+}
+
+/// Run one architecture-delta-processor tick.
+///
+/// Reads up to [`WARM_PROCESSOR_BATCH_SIZE`] unpromoted
+/// `hot_architecture_deltas` rows, aggregates by
+/// `(change_type, file_path)`, and upserts one
+/// `warm_architecture_state` row per group. The summary text mentions
+/// every contributing delta's `change_type` and `file_path` so a
+/// follow-up reader can correlate the warm row back to its hot
+/// origin without re-querying.
+///
+/// # Errors
+///
+/// Returns [`WarmProcessorError::Source`] /
+/// [`WarmProcessorError::Database`] when the underlying
+/// [`WarmProcessorSource`] call fails, or
+/// [`WarmProcessorError::Timeout`] when any single source call
+/// exceeds [`WARM_PROCESSOR_OP_DEADLINE`].
+#[tracing::instrument(
+    name = "ucil.agent.warm_processor",
+    level = "debug",
+    skip(source),
+    fields(kind = "architecture_delta")
+)]
+pub async fn run_architecture_delta_processor<S>(
+    source: &S,
+) -> Result<WarmPromotionResult, WarmProcessorError>
+where
+    S: WarmProcessorSource + ?Sized,
+{
+    let kind = WarmProcessorKind::ArchitectureDelta;
+    let hot_rows =
+        with_op_deadline(source.select_unpromoted_architecture_deltas(WARM_PROCESSOR_BATCH_SIZE))
+            .await?;
+    let hot_rows_examined = hot_rows.len() as u64;
+    if hot_rows.is_empty() {
+        return Ok(WarmPromotionResult {
+            kind,
+            hot_rows_examined: 0,
+            warm_rows_inserted: 0,
+            hot_rows_marked_promoted: 0,
+            error: None,
+        });
+    }
+    let mut groups: BTreeMap<(String, String), Vec<HotArchitectureDeltaRow>> = BTreeMap::new();
+    for row in &hot_rows {
+        groups
+            .entry((row.change_type.clone(), row.file_path.clone()))
+            .or_default()
+            .push(row.clone());
+    }
+    let mut warm_rows_inserted: u64 = 0;
+    let mut hot_ids_to_promote: Vec<i64> = Vec::with_capacity(hot_rows.len());
+    for ((change_type, file_path), group) in &groups {
+        let last_updated = group.iter().map(|r| r.created_at.clone()).max();
+        let summary = format!(
+            "{} delta(s) of type {} on {}",
+            group.len(),
+            change_type,
+            file_path
+        );
+        let warm = WarmArchitectureStateRow {
+            summary,
+            deltas_incorporated: i64::try_from(group.len()).unwrap_or(i64::MAX),
+            last_updated,
+            confidence: 0.5,
+        };
+        with_op_deadline(source.upsert_warm_architecture_state(warm)).await?;
+        warm_rows_inserted += 1;
+        for row in group {
+            hot_ids_to_promote.push(row.id);
+        }
+    }
+    with_op_deadline(source.mark_architecture_deltas_promoted(&hot_ids_to_promote)).await?;
+    let hot_rows_marked_promoted = hot_ids_to_promote.len() as u64;
+    Ok(WarmPromotionResult {
+        kind,
+        hot_rows_examined,
+        warm_rows_inserted,
+        hot_rows_marked_promoted,
+        error: None,
+    })
+}
+
+/// Run one decision-linker-processor tick.
+///
+/// Reads up to [`WARM_PROCESSOR_BATCH_SIZE`] unpromoted
+/// `hot_decision_material` rows, filters to rows with non-null
+/// `affected_files`, and inserts one `warm_decisions` row per
+/// qualifying hot row. The warm row's `title` is the source `title`
+/// when present, otherwise the first 80 chars of the source
+/// `description` (or empty if both are null).
+///
+/// Hot rows with `affected_files = NULL` are NOT promoted — they
+/// stay unpromoted so a future tick can re-evaluate once the source
+/// material has been enriched (e.g., a PR diff fills the field
+/// later).
+///
+/// # Errors
+///
+/// Returns [`WarmProcessorError::Source`] /
+/// [`WarmProcessorError::Database`] when the underlying
+/// [`WarmProcessorSource`] call fails, or
+/// [`WarmProcessorError::Timeout`] when any single source call
+/// exceeds [`WARM_PROCESSOR_OP_DEADLINE`].
+#[tracing::instrument(
+    name = "ucil.agent.warm_processor",
+    level = "debug",
+    skip(source),
+    fields(kind = "decision_linker")
+)]
+pub async fn run_decision_linker_processor<S>(
+    source: &S,
+) -> Result<WarmPromotionResult, WarmProcessorError>
+where
+    S: WarmProcessorSource + ?Sized,
+{
+    let kind = WarmProcessorKind::DecisionLinker;
+    let hot_rows =
+        with_op_deadline(source.select_unpromoted_decision_material(WARM_PROCESSOR_BATCH_SIZE))
+            .await?;
+    let hot_rows_examined = hot_rows.len() as u64;
+    if hot_rows.is_empty() {
+        return Ok(WarmPromotionResult {
+            kind,
+            hot_rows_examined: 0,
+            warm_rows_inserted: 0,
+            hot_rows_marked_promoted: 0,
+            error: None,
+        });
+    }
+    let mut warm_rows_inserted: u64 = 0;
+    let mut hot_ids_to_promote: Vec<i64> = Vec::new();
+    for row in &hot_rows {
+        if row.affected_files.is_none() {
+            continue;
+        }
+        let title = derive_decision_title(row.title.as_ref(), row.description.as_ref());
+        let warm = WarmDecisionRow {
+            title,
+            key_phrases: None,
+            related_entities: None,
+            source_material_ids: Some(serde_json::to_string(&[row.id]).unwrap_or_default()),
+            confidence: 0.5,
+        };
+        with_op_deadline(source.insert_warm_decision(warm)).await?;
+        warm_rows_inserted += 1;
+        hot_ids_to_promote.push(row.id);
+    }
+    with_op_deadline(source.mark_decision_material_promoted(&hot_ids_to_promote)).await?;
+    let hot_rows_marked_promoted = hot_ids_to_promote.len() as u64;
+    Ok(WarmPromotionResult {
+        kind,
+        hot_rows_examined,
+        warm_rows_inserted,
+        hot_rows_marked_promoted,
+        error: None,
+    })
 }
