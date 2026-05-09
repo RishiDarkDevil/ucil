@@ -16,6 +16,10 @@ name = "test_fusion"
 path = "test_fusion.rs"
 
 [[test]]
+name = "test_incremental"
+path = "test_incremental.rs"
+
+[[test]]
 name = "test_lsp_bridge"
 path = "test_lsp_bridge.rs"
 
@@ -41,6 +45,7 @@ async-trait = { workspace = true }
 lsp-types   = { workspace = true }
 serde_json  = { workspace = true }
 tempfile    = { workspace = true }
+salsa       = "0.22"
 ucil-core            = { path = "../../crates/ucil-core" }
 ucil-daemon          = { path = "../../crates/ucil-daemon" }
 ucil-lsp-diagnostics = { path = "../../crates/ucil-lsp-diagnostics" }
