@@ -1035,10 +1035,10 @@ async fn processor_task(
     source: std::sync::Arc<dyn WarmProcessorSource>,
     stats: std::sync::Arc<tokio::sync::RwLock<AgentSchedulerStats>>,
     mut cancel_rx: tokio::sync::watch::Receiver<bool>,
+    first_tick_at: tokio::time::Instant,
 ) {
     let interval_dur = kind.interval();
-    let start = tokio::time::Instant::now() + interval_dur;
-    let mut interval = tokio::time::interval_at(start, interval_dur);
+    let mut interval = tokio::time::interval_at(first_tick_at, interval_dur);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {
@@ -1128,11 +1128,13 @@ impl AgentScheduler {
     pub fn start(&self) -> AgentSchedulerHandle {
         let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
         let mut join_set = tokio::task::JoinSet::new();
+        let now = tokio::time::Instant::now();
         for kind in WarmProcessorKind::all() {
             let source = std::sync::Arc::clone(&self.source);
             let stats = std::sync::Arc::clone(&self.stats);
             let rx = cancel_rx.clone();
-            join_set.spawn(processor_task(kind, source, stats, rx));
+            let first_tick_at = now + kind.interval();
+            join_set.spawn(processor_task(kind, source, stats, rx, first_tick_at));
         }
         AgentSchedulerHandle {
             cancel_tx,
@@ -1188,4 +1190,645 @@ impl AgentSchedulerHandle {
         while self.join_set.join_next().await.is_some() {}
         Ok(())
     }
+}
+
+// ── Frozen acceptance test (DEC-0007 module-root placement) ───────────────
+//
+// The `pub async fn test_warm_processors` lives at module root (NOT
+// inside `mod tests {...}`) per DEC-0007 + WO-0068 lessons §"For
+// planner: module-root placement is REQUIRED for substring-match
+// selector resolution". The selector
+// `cargo test -p ucil-daemon agent_scheduler::test_warm_processors`
+// pins both the module name and the function name.
+//
+// `TestWarmProcessorSource` is the test-only `WarmProcessorSource`
+// impl exempt under WO-0048 line 363's `#[cfg(test)]` carve-out.
+
+/// Frozen acceptance test for `P3-W10-F13`.
+///
+/// Drives the [`AgentScheduler`] with `tokio::time::pause` +
+/// `advance` against a `TestWarmProcessorSource` with seeded hot
+/// rows and asserts each of the eight Sub-Acceptance criteria
+/// (SA1..SA8) per the WO-0093 acceptance contract.
+#[cfg(test)]
+#[allow(
+    clippy::too_many_lines,
+    clippy::missing_panics_doc,
+    clippy::uninlined_format_args,
+    clippy::items_after_statements,
+    clippy::significant_drop_in_scrutinee,
+    clippy::significant_drop_tightening,
+    clippy::no_effect_underscore_binding
+)]
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+pub async fn test_warm_processors() {
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    use tracing_subscriber::layer::SubscriberExt;
+
+    // ── Span-counter tracing layer (SA7) ──
+    #[derive(Default)]
+    struct SpanCounter {
+        counts: Arc<Mutex<std::collections::HashMap<String, u64>>>,
+    }
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for SpanCounter {
+        fn on_new_span(
+            &self,
+            attrs: &tracing::span::Attributes<'_>,
+            _id: &tracing::span::Id,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            let name = attrs.metadata().name().to_owned();
+            let mut guard = self.counts.lock().expect("span-counter mutex poisoned");
+            *guard.entry(name).or_insert(0) += 1;
+        }
+    }
+    let span_counts: Arc<Mutex<std::collections::HashMap<String, u64>>> =
+        Arc::new(Mutex::new(std::collections::HashMap::new()));
+    let layer = SpanCounter {
+        counts: Arc::clone(&span_counts),
+    };
+    let subscriber = tracing_subscriber::registry().with(layer);
+    let _trace_guard = tracing::subscriber::set_default(subscriber);
+
+    // ── In-memory test source ──
+    #[derive(Default)]
+    struct TestState {
+        hot_observations: Vec<HotObservationRow>,
+        promoted_obs_ids: Vec<i64>,
+        warm_observations: Vec<WarmObservationRow>,
+
+        hot_conventions: Vec<HotConventionSignalRow>,
+        promoted_conv_ids: Vec<i64>,
+        warm_conventions: Vec<WarmConventionRow>,
+
+        hot_arch_deltas: Vec<HotArchitectureDeltaRow>,
+        promoted_arch_ids: Vec<i64>,
+        warm_arch_states: Vec<WarmArchitectureStateRow>,
+
+        hot_decisions: Vec<HotDecisionMaterialRow>,
+        promoted_decision_ids: Vec<i64>,
+        warm_decisions: Vec<WarmDecisionRow>,
+    }
+    struct TestWarmProcessorSource {
+        state: Mutex<TestState>,
+        next_warm_id: AtomicU64,
+        // Per-method "next call should error" injection. Counter
+        // semantics: when the counter is positive, the next call
+        // decrements it and returns an injected error; when zero,
+        // the call proceeds normally.
+        inject_obs_select_errors: AtomicU64,
+        inject_obs_running: AtomicBool,
+    }
+    impl TestWarmProcessorSource {
+        fn new() -> Self {
+            Self {
+                state: Mutex::new(TestState::default()),
+                next_warm_id: AtomicU64::new(1),
+                inject_obs_select_errors: AtomicU64::new(0),
+                inject_obs_running: AtomicBool::new(false),
+            }
+        }
+        fn alloc_id(&self) -> i64 {
+            // Cast safe — counter starts at 1 and increments.
+            i64::try_from(self.next_warm_id.fetch_add(1, Ordering::SeqCst)).unwrap_or(i64::MAX)
+        }
+        fn lock(&self) -> std::sync::MutexGuard<'_, TestState> {
+            self.state.lock().expect("test source mutex poisoned")
+        }
+    }
+    #[async_trait::async_trait]
+    impl WarmProcessorSource for TestWarmProcessorSource {
+        async fn select_unpromoted_observations(
+            &self,
+            limit: usize,
+        ) -> Result<Vec<HotObservationRow>, WarmProcessorError> {
+            self.inject_obs_running.store(true, Ordering::SeqCst);
+            if self.inject_obs_select_errors.load(Ordering::SeqCst) > 0 {
+                self.inject_obs_select_errors.fetch_sub(1, Ordering::SeqCst);
+                return Err(WarmProcessorError::Source(
+                    "injected observation-select failure".to_owned(),
+                ));
+            }
+            let st = self.lock();
+            let unpromoted: Vec<HotObservationRow> = st
+                .hot_observations
+                .iter()
+                .filter(|r| !st.promoted_obs_ids.contains(&r.id))
+                .take(limit)
+                .cloned()
+                .collect();
+            Ok(unpromoted)
+        }
+        async fn insert_warm_observation(
+            &self,
+            row: WarmObservationRow,
+        ) -> Result<i64, WarmProcessorError> {
+            let id = self.alloc_id();
+            let mut st = self.lock();
+            st.warm_observations.push(row);
+            Ok(id)
+        }
+        async fn mark_observations_promoted(
+            &self,
+            hot_ids: &[i64],
+        ) -> Result<(), WarmProcessorError> {
+            let mut st = self.lock();
+            for id in hot_ids {
+                if !st.promoted_obs_ids.contains(id) {
+                    st.promoted_obs_ids.push(*id);
+                }
+            }
+            Ok(())
+        }
+        async fn select_unpromoted_convention_signals(
+            &self,
+            limit: usize,
+        ) -> Result<Vec<HotConventionSignalRow>, WarmProcessorError> {
+            let st = self.lock();
+            Ok(st
+                .hot_conventions
+                .iter()
+                .filter(|r| !st.promoted_conv_ids.contains(&r.id))
+                .take(limit)
+                .cloned()
+                .collect())
+        }
+        async fn insert_warm_convention(
+            &self,
+            row: WarmConventionRow,
+        ) -> Result<i64, WarmProcessorError> {
+            let id = self.alloc_id();
+            let mut st = self.lock();
+            st.warm_conventions.push(row);
+            Ok(id)
+        }
+        async fn mark_convention_signals_promoted(
+            &self,
+            hot_ids: &[i64],
+        ) -> Result<(), WarmProcessorError> {
+            let mut st = self.lock();
+            for id in hot_ids {
+                if !st.promoted_conv_ids.contains(id) {
+                    st.promoted_conv_ids.push(*id);
+                }
+            }
+            Ok(())
+        }
+        async fn select_unpromoted_architecture_deltas(
+            &self,
+            limit: usize,
+        ) -> Result<Vec<HotArchitectureDeltaRow>, WarmProcessorError> {
+            let st = self.lock();
+            Ok(st
+                .hot_arch_deltas
+                .iter()
+                .filter(|r| !st.promoted_arch_ids.contains(&r.id))
+                .take(limit)
+                .cloned()
+                .collect())
+        }
+        async fn upsert_warm_architecture_state(
+            &self,
+            row: WarmArchitectureStateRow,
+        ) -> Result<i64, WarmProcessorError> {
+            let id = self.alloc_id();
+            let mut st = self.lock();
+            st.warm_arch_states.push(row);
+            Ok(id)
+        }
+        async fn mark_architecture_deltas_promoted(
+            &self,
+            hot_ids: &[i64],
+        ) -> Result<(), WarmProcessorError> {
+            let mut st = self.lock();
+            for id in hot_ids {
+                if !st.promoted_arch_ids.contains(id) {
+                    st.promoted_arch_ids.push(*id);
+                }
+            }
+            Ok(())
+        }
+        async fn select_unpromoted_decision_material(
+            &self,
+            limit: usize,
+        ) -> Result<Vec<HotDecisionMaterialRow>, WarmProcessorError> {
+            let st = self.lock();
+            Ok(st
+                .hot_decisions
+                .iter()
+                .filter(|r| !st.promoted_decision_ids.contains(&r.id))
+                .take(limit)
+                .cloned()
+                .collect())
+        }
+        async fn insert_warm_decision(
+            &self,
+            row: WarmDecisionRow,
+        ) -> Result<i64, WarmProcessorError> {
+            let id = self.alloc_id();
+            let mut st = self.lock();
+            st.warm_decisions.push(row);
+            Ok(id)
+        }
+        async fn mark_decision_material_promoted(
+            &self,
+            hot_ids: &[i64],
+        ) -> Result<(), WarmProcessorError> {
+            let mut st = self.lock();
+            for id in hot_ids {
+                if !st.promoted_decision_ids.contains(id) {
+                    st.promoted_decision_ids.push(*id);
+                }
+            }
+            Ok(())
+        }
+    }
+
+    // ── Seed the source ──
+    let source = Arc::new(TestWarmProcessorSource::new());
+    {
+        let mut st = source.lock();
+
+        // SA1: 1 hot observation
+        st.hot_observations.push(HotObservationRow {
+            id: 1,
+            raw_text: "fn auth handles tokens".to_owned(),
+            session_id: Some("s1".to_owned()),
+            related_file: Some("src/auth.rs".to_owned()),
+            related_symbol: Some("auth".to_owned()),
+            created_at: "2026-05-09T00:00:00Z".to_owned(),
+        });
+
+        // SA2: 5 hot convention_signals — 3 with P1 (qualifies),
+        // 2 with P2 (below threshold).
+        for (i, ph) in [
+            (11_i64, "P1"),
+            (12, "P1"),
+            (13, "P1"),
+            (14, "P2"),
+            (15, "P2"),
+        ] {
+            st.hot_conventions.push(HotConventionSignalRow {
+                id: i,
+                pattern_hash: ph.to_owned(),
+                file_path: format!("src/file_{i}.rs"),
+                example_snippet: Some(format!("snippet {i}")),
+                created_at: "2026-05-09T00:00:00Z".to_owned(),
+            });
+        }
+
+        // SA3: 3 hot architecture_deltas — 2 share (add, src/a.rs);
+        // 1 has (remove, src/b.rs) so the architecture-state vec
+        // ends up with 2 entries (deltas_incorporated 2 + 1).
+        for (i, ct, fp) in [
+            (21_i64, "add", "src/a.rs"),
+            (22, "add", "src/a.rs"),
+            (23, "remove", "src/b.rs"),
+        ] {
+            st.hot_arch_deltas.push(HotArchitectureDeltaRow {
+                id: i,
+                change_type: ct.to_owned(),
+                file_path: fp.to_owned(),
+                details: None,
+                created_at: "2026-05-09T00:00:00Z".to_owned(),
+            });
+        }
+
+        // SA4: 2 hot decision_material rows — 1 with affected_files
+        // (qualifies), 1 with None (skipped).
+        st.hot_decisions.push(HotDecisionMaterialRow {
+            id: 31,
+            source_type: "pr".to_owned(),
+            source_url: Some("https://example/pr/1".to_owned()),
+            title: Some("introduce auth refactor".to_owned()),
+            description: Some("split auth into 3 modules".to_owned()),
+            affected_files: Some("[\"src/auth.rs\"]".to_owned()),
+            created_at: "2026-05-09T00:00:00Z".to_owned(),
+        });
+        st.hot_decisions.push(HotDecisionMaterialRow {
+            id: 32,
+            source_type: "issue".to_owned(),
+            source_url: None,
+            title: Some("placeholder".to_owned()),
+            description: None,
+            affected_files: None,
+            created_at: "2026-05-09T00:00:00Z".to_owned(),
+        });
+    }
+
+    // ── Spin up the scheduler ──
+    let scheduler = AgentScheduler::new(Arc::clone(&source) as Arc<dyn WarmProcessorSource>);
+    let handle = scheduler.start();
+    assert_eq!(
+        handle.running_tasks(),
+        4,
+        "(SA-init) start spawns 4 tasks; left: {}, right: 4",
+        handle.running_tasks(),
+    );
+
+    // ── t = 60s: observation, convention, decision processors ──
+    tokio::time::advance(Duration::from_millis(60_001)).await;
+    for _ in 0..200 {
+        tokio::task::yield_now().await;
+    }
+
+    let stats60 = scheduler.stats().await;
+    assert_eq!(
+        stats60
+            .ticks_observed
+            .get(&WarmProcessorKind::Observation)
+            .copied(),
+        Some(1),
+        "(SA1) observation processor fires once at t=60s; left: {:?}, right: Some(1)",
+        stats60
+            .ticks_observed
+            .get(&WarmProcessorKind::Observation)
+            .copied(),
+    );
+    assert_eq!(
+        stats60
+            .ticks_observed
+            .get(&WarmProcessorKind::ConventionSignal)
+            .copied(),
+        Some(1),
+        "(SA2-tick) convention processor fires once at t=60s; left: {:?}, right: Some(1)",
+        stats60
+            .ticks_observed
+            .get(&WarmProcessorKind::ConventionSignal)
+            .copied(),
+    );
+    assert_eq!(
+        stats60.ticks_observed.get(&WarmProcessorKind::ArchitectureDelta).copied(),
+        None,
+        "(SA3-pre) architecture-delta processor MUST NOT fire before t=120s; left: {:?}, right: None",
+        stats60.ticks_observed.get(&WarmProcessorKind::ArchitectureDelta).copied(),
+    );
+    assert_eq!(
+        stats60
+            .ticks_observed
+            .get(&WarmProcessorKind::DecisionLinker)
+            .copied(),
+        Some(1),
+        "(SA4-tick) decision-linker processor fires once at t=60s; left: {:?}, right: Some(1)",
+        stats60
+            .ticks_observed
+            .get(&WarmProcessorKind::DecisionLinker)
+            .copied(),
+    );
+
+    // SA1: 1 warm observation inserted; mark_promoted called with [1].
+    {
+        let st = source.lock();
+        assert_eq!(
+            st.warm_observations.len(),
+            1,
+            "(SA1) 1 warm_observation inserted from 1 hot row; left: {}, right: 1",
+            st.warm_observations.len(),
+        );
+        assert_eq!(
+            st.warm_observations[0].evidence_count, 1,
+            "(SA1) warm_observation.evidence_count = 1; left: {}, right: 1",
+            st.warm_observations[0].evidence_count,
+        );
+        assert_eq!(
+            st.promoted_obs_ids,
+            vec![1],
+            "(SA1) hot_observations.id=1 marked promoted; left: {:?}, right: [1]",
+            st.promoted_obs_ids,
+        );
+    }
+
+    // SA2: 1 warm_convention from the P1 group (3 evidence); P2 group skipped.
+    {
+        let st = source.lock();
+        assert_eq!(
+            st.warm_conventions.len(),
+            1,
+            "(SA2) 1 warm_convention inserted (P1 group only, 3 ≥ CONVENTION_MIN_EVIDENCE); left: {}, right: 1",
+            st.warm_conventions.len(),
+        );
+        assert_eq!(
+            st.warm_conventions[0].evidence_count, 3,
+            "(SA2) warm_convention.evidence_count = 3; left: {}, right: 3",
+            st.warm_conventions[0].evidence_count,
+        );
+        assert_eq!(
+            st.warm_conventions[0].category, "P1",
+            "(SA2) warm_convention.category = P1; left: {}, right: P1",
+            st.warm_conventions[0].category,
+        );
+        // Only P1 group rows (11/12/13) marked promoted; P2 rows
+        // (14/15) stay unpromoted under the threshold.
+        let mut promoted_sorted = st.promoted_conv_ids.clone();
+        promoted_sorted.sort_unstable();
+        assert_eq!(
+            promoted_sorted,
+            vec![11, 12, 13],
+            "(SA2) only P1-group hot rows marked promoted; left: {:?}, right: [11,12,13]",
+            promoted_sorted,
+        );
+    }
+
+    // SA4: 1 warm_decision from the row with non-null affected_files.
+    {
+        let st = source.lock();
+        assert_eq!(
+            st.warm_decisions.len(),
+            1,
+            "(SA4) 1 warm_decision inserted; left: {}, right: 1",
+            st.warm_decisions.len(),
+        );
+        assert_eq!(
+            st.promoted_decision_ids,
+            vec![31],
+            "(SA4) only hot_decision_material.id=31 promoted (id=32 has affected_files=None); left: {:?}, right: [31]",
+            st.promoted_decision_ids,
+        );
+    }
+
+    // ── t = 120s: architecture-delta processor fires; observation +
+    // convention + decision tick a second time. ──
+    tokio::time::advance(Duration::from_millis(60_000)).await;
+    for _ in 0..200 {
+        tokio::task::yield_now().await;
+    }
+
+    let stats120 = scheduler.stats().await;
+    assert_eq!(
+        stats120
+            .ticks_observed
+            .get(&WarmProcessorKind::Observation)
+            .copied(),
+        Some(2),
+        "(SA5-obs) observation: 2 ticks at t=120s; left: {:?}, right: Some(2)",
+        stats120
+            .ticks_observed
+            .get(&WarmProcessorKind::Observation)
+            .copied(),
+    );
+    assert_eq!(
+        stats120
+            .ticks_observed
+            .get(&WarmProcessorKind::ConventionSignal)
+            .copied(),
+        Some(2),
+        "(SA5-conv) convention: 2 ticks at t=120s; left: {:?}, right: Some(2)",
+        stats120
+            .ticks_observed
+            .get(&WarmProcessorKind::ConventionSignal)
+            .copied(),
+    );
+    assert_eq!(
+        stats120
+            .ticks_observed
+            .get(&WarmProcessorKind::ArchitectureDelta)
+            .copied(),
+        Some(1),
+        "(SA3-tick) architecture: 1 tick at t=120s; left: {:?}, right: Some(1)",
+        stats120
+            .ticks_observed
+            .get(&WarmProcessorKind::ArchitectureDelta)
+            .copied(),
+    );
+    assert_eq!(
+        stats120
+            .ticks_observed
+            .get(&WarmProcessorKind::DecisionLinker)
+            .copied(),
+        Some(2),
+        "(SA5-dec) decision: 2 ticks at t=120s; left: {:?}, right: Some(2)",
+        stats120
+            .ticks_observed
+            .get(&WarmProcessorKind::DecisionLinker)
+            .copied(),
+    );
+
+    // SA3: 2 warm_architecture_state rows, one with deltas_incorporated=2
+    // (the (add, src/a.rs) group) and one with deltas_incorporated=1.
+    {
+        let st = source.lock();
+        assert_eq!(
+            st.warm_arch_states.len(),
+            2,
+            "(SA3) 2 warm_architecture_state rows from 2 distinct (change_type, file_path); left: {}, right: 2",
+            st.warm_arch_states.len(),
+        );
+        let two_delta_row = st
+            .warm_arch_states
+            .iter()
+            .find(|r| r.deltas_incorporated == 2)
+            .expect("(SA3) one warm_architecture_state should have deltas_incorporated = 2");
+        assert!(
+            two_delta_row.summary.contains("src/a.rs"),
+            "(SA3) summary mentions file_path src/a.rs; left: {:?}",
+            two_delta_row.summary,
+        );
+        assert!(
+            two_delta_row.summary.contains("add"),
+            "(SA3) summary mentions change_type add; left: {:?}",
+            two_delta_row.summary,
+        );
+        let mut promoted_sorted = st.promoted_arch_ids.clone();
+        promoted_sorted.sort_unstable();
+        assert_eq!(
+            promoted_sorted,
+            vec![21, 22, 23],
+            "(SA3) all hot_architecture_deltas marked promoted; left: {:?}, right: [21,22,23]",
+            promoted_sorted,
+        );
+    }
+
+    // ── SA6: error injection on the observation processor ──
+    //
+    // Inject 1 error into the next observation-select call; advance
+    // 60s so observation ticks once with an injected failure. Verify
+    // ticks_observed[Observation] increments to 3 (the tick fired
+    // even though the processor returned Err) and the last_result
+    // carries an error description.
+    source.inject_obs_select_errors.store(1, Ordering::SeqCst);
+    tokio::time::advance(Duration::from_millis(60_000)).await;
+    for _ in 0..200 {
+        tokio::task::yield_now().await;
+    }
+    let stats180 = scheduler.stats().await;
+    assert_eq!(
+        stats180
+            .ticks_observed
+            .get(&WarmProcessorKind::Observation)
+            .copied(),
+        Some(3),
+        "(SA6) observation tick keeps firing across an injected error; left: {:?}, right: Some(3)",
+        stats180
+            .ticks_observed
+            .get(&WarmProcessorKind::Observation)
+            .copied(),
+    );
+    let last_obs = stats180
+        .last_result
+        .get(&WarmProcessorKind::Observation)
+        .expect("(SA6) last_result[Observation] populated");
+    assert!(
+        last_obs
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("injected")),
+        "(SA6) injected error surfaces in last_result.error; left: {:?}",
+        last_obs.error,
+    );
+    // Subsequent tick recovers cleanly.
+    tokio::time::advance(Duration::from_millis(60_000)).await;
+    for _ in 0..200 {
+        tokio::task::yield_now().await;
+    }
+    let stats240 = scheduler.stats().await;
+    assert_eq!(
+        stats240.ticks_observed.get(&WarmProcessorKind::Observation).copied(),
+        Some(4),
+        "(SA6-recover) observation tick fires normally after injected error; left: {:?}, right: Some(4)",
+        stats240.ticks_observed.get(&WarmProcessorKind::Observation).copied(),
+    );
+    let last_obs_post = stats240
+        .last_result
+        .get(&WarmProcessorKind::Observation)
+        .expect("(SA6-recover) last_result[Observation] populated");
+    assert!(
+        last_obs_post.error.is_none(),
+        "(SA6-recover) post-recovery tick has no error; left: {:?}",
+        last_obs_post.error,
+    );
+
+    // ── SA7: ≥ 4 `ucil.agent.warm_processor.tick` spans observed ──
+    let observed_tick_spans = {
+        let guard = span_counts.lock().expect("span-counter mutex poisoned");
+        guard
+            .get("ucil.agent.warm_processor.tick")
+            .copied()
+            .unwrap_or(0)
+    };
+    assert!(
+        observed_tick_spans >= 4,
+        "(SA7) at least 4 ucil.agent.warm_processor.tick spans by t=240s; left: {}, right: ≥ 4",
+        observed_tick_spans,
+    );
+
+    // ── SA8: shutdown drains the JoinSet ──
+    let pre_shutdown_running = handle.running_tasks();
+    assert_eq!(
+        pre_shutdown_running, 4,
+        "(SA8-pre) all 4 tasks still running before shutdown; left: {}, right: 4",
+        pre_shutdown_running,
+    );
+    handle
+        .shutdown()
+        .await
+        .expect("(SA8) shutdown returns Ok(())");
+    // Touch the inject_obs_running flag so the AtomicBool field is
+    // not flagged as dead. The flag flipping `true` proves the
+    // observation processor actually entered its body.
+    assert!(
+        source.inject_obs_running.load(Ordering::SeqCst),
+        "(SA-debug) observation processor body entered at least once",
+    );
 }

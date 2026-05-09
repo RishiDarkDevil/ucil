@@ -125,6 +125,15 @@ ucil-lsp-diagnostics = { path = "../ucil-lsp-diagnostics" }
 lsp-types = { workspace = true }
 
 [dev-dependencies]
+# Tokio's `test-util` feature enables `tokio::time::pause`,
+# `tokio::time::advance`, and the `#[tokio::test(start_paused = true)]`
+# attribute consumed by the WO-0093 / P3-W10-F13 frozen acceptance
+# test `agent_scheduler::test_warm_processors`. The workspace tokio
+# entry uses `features = ["full"]` which intentionally excludes
+# `test-util` (production binaries do not run a paused clock); the
+# dev-only inheritance unions `test-util` on top of `full` per Cargo
+# feature semantics.
+tokio = { workspace = true, features = ["test-util"] }
 tempfile.workspace = true
 # `tokenizers` is needed by the WO-0064 / P2-W8-F04 frozen acceptance
 # tests in `executor.rs` to construct a synthetic `WordLevel` tokenizer
