@@ -1,12 +1,14 @@
-# LanceDB / ONNX linkage probe (Phase 2 carry-over)
+=== Cargo.lock — lancedb / ort entries ===
+name = "lancedb"
+version = "0.16.0"
+--
+name = "ort"
+version = "2.0.0-rc.12"
 
-## Cargo.lock entries
-    name = "lancedb"
-    version = "0.16.0"
-    --
-    name = "ort"
-    version = "2.0.0-rc.12"
+=== ucil-embeddings/Cargo.toml dep declarations ===
+12:ort.workspace = true
+33:lancedb = { workspace = true }
 
-## ucil-embeddings dependency declarations
-    ort.workspace = true
-    lancedb = { workspace = true }
+=== root Cargo.toml workspace.dependencies — lancedb / ort ===
+194:ort = { version = "=2.0.0-rc.12", default-features = false, features = ["std", "download-binaries", "tls-rustls"] }
+238:lancedb = { version = "0.16", default-features = false }
