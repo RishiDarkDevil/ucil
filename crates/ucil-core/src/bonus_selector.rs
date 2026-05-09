@@ -353,6 +353,7 @@ fn make_test_hit(file: &str, score: f64) -> CrossGroupFusedHit {
 /// * SA7 — hit identity (incl. `fused_score`) preserved through
 ///   projection.
 #[cfg(test)]
+#[allow(clippy::too_many_lines)]
 #[test]
 fn test_bonus_context_selection() {
     let hits = vec![
@@ -493,7 +494,6 @@ fn test_bonus_context_selection() {
     let pos_zero = result[3].hit.fused_score;
     assert!(
         (pos_zero - 0.0).abs() < f64::EPSILON,
-        "(SA7) hit identity preserved: fused_score expected 0.0; observed {n}",
-        n = pos_zero,
+        "(SA7) hit identity preserved: fused_score expected 0.0; observed {pos_zero}",
     );
 }
