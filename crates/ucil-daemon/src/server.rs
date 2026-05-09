@@ -7856,3 +7856,295 @@ async fn test_check_quality_tool() {
         "(SA6) meta.wall_elapsed_ms < 5000 ms (parallelism canary — sequential awaits would compound G7+G8 per-source deadlines); left: {wall_elapsed}, right: < 5000"
     );
 }
+
+// ── G7 type_check MCP tool tests (P3-W11-F15) ─────────────────────────────────
+//
+// One frozen `#[tokio::test]` selector lives at MODULE ROOT (NOT inside
+// any inner `mod tests { … }`) so the substring-match selector
+// `cargo test -p ucil-daemon server::test_type_check_tool` resolves
+// uniquely without `--exact` per DEC-0007 + WO-0067/0068 lessons §planner.
+//
+// The test injects a deterministic in-process `ScriptedFakeSerenaClient`
+// (UCIL's own `SerenaClient` trait impl per `DEC-0008` §4
+// dependency-inversion seam — same pattern used by
+// `quality_pipeline.rs`'s test suite, carried forward through
+// WO-0048 / WO-0085 / WO-0089 / WO-0090) and exercises
+// `handle_type_check` end-to-end through `handle_line` so the
+// type-error filter projection is asserted over the real JSON-RPC
+// envelope.
+
+/// Frozen acceptance test for `P3-W11-F15` (`type_check`).
+///
+/// Master-plan §3.2 row 18.  Drives `handle_tools_call` end-to-end
+/// through [`McpServer::handle_type_check`] with a deterministic
+/// in-process `ScriptedFakeSerenaClient` returning a mixed bag of
+/// LSP diagnostics across three files (Rust + Python + TypeScript)
+/// and asserts SA1-SA5:
+///
+/// * **SA1 — Type-error count**: 5 raw diagnostics (3 type errors +
+///   1 warning + 1 clippy lint error) → after filter, 3 type errors
+///   survive in `errors[]`.
+/// * **SA2 — Severity vocabulary canary**: every `errors[].severity
+///   == "error"` (lowercase per §5.7 + §12.1).
+/// * **SA3 — Language coverage**: `errors[].language` covers
+///   `{rust, python, typescript}` — all three type-checker sources
+///   represented.
+/// * **SA4 — Files-checked count**: `meta.files_checked == 3` (the
+///   3 input files all have LSP-supported extensions).
+/// * **SA5 — Files-skipped count**: `meta.files_skipped == 0`.
+///
+/// Selector substring-match: `cargo test -p ucil-daemon
+/// server::test_type_check_tool` resolves uniquely without
+/// `--exact`.
+#[cfg(test)]
+#[allow(clippy::too_many_lines, clippy::missing_panics_doc)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_type_check_tool() {
+    use std::collections::HashSet;
+    use std::sync::{Arc, Mutex};
+
+    use async_trait::async_trait;
+    use lsp_types::{
+        CallHierarchyIncomingCall, CallHierarchyItem, CallHierarchyOutgoingCall,
+        Diagnostic as LspDiagnostic, DiagnosticSeverity, NumberOrString, Position, Range,
+        TypeHierarchyItem, Url,
+    };
+    use ucil_lsp_diagnostics::{DiagnosticsClient, DiagnosticsClientError, SerenaClient};
+
+    /// Helper: construct an `lsp_types::Diagnostic` from a compact
+    /// set of fields.  Mirrors `quality_pipeline::test_fixtures::make_diag`
+    /// but inlined here so the test does not pull a `pub(super)`-only
+    /// helper across module boundaries.
+    fn make_diag(
+        severity: Option<DiagnosticSeverity>,
+        source: Option<&str>,
+        code: Option<NumberOrString>,
+        message: &str,
+    ) -> LspDiagnostic {
+        LspDiagnostic {
+            range: Range::new(Position::new(0, 0), Position::new(0, 1)),
+            severity,
+            code,
+            code_description: None,
+            source: source.map(str::to_owned),
+            message: message.to_owned(),
+            related_information: None,
+            tags: None,
+            data: None,
+        }
+    }
+
+    /// `SerenaClient` impl scripted to return a fixed
+    /// diagnostics-by-URI map.  Per `DEC-0008` §4 the [`SerenaClient`]
+    /// trait is UCIL-internal so this is not a substitute for any
+    /// external wire format — the same structural pattern as
+    /// `quality_pipeline.rs::test_fixtures::ScriptedFakeSerenaClient`
+    /// (now 6 WOs deep through WO-0048 / WO-0085 / WO-0089 / WO-0090).
+    struct ScriptedFakeSerenaClient {
+        diagnostics_by_uri: Mutex<Vec<(Url, Vec<LspDiagnostic>)>>,
+    }
+
+    impl ScriptedFakeSerenaClient {
+        fn new(scripted: Vec<(Url, Vec<LspDiagnostic>)>) -> Self {
+            Self {
+                diagnostics_by_uri: Mutex::new(scripted),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl SerenaClient for ScriptedFakeSerenaClient {
+        async fn diagnostics(
+            &self,
+            uri: Url,
+        ) -> Result<Vec<LspDiagnostic>, DiagnosticsClientError> {
+            let script = self
+                .diagnostics_by_uri
+                .lock()
+                .expect("ScriptedFakeSerenaClient mutex poisoned")
+                .clone();
+            for (scripted_uri, diags) in script {
+                if scripted_uri == uri {
+                    return Ok(diags);
+                }
+            }
+            Ok(Vec::new())
+        }
+
+        async fn call_hierarchy_incoming(
+            &self,
+            _item: CallHierarchyItem,
+        ) -> Result<Vec<CallHierarchyIncomingCall>, DiagnosticsClientError> {
+            Ok(Vec::new())
+        }
+
+        async fn call_hierarchy_outgoing(
+            &self,
+            _item: CallHierarchyItem,
+        ) -> Result<Vec<CallHierarchyOutgoingCall>, DiagnosticsClientError> {
+            Ok(Vec::new())
+        }
+
+        async fn type_hierarchy_supertypes(
+            &self,
+            _item: TypeHierarchyItem,
+        ) -> Result<Vec<TypeHierarchyItem>, DiagnosticsClientError> {
+            Ok(Vec::new())
+        }
+    }
+
+    // Use absolute paths so `Url::from_file_path` returns Ok(_).
+    // Three target files spanning Rust / Python / TypeScript.
+    let rust_path = "/test/src/foo.rs";
+    let py_path = "/test/src/bar.py";
+    let ts_path = "/test/src/baz.ts";
+
+    let rust_url = Url::from_file_path(rust_path)
+        .expect("(precondition) absolute Rust path must convert to Url");
+    let py_url = Url::from_file_path(py_path)
+        .expect("(precondition) absolute Python path must convert to Url");
+    let ts_url = Url::from_file_path(ts_path)
+        .expect("(precondition) absolute TypeScript path must convert to Url");
+
+    // Five raw diagnostics distributed across the three files:
+    //
+    // * Rust file → 3 diagnostics: 1 Error/rust-analyzer (type error,
+    //   KEPT), 1 Error/clippy (lint error, FILTERED), 1
+    //   Warning/rust-analyzer (lint warning, FILTERED)
+    // * Python file → 1 diagnostic: 1 Error/pyright (type error, KEPT)
+    // * TypeScript file → 1 diagnostic: 1 Error/tsserver (type error,
+    //   KEPT)
+    let rust_diags = vec![
+        make_diag(
+            Some(DiagnosticSeverity::ERROR),
+            Some("rust-analyzer"),
+            Some(NumberOrString::String("E0308".to_owned())),
+            "mismatched types: expected `u32`, found `i32`",
+        ),
+        make_diag(
+            Some(DiagnosticSeverity::ERROR),
+            Some("clippy"),
+            Some(NumberOrString::String("clippy::needless_return".to_owned())),
+            "unneeded `return` statement",
+        ),
+        make_diag(
+            Some(DiagnosticSeverity::WARNING),
+            Some("rust-analyzer"),
+            None,
+            "unused variable: `x`",
+        ),
+    ];
+    let py_diags = vec![make_diag(
+        Some(DiagnosticSeverity::ERROR),
+        Some("pyright"),
+        Some(NumberOrString::String("reportGeneralTypeIssues".to_owned())),
+        "Argument of type \"str\" cannot be assigned to parameter of type \"int\"",
+    )];
+    let ts_diags = vec![make_diag(
+        Some(DiagnosticSeverity::ERROR),
+        Some("tsserver"),
+        Some(NumberOrString::String("TS2322".to_owned())),
+        "Type 'string' is not assignable to type 'number'.",
+    )];
+
+    let scripted = vec![
+        (rust_url, rust_diags),
+        (py_url, py_diags),
+        (ts_url, ts_diags),
+    ];
+    let fake: Arc<dyn SerenaClient + Send + Sync> = Arc::new(ScriptedFakeSerenaClient::new(scripted));
+    let client = Arc::new(DiagnosticsClient::new(fake));
+    let server = McpServer::new().with_diagnostics_client(client);
+
+    let request = json!({
+        "jsonrpc": JSONRPC_VERSION,
+        "id": 0xD1,
+        "method": "tools/call",
+        "params": {
+            "name": "type_check",
+            "arguments": {
+                "files": [rust_path, py_path, ts_path],
+                "reason": "verifier smoke",
+            }
+        }
+    })
+    .to_string();
+    let response = server.handle_line(&request).await;
+    assert_eq!(
+        response.get("error"),
+        None,
+        "(precondition) handler must not return JSON-RPC error: {response}"
+    );
+
+    let text = response
+        .pointer("/result/content/0/text")
+        .and_then(Value::as_str)
+        .expect("(precondition) response must carry result.content[0].text");
+    let parsed: Value = serde_json::from_str(text)
+        .expect("(precondition) result.content[0].text must be valid JSON");
+
+    let errors_arr = parsed
+        .get("errors")
+        .and_then(Value::as_array)
+        .expect("(precondition) parsed payload must carry errors[]");
+    let meta = parsed
+        .get("meta")
+        .expect("(precondition) parsed payload must carry meta");
+
+    // ── SA1 — errors[] length == 3 ──────────────────────────────────
+    //
+    // 5 raw diagnostics → 3 type errors after filter (rust-analyzer
+    // E0308 + pyright reportGeneralTypeIssues + tsserver TS2322 all
+    // KEPT; clippy lint error + Warning-severity rust-analyzer all
+    // FILTERED).
+    //
+    // Mutation contract M3: dropping the `is_type_error_diagnostic`
+    // filter (`.filter(|_| true)`) flips this assertion from PASS to
+    // FAIL with `(SA1) errors[] length; left: 5, right: 3`.
+    assert_eq!(
+        errors_arr.len(),
+        3,
+        "(SA1) errors[] length; left: {}, right: 3",
+        errors_arr.len()
+    );
+
+    // ── SA2 — every errors[].severity == "error" ────────────────────
+    for (i, e) in errors_arr.iter().enumerate() {
+        let sev = e.get("severity").and_then(Value::as_str);
+        assert_eq!(
+            sev,
+            Some("error"),
+            "(SA2) errors[{i}].severity == \"error\"; left: {sev:?}, right: \"error\""
+        );
+    }
+
+    // ── SA3 — errors[].language covers {rust, python, typescript} ──
+    let languages: HashSet<String> = errors_arr
+        .iter()
+        .filter_map(|e| e.get("language").and_then(Value::as_str).map(str::to_owned))
+        .collect();
+    let expected: HashSet<String> = ["rust", "python", "typescript"]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(
+        languages, expected,
+        "(SA3) errors[].language covers all 3 languages; left: {languages:?}, right: {expected:?}"
+    );
+
+    // ── SA4 — meta.files_checked == 3 ───────────────────────────────
+    assert_eq!(
+        meta.get("files_checked").and_then(Value::as_u64),
+        Some(3),
+        "(SA4) meta.files_checked == 3; left: {:?}, right: 3",
+        meta.get("files_checked")
+    );
+
+    // ── SA5 — meta.files_skipped == 0 ───────────────────────────────
+    assert_eq!(
+        meta.get("files_skipped").and_then(Value::as_u64),
+        Some(0),
+        "(SA5) meta.files_skipped == 0; left: {:?}, right: 0",
+        meta.get("files_skipped")
+    );
+}
