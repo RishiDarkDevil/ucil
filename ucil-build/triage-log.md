@@ -113,3 +113,9 @@ Inspect with: `git -C <wt> stash list` — pop or drop per executor's judgement.
 - ../ucil-wt/WO-0088/ :: auto-stash-on-resume-20260509T000714Z
 
 Inspect with: `git -C <wt> stash list` — pop or drop per executor's judgement.
+
+## 2026-05-09T03:01:40Z resume auto-stash
+
+- ../ucil-wt/WO-0091/ :: auto-stash-on-resume-20260509T030140Z
+
+Inspect with: `git -C <wt> stash list` — pop or drop per executor's judgement.
