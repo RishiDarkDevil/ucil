@@ -185,6 +185,8 @@ pub mod watcher;
 #[cfg(test)] mod test_support;
 
 #[rustfmt::skip]
+pub use agent_scheduler::{AgentScheduler, AgentSchedulerHandle, AgentSchedulerStats, HotArchitectureDeltaRow, HotConventionSignalRow, HotDecisionMaterialRow, HotObservationRow, WarmArchitectureStateRow, WarmConventionRow, WarmDecisionRow, WarmObservationRow, WarmProcessorError, WarmProcessorKind, WarmProcessorSource, WarmPromotionResult, run_architecture_delta_processor, run_convention_signal_processor, run_decision_linker_processor, run_observation_processor, ARCHITECTURE_DELTA_PROCESSOR_INTERVAL, CONVENTION_MIN_EVIDENCE, CONVENTION_SIGNAL_PROCESSOR_INTERVAL, DECISION_LINKER_INTERVAL, OBSERVATION_DEDUP_THRESHOLD, OBSERVATION_PROCESSOR_INTERVAL, WARM_PROCESSOR_BATCH_SIZE, WARM_PROCESSOR_OP_DEADLINE};
+#[rustfmt::skip]
 pub use branch_manager::{BranchManager, BranchManagerError, BranchTableInfo, code_chunks_schema, sanitise_branch_name, ARCHIVE_DIR_NAME};
 #[rustfmt::skip]
 pub use executor::{enrich_find_definition, execute_g1, fuse_g1, Caller, EnrichedFindDefinition, ExecutorError, G1Conflict, G1FusedEntry, G1FusedLocation, G1FusedOutcome, G1FusionEntry, G1Outcome, G1Query, G1Source, G1ToolKind, G1ToolOutput, G1ToolStatus, HoverDoc, HoverFetchError, HoverSource, IngestPipeline, SerenaHoverClient, G1_MASTER_DEADLINE, G1_PER_SOURCE_DEADLINE, SOURCE_TOOL, TREE_SITTER_VALID_FROM};
