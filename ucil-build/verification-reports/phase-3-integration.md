@@ -177,4 +177,13 @@ handlers.
 - Phase-3 features:     45 / 45 at `passes=true` and verifier-signed in `ucil-build/feature-list.json` at HEAD (118 / 234 across the workspace; 0 Phase-3 features signed by anything other than a `verifier-*` session).
 - Carry-over:           Phase-3 docker fixtures (Postgres / MySQL / GitHub-MCP mock) are still absent from the repo; same finding as `phase-2-integration.md` and the prior `phase-3-integration.md` at `e43a9de`, `7776e85`, and `a912cf1`. Bucket B / Bucket D triage candidate; does not block this PASS verdict because the existing G5 WOs use cargo in-process fixtures.
 - Source delta:         two commits since prior verifier-signed PASS HEAD `7776e85` (`a912cf1` integration-tester report; `467c496` `wip(integration-tester)` log snapshot), `ucil-build/verification-reports/**`-only — no source code changed.
-- Concurrent overlap:   the `wip(integration-tester)` commit at `467c496` indicates a separate `scripts/gate-check.sh 3` invocation was in flight when this session began. That run's mid-flight log snapshots have been replaced by this session's freshly-captured logs (matched my-session timings: e2e 429 ms, serena 3 721 ms, diagnostics 418 ms; all `rc=0`).
+- Concurrent overlap:   the `wip(integration-tester)` commit at `467c496` indicates a separate `scripts/gate-check.sh 3` invocation was in flight when this session began. That run's mid-flight log snapshots have been replaced by this session's freshly-captured logs (matched my-session timings: e2e 429 ms, serena 3 721 ms, diagnostics 418 ms; all `rc=0`). The Stop-hook also auto-committed this report's first write as `112b56d wip(integration-tester): phase-3-integration.md mid-gate-check update` (snapshot only; the wip body explicitly states "integration-tester will overwrite with final report on completion"); the committing chore on top of that is the canonical PASS marker for this session.
+
+## Finalization
+
+This is the canonical Phase-3 integration report for tester session
+`itg-1af5c820-86c9-4b9c-9066-6cc68071881c`. The `wip(integration-tester)`
+mid-gate-check snapshots at `467c496` and `112b56d` (auto-committed by
+the Stop-hook over in-flight artifacts) are now superseded by the
+chore-level commit that lands this report and its supporting logs.
+Verdict: **PASS**.
