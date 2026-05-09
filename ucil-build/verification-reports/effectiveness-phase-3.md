@@ -1,7 +1,7 @@
 # Effectiveness Report — Phase 3
 
-Run at: 2026-05-09T15:45Z (refresh-pass at HEAD `b768816`)
-Commit: `b768816` (HEAD at evaluator-launch on `main`)
+Run at: 2026-05-09T10:21Z (refresh-pass at HEAD `a977ef9`)
+Commit: `a977ef9` (HEAD at evaluator-launch on `main`)
 Branch: `main`
 Evaluator: `effectiveness-evaluator` (this session, `claude-opus-4-7`)
 
@@ -10,14 +10,23 @@ Prior substantive evaluation: commit `112b56d` (full substantive runs of
 for `nav-rust-symbol` + `refactor-rename-python`). Documented verbatim
 below. Verdict was **PASS** for all four phase-3-eligible scenarios.
 
-## Refresh-pass note (this session, HEAD `b768816`)
+Prior refresh-passes:
+- `c188e9d` @ HEAD `b768816` (2026-05-09T15:45Z) — refresh-pass commit
+  preceding this session, evidence verbatim below in the older
+  refresh-pass section.
+- `2f940ff` @ HEAD `112b56d` (2026-05-09T10:14Z, original substantive
+  pass) — preserved verbatim in the lower half of this document.
 
-This is a **re-confirmation pass** at HEAD `b768816` after the prior
-report-commit `2f940ff`. Between the prior substantive run baseline
-(`112b56d`) and this HEAD, the only paths touched are
-`ucil-build/verification-reports/` (this report itself + the integration
-tester's report); zero lines on agent-runtime paths. Verified this
-session:
+## Refresh-pass note (this session, HEAD `a977ef9`)
+
+This is a **re-confirmation pass** at HEAD `a977ef9` after the prior
+refresh-pass commit `c188e9d` (which itself documented a refresh at HEAD
+`b768816`). Between the prior substantive run baseline (`112b56d`) and
+this HEAD, the only paths touched are `ucil-build/verification-reports/`
+(this report itself, integration-tester reports, and `wip(coverage)`
+reports), `.gitignore` (added `*.profraw`), and ADRs; **zero lines on
+agent-runtime paths** (`crates/ucil-daemon/src/main.rs`, `crates/ucil-mcp/`,
+`tests/fixtures/`, `tests/scenarios/`). Verified this session:
 
 ```sh
 $ git diff 112b56d..HEAD --shortstat -- \
