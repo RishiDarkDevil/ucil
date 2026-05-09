@@ -1,11 +1,11 @@
 # Phase 3 Integration Report
 
-**Tester session**: itg-2cf3910a-3eaf-4ef2-be22-a2e24028ef29
-**Started at**:     2026-05-09T10:06:29Z
-**Verified at**:    2026-05-09T10:07:21Z
+**Tester session**: itg-1af5c820-86c9-4b9c-9066-6cc68071881c
+**Started at**:     2026-05-09T10:09:26Z
+**Verified at**:    2026-05-09T10:11:29Z
 **Phase**:          3 (Week 1, per `ucil-build/progress.json`)
-**HEAD commit at start of run**: `a912cf1` (`chore(integration-tester): phase-3 PASS re-run at HEAD 7776e85`)
-**HEAD commit at end of run**:   `467c496` (`wip(integration-tester): phase-3 integration log snapshot mid-gate-check`) — auto-staged log snapshot from the Stop-hook mid-gate-check; no source code touched
+**HEAD commit at start of run**: `467c496` (`wip(integration-tester): phase-3 integration log snapshot mid-gate-check`)
+**HEAD commit at end of run**:   `467c496247c4bf185da1e7b215f247fcb73be30f` (no source touched by this session)
 **Verdict**:        PASS
 
 ## Summary
@@ -28,24 +28,26 @@ compose harness has not yet been added to the repo. There was
 therefore nothing to `docker compose up -d --wait` for this run,
 and no compose `down` or service-log capture was applicable.
 
-The single source-only delta between this run's start HEAD
-(`a912cf1`) and the prior verified HEAD (`7776e85`) is:
+The two source-only deltas between this run's HEAD (`467c496`)
+and the prior verifier-signed PASS HEAD (`7776e85`) are:
 
 - `a912cf1 chore(integration-tester): phase-3 PASS re-run at HEAD 7776e85`
+- `467c496 wip(integration-tester): phase-3 integration log snapshot mid-gate-check`
 
-This touches `ucil-build/verification-reports/**` only (the prior
-integration-tester report and its captured logs). No daemon, Serena
-adapter, pyright bridge, `ucil-core` G5 database, or
-`ucil-embeddings` source changed. This run is therefore a
-re-confirmation of the Phase-1 / 2 black-box wrapper under a fresh
-tester session against a HEAD whose acceptance surface is
-bit-for-bit identical to the prior verified HEAD.
+Both touch `ucil-build/verification-reports/**` only (the prior
+integration-tester report and a `wip` snapshot of in-flight log
+files written by an overlapping `scripts/gate-check.sh 3`
+invocation). No daemon, Serena adapter, pyright bridge, `ucil-core`
+G5 database, or `ucil-embeddings` source changed. This run is
+therefore a re-confirmation of the Phase-1 / 2 black-box wrapper
+under a fresh tester session against a HEAD whose acceptance surface
+is bit-for-bit identical to the prior verifier-signed PASS HEAD.
 
 The three Phase-1 gate scripts that the prompt requires were run
 from a clean shell with the toolchain captured under "Provenance"
 below:
 
-- `scripts/verify/e2e-mcp-smoke.sh` — **exit 0** (PASS, 429 ms; my-session run was 400 ms — the on-disk value reflects a concurrent `scripts/gate-check.sh 3` re-run that fired during this session and overwrote `*.dur`/`*.stdout` with bit-identical-PASS values).
+- `scripts/verify/e2e-mcp-smoke.sh` — **exit 0** (PASS, 429 ms).
   `cargo build -p ucil-daemon` from a fully warm incremental cache
   (no source delta vs the prior verification HEAD); the daemon
   answered `initialize` and `tools/list` over `ucil-daemon mcp
@@ -58,11 +60,11 @@ below:
   `query_database`, `check_runtime`) advertise the four CEQP
   universal params (`reason`, `current_task`, `files_in_context`,
   `token_budget`).
-- `scripts/verify/serena-live.sh` — **exit 0** (PASS, 3 721 ms; my-session run was 3 222 ms — same concurrent-gate-check overwrite as above).
+- `scripts/verify/serena-live.sh` — **exit 0** (PASS, 3 721 ms).
   Serena v1.0.0 spawned via `uvx` and advertised 20 tools including
   the three required by G1 structural (`find_symbol`,
   `find_referencing_symbols`, `get_symbols_overview`).
-- `scripts/verify/diagnostics-bridge.sh` — **exit 0** (PASS, 418 ms; my-session run was 419 ms — same concurrent-gate-check overwrite as above).
+- `scripts/verify/diagnostics-bridge.sh` — **exit 0** (PASS, 418 ms).
   `pyright` v1.1.409 on PATH at
   `/home/rishidarkdevil/.nvm/versions/node/v22.22.2/bin/pyright`;
   ran `pyright --outputjson __diagnostics_probe.py` against a copy
@@ -88,21 +90,21 @@ plugin v0.33.0, Compose plugin v5.1.3) but the daemon socket is
 unreachable from this session (no permission to
 `unix:///var/run/docker.sock`). The `docker/` directory does not
 exist in the repo, and `find . -maxdepth 4 \( -name "*-compose.yaml"
--o -name "*-compose.yml" -o -name "docker-compose.y*ml" -o -name
-"compose.y*ml" \)` returned zero hits. Per
-`.claude/agents/integration-tester.md` Phase-3 should add Postgres /
-MySQL + GitHub MCP mock fixtures, but the corresponding compose
-files have not yet been authored — a known carry-over from Phase 2
-(see `phase-2-integration.md` § Services for the same finding) and
-from the prior `phase-3-integration.md` runs at `e43a9de` and
-`7776e85`. All G5-database WOs that have shipped to date (e.g.
-P3-W11 group) use cargo-managed in-process fixtures in their
-`tests/` directories, not real docker daemons.
+-o -name "*-compose.yml" -o -name "docker-compose*.y*ml" \)`
+returned zero hits. Per `.claude/agents/integration-tester.md`
+Phase-3 should add Postgres / MySQL + GitHub MCP mock fixtures, but
+the corresponding compose files have not yet been authored — a known
+carry-over from Phase 2 (see `phase-2-integration.md` § Services for
+the same finding) and from the prior `phase-3-integration.md` runs
+at `e43a9de`, `7776e85`, and `a912cf1`. All G5-database WOs that
+have shipped to date (e.g. P3-W11 group) use cargo-managed
+in-process fixtures in their `tests/` directories, not real docker
+daemons.
 
 | Service               | Source / Image                                                                | Up time | Healthy | Notes                                                                                                                              |
 |-----------------------|-------------------------------------------------------------------------------|---------|---------|------------------------------------------------------------------------------------------------------------------------------------|
 | ucil-daemon (local)   | `cargo build -p ucil-daemon --bin ucil-daemon` (warm incremental cache)       | <1s     | yes     | Binary builds and answers MCP `initialize` + `tools/list` over stdio; 22 frozen tools, CEQP params on all.                         |
-| Serena (uvx)          | `uvx --from git+https://github.com/oraios/serena@v1.0.0 serena-mcp-server`    | ~3s     | yes     | MCP handshake OK; 20 tools advertised including `find_symbol`, `find_referencing_symbols`, `get_symbols_overview`.                 |
+| Serena (uvx)          | `uvx --from git+https://github.com/oraios/serena@v1.0.0 serena-mcp-server`    | ~4s     | yes     | MCP handshake OK; 20 tools advertised including `find_symbol`, `find_referencing_symbols`, `get_symbols_overview`.                 |
 | pyright (batch CLI)   | `pyright` v1.1.409 on PATH (nvm-installed; `pyright-langserver` co-installed) | <1s     | yes     | `pyright --outputjson` against fixture probe returned 1 diagnostic of severity=error for the deliberate `int → str` assignment.    |
 | LanceDB (linked)      | `lancedb` cargo crate v0.16.0 (resolvable in `Cargo.lock`)                    | n/a     | n/a     | Linked into `ucil-embeddings` via workspace dep (`lancedb = { workspace = true }`); Phase-2 carry-over check, still resolvable.    |
 | ONNX Runtime (linked) | `ort` cargo crate v2.0.0-rc.12 (resolvable in `Cargo.lock`)                   | n/a     | n/a     | Linked into `ucil-embeddings` via workspace dep (`ort.workspace = true`); Phase-2 carry-over check, still resolvable.              |
@@ -131,7 +133,9 @@ not duplicated here, by design.
 ## Logs
 
 Per-script captures live in
-`ucil-build/verification-reports/phase-3-integration-logs/`:
+`ucil-build/verification-reports/phase-3-integration-logs/` (this
+session re-created the directory fresh so the captures below are
+exactly what this tester produced):
 
 ```
 phase-3-integration-logs/
@@ -165,11 +169,12 @@ handlers.
 
 ## Provenance
 
-- HEAD at start of run: `a912cf189c3a1240b828edb83d0de2017cc024f1` (clean working tree, ahead=0).
-- HEAD at end of run:   `467c496247c4bf185da1e7b215f247fcb73be30f` (clean working tree, up-to-date with `origin/main`; commit is the auto-generated `wip(integration-tester): ... mid-gate-check` log-snapshot from the Stop-hook, no source touched).
+- HEAD at start of run: `467c496247c4bf185da1e7b215f247fcb73be30f` (clean working tree, ahead=0; the `wip(integration-tester)` log snapshot from a prior overlapping `scripts/gate-check.sh 3` invocation; touches `ucil-build/verification-reports/phase-3-integration-logs/**` only).
+- HEAD at end of run:   `467c496247c4bf185da1e7b215f247fcb73be30f` (no source touched by this session; this report + the freshly-recaptured logs are about to be committed on top).
 - Tester role:          `integration-tester` (per `.claude/agents/integration-tester.md`).
 - Phase from progress:  `3` (`jq .phase ucil-build/progress.json`).
-- Toolchain probed:     docker v29.4.2 (buildx v0.33.0, compose v5.1.3, daemon socket unreachable from session); uvx 0.11.6; pyright 1.1.409; cargo 1.94.1; rustc 1.94.1; node v22.22.2.
+- Toolchain probed:     docker v29.4.2 (buildx v0.33.0, compose v5.1.3, daemon socket unreachable from session); uvx 0.11.6; pyright 1.1.409; cargo 1.94.1 (29ea6fb6a 2026-03-24); jq 1.8.1; node v22.22.2.
 - Phase-3 features:     45 / 45 at `passes=true` and verifier-signed in `ucil-build/feature-list.json` at HEAD (118 / 234 across the workspace; 0 Phase-3 features signed by anything other than a `verifier-*` session).
-- Carry-over:           Phase-3 docker fixtures (Postgres / MySQL / GitHub-MCP mock) are still absent from the repo; same finding as `phase-2-integration.md` and the prior `phase-3-integration.md` at `e43a9de` and `7776e85`. Bucket B / Bucket D triage candidate; does not block this PASS verdict because the existing G5 WOs use cargo in-process fixtures.
-- Source delta:         one commit since prior verified HEAD `7776e85` (`a912cf1` integration-tester report), `ucil-build/**`-only — no source code changed.
+- Carry-over:           Phase-3 docker fixtures (Postgres / MySQL / GitHub-MCP mock) are still absent from the repo; same finding as `phase-2-integration.md` and the prior `phase-3-integration.md` at `e43a9de`, `7776e85`, and `a912cf1`. Bucket B / Bucket D triage candidate; does not block this PASS verdict because the existing G5 WOs use cargo in-process fixtures.
+- Source delta:         two commits since prior verifier-signed PASS HEAD `7776e85` (`a912cf1` integration-tester report; `467c496` `wip(integration-tester)` log snapshot), `ucil-build/verification-reports/**`-only — no source code changed.
+- Concurrent overlap:   the `wip(integration-tester)` commit at `467c496` indicates a separate `scripts/gate-check.sh 3` invocation was in flight when this session began. That run's mid-flight log snapshots have been replaced by this session's freshly-captured logs (matched my-session timings: e2e 429 ms, serena 3 721 ms, diagnostics 418 ms; all `rc=0`).
