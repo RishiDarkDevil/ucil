@@ -125,3 +125,4 @@ Inspect with: `git -C <wt> stash list` — pop or drop per executor's judgement.
 - ../ucil-wt/WO-0092/ :: auto-stash-on-resume-20260509T041118Z
 
 Inspect with: `git -C <wt> stash list` — pop or drop per executor's judgement.
+2026-05-09T04:12Z r42-monitor-bypass-p3-37-features A — auto-resolved heartbeat advisory; close-on-next-pass per file self-classification, P3=37/45
