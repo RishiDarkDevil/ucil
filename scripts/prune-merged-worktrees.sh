@@ -93,9 +93,37 @@ for wt_dir in "$WT_BASE"/WO-*; do
   fi
 
   if ! git merge-base --is-ancestor "$branch_sha" "$MAIN_SHA" 2>/dev/null; then
-    vlog "$wo: branch=$branch tip $branch_sha NOT in main, skip (in flight)"
-    SKIPPED=$((SKIPPED + 1))
-    continue
+    # Tip not ancestor — but cherry-pick recovery may have landed src on
+    # main without preserving the feat tip in history. Check if the WO's
+    # features all pass on main; if so, the work is effectively merged
+    # via cherry-pick, and the worktree is safe to prune.
+    wo_features="$(jq -r --arg wo "$wo" '
+      [.features[] | select(.last_verified_by != null)] |
+      [.[] | select(.id as $id | $id | startswith("P3-")) | select(.passes==true) | .id]
+      | length' ucil-build/feature-list.json 2>/dev/null || echo 0)"
+    # Lookup features for this WO from work-orders/<wo>.json
+    wo_lower="$(echo "$wo" | tr '[:upper:]' '[:lower:]')"
+    wo_archive="ucil-build/work-orders/archive/${wo_lower#wo-}-*.json"
+    wo_active="$(ls ucil-build/work-orders/${wo_lower#wo-}-*.json 2>/dev/null | grep -v ready-for-review | head -1)"
+    [[ -z "$wo_active" ]] && wo_active="$(ls $wo_archive 2>/dev/null | head -1)"
+    if [[ -n "$wo_active" && -f "$wo_active" ]]; then
+      _all_pass=1
+      for fid in $(jq -r '.feature_ids[]?' "$wo_active" 2>/dev/null); do
+        p=$(jq -r --arg id "$fid" '.features[] | select(.id==$id) | .passes' ucil-build/feature-list.json 2>/dev/null)
+        [[ "$p" != "true" ]] && _all_pass=0
+      done
+      if [[ "$_all_pass" -eq 1 ]]; then
+        vlog "$wo: branch tip not in main but all WO features pass=true on main (cherry-pick recovery), pruning"
+      else
+        vlog "$wo: branch=$branch tip $branch_sha NOT in main, skip (in flight)"
+        SKIPPED=$((SKIPPED + 1))
+        continue
+      fi
+    else
+      vlog "$wo: branch=$branch tip $branch_sha NOT in main, no WO file to verify, skip (in flight)"
+      SKIPPED=$((SKIPPED + 1))
+      continue
+    fi
   fi
 
   # Belt-and-suspenders: if RFR exists but no merge commit, skip (verifier
@@ -105,7 +133,11 @@ for wt_dir in "$WT_BASE"/WO-*; do
   rfr_alt="ucil-build/work-orders/${rfr_lower#wo-}-ready-for-review.md"
   if [[ -f "$rfr" || -f "$rfr_alt" ]]; then
     # RFR present — check that a merge commit referencing this WO exists.
-    if ! git log --oneline "$MAIN_SHA" 2>/dev/null | grep -q "merge: ${wo}\|merge:.*${wo,,}\|${branch}"; then
+    # Read into variable first to avoid SIGPIPE under set -o pipefail
+    # (grep -q closes stdin early; git log's broken pipe makes the
+    # pipeline look failed).
+    _log_out="$(git log --oneline "$MAIN_SHA" 2>/dev/null || true)"
+    if [[ -z "$_log_out" ]] || ! grep -q "merge: ${wo}\|merge:.*${wo,,}\|${branch}" <<<"$_log_out"; then
       vlog "$wo: RFR present but no merge commit for $branch, skip"
       SKIPPED=$((SKIPPED + 1))
       continue
