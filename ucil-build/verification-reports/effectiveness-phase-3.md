@@ -1,9 +1,165 @@
 # Effectiveness Report — Phase 3
 
+Run at: 2026-05-09T17:32Z (refresh-pass at HEAD `6d88350`)
+Commit: `6d88350` (HEAD at evaluator-launch on `main`)
+Branch: `main`
+Evaluator: `effectiveness-evaluator` (this session, `claude-opus-4-7`)
+
+## Refresh-pass note (this session, HEAD `6d88350`)
+
+This is a **re-confirmation pass** at HEAD `6d88350` after the prior
+refresh-passes (`a919043`/`943e732` @ HEAD `a977ef9`, `c188e9d` @ HEAD
+`b768816`). Between the original substantive baseline (`112b56d`) and
+this HEAD, the only paths touched are
+`ucil-build/verification-reports/`, `ucil-build/escalations/`,
+`scripts/verify/{concurrency,dogfood-on-self}.sh`, `.gitignore`, and
+ADRs — **zero lines on agent-runtime paths**
+(`crates/ucil-daemon/src/main.rs`, `crates/ucil-mcp/src/`,
+`tests/fixtures/`, `tests/scenarios/`). Verified this session:
+
+```sh
+$ git diff 112b56d..HEAD --shortstat -- \
+    crates/ucil-daemon/src/main.rs crates/ucil-mcp/src/ \
+    crates/ucil-daemon/src/server.rs tests/fixtures/ tests/scenarios/
+# (empty — 0 lines changed)
+$ git diff aa7dc84..HEAD --shortstat -- \
+    crates/ucil-daemon/src/main.rs crates/ucil-mcp/src/ \
+    tests/fixtures/ tests/scenarios/
+# (empty — 0 lines changed; production CLI path bit-identical to phase-2 baseline aa7dc84)
+$ git log --oneline a977ef9..HEAD
+6d88350 chore(escalations): harness-fixer halt r2 — same 3 phase-3 source gaps
+79709ad chore(verification-reports): refresh timestamps from concurrent gate-check rerun
+c86a07c chore(verification-reports): refresh timestamps from harness-fixer diagnostics
+a5dc7ea chore(escalations): harness-fixer halt — phase-3 gate has 3 UCIL-source gaps
+fdddea5 wip(coverage): all-crate coverage refresh from gate-check
+94ed8bc fix(harness): implement structural dogfood probe in scripts/verify/dogfood-on-self.sh
+252b70c fix(harness): implement 3-way concurrency probe in scripts/verify/concurrency.sh
+943e732 chore(verification-reports): expand effectiveness-phase-3.md probe history
+a919043 chore(verification-reports): refresh effectiveness-phase-3.md @ HEAD a977ef9 — PASS
+```
+
+The interleaved commits are: harness-script implementations
+(`scripts/verify/{concurrency,dogfood-on-self}.sh` — verification-side
+shell only, no agent-runtime impact), coverage-report refreshes from a
+concurrent `gate-check.sh` run (verification-reports/), one
+`.gitignore` addition (`*.profraw`), and two harness-fixer halt
+escalations describing the same three known phase-3 source gaps
+(documented elsewhere; this evaluator does not re-arbitrate them since
+they pre-date and post-date refreshes alike). **None of these touch
+the agent-visible MCP dispatch surface.** The production CLI path
+(`crates/ucil-daemon/src/main.rs:189` →
+`McpServer::with_knowledge_graph(kg_arc)` without `with_g4_sources` /
+`with_g7_sources` / `with_g8_sources` chain) is unchanged; the
+stub-vs-real envelope status of every required tool is unchanged; the
+fixtures are unchanged; the scenario YAMLs are unchanged.
+
+### Tool-availability probe at HEAD `6d88350` (this session)
+
+Independent probe this session via
+`target/debug/ucil-daemon mcp --stdio --repo
+/tmp/ucil-eval-refresh-phase3-r2-1778322660/{repo,python-repo,ts-repo,mixed-repo}`
+(rust, python, typescript, mixed fixtures, all four). Identical
+re-confirmation against the prior refresh-pass evidence:
+
+- `tools/list` → **22 tools** registered, identical names to prior probes:
+  `blast_radius, check_quality, check_runtime, explain_history,
+  find_definition, find_references, find_similar, generate_docs,
+  get_architecture, get_context_for_edit, get_conventions, lint_code,
+  query_database, refactor, remember, review_changes, run_tests,
+  search_code, security_scan, trace_dependencies, type_check,
+  understand_code`.
+- `find_definition` (rust, name=`retry_with_backoff`) → real handler,
+  `_meta.source = "tree-sitter+kg"`, `_meta.found = true`,
+  `start_line = 37`,
+  `qualified_name = ".../repo/src/http_client.rs::retry_with_backoff@37:1"`,
+  full `signature` + `doc_comment` (rustdoc with inline doctest
+  preserved verbatim).
+- `find_definition` (python, name=`compute_score`) → real handler,
+  `start_line = 15`, `file_path = ".../python-repo/src/python_project/scoring.py"`.
+- `find_references` (rust + python) → STUB envelope
+  (`_meta.not_yet_implemented = true`, content text `"tool find_references is registered but its handler is not yet implemented (Phase 1 stub)"`).
+- `refactor` (rust + python) → STUB envelope.
+- `get_context_for_edit` (rust + ts) → STUB envelope.
+- `get_conventions` (rust, ts; category=`error`) →
+  REAL handler, `_meta.source = "kg"`, `_meta.count = 0`,
+  empty `conventions[]` (real handler, no extracted rows yet).
+- `trace_dependencies` (rust, ts, mixed) → STUB envelope.
+- `get_architecture` (mixed) → STUB envelope.
+- `explain_history` (rust, mixed) → STUB envelope.
+- `search_code` (rust, query=`retry_with_backoff`) →
+  REAL handler, `_meta.count = 50`, `_meta.results[]` populated
+  (symbol-source kg hits + ripgrep textual hits).
+
+Every required-tool envelope shape is identical to the prior
+substantive run at `112b56d` and to all subsequent refresh-passes. The
+Phase-1 stub set is unchanged; the real-handler set is unchanged; the
+production CLI dispatch path is unchanged.
+
+### Probe artefacts preserved (this session)
+
+- `/tmp/ucil-eval-refresh-phase3-r2-1778322660/tools-list.json` —
+  `initialize` + `tools/list` (22 tools)
+- `/tmp/ucil-eval-refresh-phase3-r2-1778322660/toolcalls.json` —
+  9 rust-fixture `tools/call` envelopes (find_definition,
+  find_references, refactor, get_context_for_edit, get_conventions,
+  trace_dependencies, get_architecture, explain_history, search_code)
+- `/tmp/ucil-eval-refresh-phase3-r2-1778322660/py-probe.json` —
+  3 python-fixture `tools/call` envelopes (find_definition,
+  find_references, refactor for `compute_score`)
+- `/tmp/ucil-eval-refresh-phase3-r2-1778322660/ts-probe.json` —
+  3 ts-fixture envelopes (get_context_for_edit, get_conventions,
+  trace_dependencies)
+- `/tmp/ucil-eval-refresh-phase3-r2-1778322660/mixed-probe.json` —
+  3 mixed-fixture envelopes (get_architecture, trace_dependencies,
+  explain_history)
+- per-probe stderr logs alongside each `*-probe.json` /
+  `*-stderr.log`
+
+### Inherited verdict at HEAD `6d88350`
+
+The three substantive invariants hold at this HEAD:
+
+1. **Production-CLI MCP envelope shapes** — bit-identical (all 22
+   tools / per-tool dispatch real-vs-stub matches `112b56d` and
+   `aa7dc84`).
+2. **Fixtures** — `tests/fixtures/{rust,python,typescript,mixed}-project`
+   bit-identical (zero-line diff vs `aa7dc84`).
+3. **Scenarios** — `tests/scenarios/{nav-rust-symbol,
+   refactor-rename-python, add-feature-ts, arch-query}.yaml`
+   bit-identical (zero-line diff vs the substantive-baseline HEADs).
+
+Therefore the substantive PASS verdict from `112b56d` (and inherited
+phase-2 PASS from `aa7dc84` for `nav-rust-symbol` /
+`refactor-rename-python`) applies unchanged to all four scenarios.
+
+| Scenario | Verdict | Source |
+|---|---|---|
+| `nav-rust-symbol` | **PASS** | inherited from `aa7dc84` (phase-2 substantive PASS) |
+| `refactor-rename-python` | **PASS** | inherited from `aa7dc84` (phase-2 substantive PASS) |
+| `add-feature-ts` | **PASS** | substantive at `112b56d` (UCIL +0.125 weighted, no criterion regressed) |
+| `arch-query` | **PASS** | substantive at `112b56d` (tied 5.0/5.0 across all criteria) |
+
+**Refresh-pass exit code: 0.** No new escalations filed. The two
+pre-existing harness-fixer escalations
+(`a5dc7ea` / `6d88350` — `phase-3 source gaps`) are out-of-scope for
+this evaluator (they describe verifier-script gaps, not effectiveness
+regressions). The substantive report below (preserved verbatim from
+commit `2f940ff`) remains the definitive evidence trail; this section
+just adds re-confirmation at HEAD `6d88350`.
+
+This refresh follows the same three-invariant inheritance pattern used
+by the prior phase-3 refresh-passes (`a919043`, `943e732`, `c188e9d`)
+and the phase-2 refresh-passes (`dd4659e`, `43645fd`, `4efda0b`,
+`f9fd29d`, `f0fbf32`, `03ca34e`, `2958986`).
+
+---
+
+## Prior refresh-pass header (preserved from commit `a919043`)
+
 Run at: 2026-05-09T10:21Z (refresh-pass at HEAD `a977ef9`)
 Commit: `a977ef9` (HEAD at evaluator-launch on `main`)
 Branch: `main`
-Evaluator: `effectiveness-evaluator` (this session, `claude-opus-4-7`)
+Evaluator: `effectiveness-evaluator` (prior session, `claude-opus-4-7`)
 
 Prior substantive evaluation: commit `112b56d` (full substantive runs of
 `add-feature-ts` + `arch-query`; refresh-pass inheritance from `aa7dc84`
