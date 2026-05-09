@@ -4,6 +4,9 @@ target/
 **/*.rs.bk
 *.pdb
 **/mutants.out*/
+# llvm-cov / cargo llvm-cov coverage instrumentation droppings
+*.profraw
+**/*.profraw
 
 # --- Node / TypeScript ---
 node_modules/
