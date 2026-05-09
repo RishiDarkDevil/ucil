@@ -4457,3 +4457,318 @@ impl From<std::collections::BTreeSet<String>> for BTreeSetWrapper {
         Self(value)
     }
 }
+
+// ── G8 (Testing) parallel orchestrator + dedup-by-test-path merger
+// acceptance test (P3-W11-F09 / WO-0089) ───────────────────────────────────
+//
+// Per `DEC-0007` (frozen-selector module-root placement), the
+// acceptance test `test_g8_test_discovery_all_methods` lives at the
+// MODULE ROOT of `executor.rs` — NOT inside `mod tests {}` — so the
+// `feature-list.json` selector
+// `-p ucil-daemon executor::test_g8_test_discovery_all_methods` resolves
+// cleanly without a `tests::` intermediate (parallel to
+// `executor::test_g4_architecture_query` from WO-0083 and
+// `executor::test_g3_parallel_merge` from WO-0070).
+//
+// Per `DEC-0008` §4 the local `TestG8Source` impl below is UCIL-
+// internal — NOT a mock of any external wire format.  Production
+// wiring of real `ConventionG8Source` walking corpus conventions,
+// `ImportG8Source` parsing import statements via tree-sitter, and
+// `KgRelationsG8Source` querying the WO-0011 KG `tested_by` schema
+// is deferred to a follow-up production-wiring WO that bundles the
+// daemon-startup orchestration.
+
+/// Frozen acceptance selector for feature `P3-W11-F09` — see
+/// `ucil-build/feature-list.json` entry for
+/// `-p ucil-daemon executor::test_g8_test_discovery_all_methods`.
+///
+/// Drives [`crate::g8::execute_g8`] +
+/// [`crate::g8::merge_g8_test_discoveries`] over UCIL-internal
+/// [`crate::g8::G8Source`] impls and asserts eight properties
+/// (SA1..SA8):
+///
+/// * **SA1** — `outcome.results.len() == 4` (one per source).
+/// * **SA2** — `outcome.master_timed_out == false` under the deadline
+///   chosen for the test.
+/// * **SA3** — Each Available source carries
+///   `G8SourceStatus::Available` matching its declared behaviour.
+/// * **SA4 — M1-target** — A 4th `slow` source sleeping past
+///   `G8_PER_SOURCE_DEADLINE` but within the test's master deadline
+///   trips its per-source timeout (status `TimedOut`).
+/// * **SA5 — M2-target** — Merger emits `tests/test_shared.rs`
+///   exactly once with `methods_found_by == [Convention, Import]`
+///   even though both Convention and Import sources discovered it.
+/// * **SA6** — `outcome.wall_elapsed_ms < master_deadline` confirming
+///   the master deadline did NOT trip in the all-Available scenario.
+/// * **SA7** — An Errored 5th source preserves
+///   `G8SourceStatus::Errored` with the source-supplied message.
+/// * **SA8** — `serde_json::to_string(&TestDiscoveryMethod::*)`
+///   produces the `snake_case` strings `"convention"` / `"import"` /
+///   `"kg_relations"` per master-plan §3.2 / §5.8 vocabulary canary.
+#[cfg(test)]
+#[allow(clippy::too_many_lines, clippy::missing_panics_doc)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+pub async fn test_g8_test_discovery_all_methods() {
+    use std::path::PathBuf;
+    use std::time::Duration;
+
+    use crate::g8::{
+        execute_g8, merge_g8_test_discoveries, G8Query, G8Source, G8SourceStatus, G8TestCandidate,
+        TestDiscoveryMethod,
+    };
+
+    /// Behaviour switches for the per-test [`G8Source`] impl below.
+    ///
+    /// `Available` returns the supplied candidates after sleeping
+    /// `sleep_ms`; `Slow` sleeps past
+    /// [`crate::g8::G8_PER_SOURCE_DEADLINE`] so the orchestrator's
+    /// per-source timeout fires; `Errored` returns `Err(msg)`.
+    #[derive(Clone)]
+    enum TestG8Behavior {
+        Available {
+            candidates: Vec<G8TestCandidate>,
+            sleep_ms: u64,
+        },
+        Slow {
+            sleep_ms: u64,
+        },
+        Errored {
+            msg: String,
+        },
+    }
+
+    /// Local [`G8Source`] impl driving the per-scenario behaviour.
+    ///
+    /// Per `DEC-0008` §4 this is a UCIL-internal trait (the
+    /// dependency-inversion seam), so a local impl in a test is not
+    /// a mock of any external wire format — same shape as the
+    /// `TestG3Source` / `TestG4Source` impls earlier in this file.
+    struct TestG8Source {
+        id: String,
+        method: TestDiscoveryMethod,
+        behavior: TestG8Behavior,
+    }
+
+    #[async_trait::async_trait]
+    impl G8Source for TestG8Source {
+        fn source_id(&self) -> String {
+            self.id.clone()
+        }
+
+        fn method(&self) -> TestDiscoveryMethod {
+            self.method
+        }
+
+        async fn execute(&self, _query: &G8Query) -> Result<Vec<G8TestCandidate>, String> {
+            match &self.behavior {
+                TestG8Behavior::Available {
+                    candidates,
+                    sleep_ms,
+                } => {
+                    tokio::time::sleep(Duration::from_millis(*sleep_ms)).await;
+                    Ok(candidates.clone())
+                }
+                TestG8Behavior::Slow { sleep_ms } => {
+                    tokio::time::sleep(Duration::from_millis(*sleep_ms)).await;
+                    // The orchestrator's per-source timeout MUST fire
+                    // before this branch returns; if the test ever
+                    // sees `Available` here, the timeout wrapper has
+                    // regressed (an M1-style mutation would land us
+                    // here).
+                    Ok(vec![])
+                }
+                TestG8Behavior::Errored { msg } => Err(msg.clone()),
+            }
+        }
+    }
+
+    // ── SA8: snake_case serialisation canary ─────────────────────────
+    //
+    // Run this BEFORE the orchestrator so the assertion fails quickly
+    // if the serde rename_all attribute regresses.
+    let s_conv = serde_json::to_string(&TestDiscoveryMethod::Convention).unwrap();
+    assert_eq!(
+        s_conv, "\"convention\"",
+        "(SA8.Convention) snake_case serialisation expected \"convention\"; observed {s_conv}"
+    );
+    let s_imp = serde_json::to_string(&TestDiscoveryMethod::Import).unwrap();
+    assert_eq!(
+        s_imp, "\"import\"",
+        "(SA8.Import) snake_case serialisation expected \"import\"; observed {s_imp}"
+    );
+    let s_kg = serde_json::to_string(&TestDiscoveryMethod::KgRelations).unwrap();
+    assert_eq!(
+        s_kg, "\"kg_relations\"",
+        "(SA8.KgRelations) snake_case serialisation expected \"kg_relations\"; observed {s_kg}"
+    );
+
+    // ── Sources for the all-methods scenario ─────────────────────────
+    //
+    // 5 sources in input order:
+    //   [0] convention-1: Convention method, 2 candidates (test_foo, test_shared)
+    //   [1] import-1:     Import method,     1 candidate  (test_shared) — overlaps [0]
+    //   [2] kg-1:         KgRelations,       1 candidate  (test_bar)
+    //   [3] slow-1:       Convention,        Slow (5500ms — trips per-source timeout)
+    //   [4] errored-1:    Import,            Errored (preserves Errored status)
+    let convention_src = TestG8Source {
+        id: "convention-1".to_owned(),
+        method: TestDiscoveryMethod::Convention,
+        behavior: TestG8Behavior::Available {
+            candidates: vec![
+                G8TestCandidate {
+                    test_path: PathBuf::from("tests/test_foo.rs"),
+                    source_path: Some(PathBuf::from("src/foo.rs")),
+                    method: TestDiscoveryMethod::Convention,
+                    confidence: 0.9,
+                },
+                G8TestCandidate {
+                    test_path: PathBuf::from("tests/test_shared.rs"),
+                    source_path: Some(PathBuf::from("src/shared.rs")),
+                    method: TestDiscoveryMethod::Convention,
+                    confidence: 0.8,
+                },
+            ],
+            sleep_ms: 10,
+        },
+    };
+    let import_src = TestG8Source {
+        id: "import-1".to_owned(),
+        method: TestDiscoveryMethod::Import,
+        behavior: TestG8Behavior::Available {
+            candidates: vec![G8TestCandidate {
+                test_path: PathBuf::from("tests/test_shared.rs"),
+                source_path: Some(PathBuf::from("src/foo.rs")),
+                method: TestDiscoveryMethod::Import,
+                confidence: 0.7,
+            }],
+            sleep_ms: 10,
+        },
+    };
+    let kg_src = TestG8Source {
+        id: "kg-1".to_owned(),
+        method: TestDiscoveryMethod::KgRelations,
+        behavior: TestG8Behavior::Available {
+            candidates: vec![G8TestCandidate {
+                test_path: PathBuf::from("tests/test_bar.rs"),
+                source_path: Some(PathBuf::from("src/bar.rs")),
+                method: TestDiscoveryMethod::KgRelations,
+                confidence: 0.6,
+            }],
+            sleep_ms: 10,
+        },
+    };
+    let slow_src = TestG8Source {
+        id: "slow-1".to_owned(),
+        method: TestDiscoveryMethod::Convention,
+        behavior: TestG8Behavior::Slow { sleep_ms: 5_500 },
+    };
+    let errored_src = TestG8Source {
+        id: "errored-1".to_owned(),
+        method: TestDiscoveryMethod::Import,
+        behavior: TestG8Behavior::Errored {
+            msg: "intentional test error".to_owned(),
+        },
+    };
+
+    let sources: Vec<Box<dyn G8Source + Send + Sync + 'static>> = vec![
+        Box::new(convention_src),
+        Box::new(import_src),
+        Box::new(kg_src),
+        Box::new(slow_src),
+        Box::new(errored_src),
+    ];
+
+    // Master deadline 6500ms — exceeds the slow source's 5500ms sleep
+    // but the per-source 4500ms still fires first. This balances M1
+    // (per-source timeout bypass) against the master-deadline path.
+    let master_deadline = Duration::from_millis(6_500);
+    let query = G8Query {
+        changed_files: vec![PathBuf::from("src/foo.rs"), PathBuf::from("src/bar.rs")],
+    };
+    let outcome = execute_g8(query, sources, master_deadline).await;
+
+    // ── SA1: 5 sources → 5 results ───────────────────────────────────
+    assert_eq!(
+        outcome.results.len(),
+        5,
+        "(SA1) results.len() expected 5; observed {}",
+        outcome.results.len()
+    );
+
+    // ── SA2: master_timed_out false ──────────────────────────────────
+    assert!(
+        !outcome.master_timed_out,
+        "(SA2) master_timed_out expected false; observed {}",
+        outcome.master_timed_out
+    );
+
+    // ── SA3: convention/import/kg sources are all Available ──────────
+    assert_eq!(
+        outcome.results[0].status,
+        G8SourceStatus::Available,
+        "(SA3.convention-1) status expected Available; observed {:?}",
+        outcome.results[0].status
+    );
+    assert_eq!(
+        outcome.results[1].status,
+        G8SourceStatus::Available,
+        "(SA3.import-1) status expected Available; observed {:?}",
+        outcome.results[1].status
+    );
+    assert_eq!(
+        outcome.results[2].status,
+        G8SourceStatus::Available,
+        "(SA3.kg-1) status expected Available; observed {:?}",
+        outcome.results[2].status
+    );
+
+    // ── SA4 (M1-target): slow source's per-source timeout fires ─────
+    assert_eq!(
+        outcome.results[3].status,
+        G8SourceStatus::TimedOut,
+        "(SA4) outcome.results[3].status; left: TimedOut, right: {:?}",
+        outcome.results[3].status
+    );
+
+    // ── SA6: wall_elapsed_ms < master deadline ──────────────────────
+    assert!(
+        outcome.wall_elapsed_ms < 6_500,
+        "(SA6) wall_elapsed_ms within master deadline expected <6500; \
+         observed {}",
+        outcome.wall_elapsed_ms
+    );
+
+    // ── SA7: errored source preserves Errored status + message ──────
+    assert_eq!(
+        outcome.results[4].status,
+        G8SourceStatus::Errored,
+        "(SA7) errored source status expected Errored; observed status={:?}",
+        outcome.results[4].status,
+    );
+    assert_eq!(
+        outcome.results[4].error,
+        Some("intentional test error".to_owned()),
+        "(SA7) errored source error expected Some(\"intentional test error\"); \
+         observed error={:?}",
+        outcome.results[4].error,
+    );
+
+    // ── SA5 (M2-target): merger dedups tests/test_shared.rs ─────────
+    let merged = merge_g8_test_discoveries(&outcome);
+    let shared_path = PathBuf::from("tests/test_shared.rs");
+    let shared_count = merged.iter().filter(|m| m.test_path == shared_path).count();
+    assert_eq!(
+        shared_count, 1,
+        "(SA5a) tests/test_shared.rs dedup count expected 1; observed {shared_count}"
+    );
+    let shared = merged
+        .iter()
+        .find(|m| m.test_path == shared_path)
+        .expect("tests/test_shared.rs must appear in merged output");
+    assert_eq!(
+        shared.methods_found_by,
+        vec![TestDiscoveryMethod::Convention, TestDiscoveryMethod::Import],
+        "(SA5b) methods_found_by expected [Convention, Import]; observed {:?}",
+        shared.methods_found_by
+    );
+}
