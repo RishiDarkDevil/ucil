@@ -7589,3 +7589,270 @@ async fn test_blast_radius_tool() {
         meta.get("master_timed_out")
     );
 }
+
+// ── G7 quality MCP tool tests (P3-W11-F10) ────────────────────────────────────
+//
+// One frozen `#[tokio::test]` selector lives at MODULE ROOT (NOT inside
+// any inner `mod tests { … }`) so the substring-match selector
+// `cargo test -p ucil-daemon server::test_check_quality_tool` resolves
+// uniquely without `--exact` per DEC-0007 + WO-0067/0068 lessons §planner.
+//
+// The test injects deterministic in-process `TestG7Source` /
+// `TestG8Source` impls (UCIL's own dependency-inversion seam per
+// DEC-0008 §4 — these are NOT mocks of any external wire format) and
+// exercises `handle_check_quality` end-to-end through `handle_line` so
+// the parallel `tokio::join!` fan-out + merge projection is asserted
+// over the real JSON-RPC envelope.
+
+/// Frozen acceptance test for `P3-W11-F10` (`check_quality`).
+///
+/// Master-plan §3.2 row 14 + §5.7 + §5.8 + §18 Phase 3 Week 11 item 6.
+/// Drives `handle_tools_call` end-to-end through
+/// [`McpServer::handle_check_quality`] with deterministic
+/// in-process [`G7Source`] + [`G8Source`] impls and asserts SA1-SA6:
+///
+/// * **SA1 — Issue count**: 3 G7 issues spanning Critical / High /
+///   Medium severities → `issues[].len() == 3` (after the
+///   severity-weighted merge, which preserves count when groups are
+///   keyed distinct).
+/// * **SA2 — Severity vocabulary canary**: `issues[0].severity ==
+///   "critical"` (lowercase per §5.7 + §12.1 + WO-0085 sentinel-row
+///   precedent).
+/// * **SA3 — Untested-function count**: 2 G8 candidates with distinct
+///   `test_path` values → `untested_functions[].len() == 2` (after
+///   the dedup-by-test-path merge).
+/// * **SA4 — Untested-function path**: `untested_functions[0].test_path`
+///   matches the seeded test path.
+/// * **SA5 — Master deadline did not trip**: both G7 + G8 sources
+///   return immediately under the 5500 ms / 5000 ms masters →
+///   `meta.master_timed_out == false`.
+/// * **SA6 — Parallelism wall-clock canary**:
+///   `meta.wall_elapsed_ms < 5000` ms.  If the parallel `tokio::join!`
+///   regresses to sequential awaits on the per-source 4500 ms
+///   deadlines, this canary trips before either inner timeout fires.
+///
+/// Selector substring-match: `cargo test -p ucil-daemon
+/// server::test_check_quality_tool` resolves uniquely without
+/// `--exact`.
+#[cfg(test)]
+#[allow(clippy::too_many_lines, clippy::missing_panics_doc)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_check_quality_tool() {
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    use crate::g7::{G7Issue, G7SourceOutput, G7SourceStatus, Severity};
+    use crate::g8::{G8TestCandidate, TestDiscoveryMethod};
+
+    /// Local [`G7Source`] impl returning a pre-canned issue list.
+    /// Per `DEC-0008` §4 the [`G7Source`] trait is UCIL-internal so
+    /// this is not a substitute for any external wire format —
+    /// matches the `g7::test_g7_parallel_pipeline` precedent.
+    struct TestG7Source {
+        id: String,
+        issues: Vec<G7Issue>,
+    }
+
+    #[async_trait::async_trait]
+    impl G7Source for TestG7Source {
+        fn source_id(&self) -> &str {
+            &self.id
+        }
+
+        async fn execute(&self, _query: &G7Query) -> G7SourceOutput {
+            G7SourceOutput {
+                source_id: self.id.clone(),
+                status: G7SourceStatus::Available,
+                elapsed_ms: 0,
+                issues: self.issues.clone(),
+                error: None,
+            }
+        }
+    }
+
+    /// Local [`G8Source`] impl returning a pre-canned candidate list.
+    /// Same `DEC-0008` §4 carve-out as `TestG7Source` above.
+    struct TestG8Source {
+        id: String,
+        method: TestDiscoveryMethod,
+        candidates: Vec<G8TestCandidate>,
+    }
+
+    #[async_trait::async_trait]
+    impl G8Source for TestG8Source {
+        fn source_id(&self) -> String {
+            self.id.clone()
+        }
+
+        fn method(&self) -> TestDiscoveryMethod {
+            self.method
+        }
+
+        async fn execute(&self, _query: &G8Query) -> Result<Vec<G8TestCandidate>, String> {
+            Ok(self.candidates.clone())
+        }
+    }
+
+    // Three G7 issues spanning Critical / High / Medium severities,
+    // anchored to distinct `(file_path, line_start, category)` keys
+    // so the severity-weighted merge preserves all three in the
+    // output (no group collapse).
+    let issues = vec![
+        G7Issue {
+            source_tool: "lsp:rust-analyzer".to_owned(),
+            file_path: "src/auth.rs".to_owned(),
+            line_start: Some(10),
+            line_end: Some(10),
+            category: "type_error".to_owned(),
+            severity: Severity::Critical,
+            message: "borrow checker error".to_owned(),
+            rule_id: Some("E0382".to_owned()),
+            fix_suggestion: Some("clone the borrow".to_owned()),
+        },
+        G7Issue {
+            source_tool: "eslint".to_owned(),
+            file_path: "src/auth.rs".to_owned(),
+            line_start: Some(20),
+            line_end: Some(20),
+            category: "lint".to_owned(),
+            severity: Severity::High,
+            message: "no-unused-vars".to_owned(),
+            rule_id: Some("no-unused-vars".to_owned()),
+            fix_suggestion: None,
+        },
+        G7Issue {
+            source_tool: "ruff".to_owned(),
+            file_path: "src/auth.rs".to_owned(),
+            line_start: Some(30),
+            line_end: Some(30),
+            category: "lint".to_owned(),
+            severity: Severity::Medium,
+            message: "F401: unused import".to_owned(),
+            rule_id: Some("F401".to_owned()),
+            fix_suggestion: None,
+        },
+    ];
+
+    // Two G8 candidates with distinct `test_path` values so the
+    // dedup-by-test-path merge produces exactly two output rows.
+    let candidates = vec![
+        G8TestCandidate {
+            test_path: PathBuf::from("tests/test_auth_login.rs"),
+            source_path: Some(PathBuf::from("src/auth.rs")),
+            method: TestDiscoveryMethod::Convention,
+            confidence: 0.95,
+        },
+        G8TestCandidate {
+            test_path: PathBuf::from("tests/test_auth_logout.rs"),
+            source_path: Some(PathBuf::from("src/auth.rs")),
+            method: TestDiscoveryMethod::Import,
+            confidence: 0.85,
+        },
+    ];
+
+    let g7_src: Arc<dyn G7Source + Send + Sync> = Arc::new(TestG7Source {
+        id: "test-g7-source".to_owned(),
+        issues,
+    });
+    let g8_src: Arc<dyn G8Source + Send + Sync> = Arc::new(TestG8Source {
+        id: "test-g8-source".to_owned(),
+        method: TestDiscoveryMethod::Convention,
+        candidates,
+    });
+
+    let server = McpServer::new()
+        .with_g7_sources(Arc::new(vec![g7_src]))
+        .with_g8_sources(Arc::new(vec![g8_src]));
+
+    let request = json!({
+        "jsonrpc": JSONRPC_VERSION,
+        "id": 0xC1,
+        "method": "tools/call",
+        "params": {
+            "name": "check_quality",
+            "arguments": {
+                "target": "src/auth.rs",
+                "reason": "verifier smoke",
+            }
+        }
+    })
+    .to_string();
+    let response = server.handle_line(&request).await;
+    assert_eq!(
+        response.get("error"),
+        None,
+        "(precondition) handler must not return JSON-RPC error: {response}"
+    );
+
+    let text = response
+        .pointer("/result/content/0/text")
+        .and_then(Value::as_str)
+        .expect("(precondition) response must carry result.content[0].text");
+    let parsed: Value = serde_json::from_str(text)
+        .expect("(precondition) result.content[0].text must be valid JSON");
+
+    let issues_arr = parsed
+        .get("issues")
+        .and_then(Value::as_array)
+        .expect("(precondition) parsed payload must carry issues[]");
+    let untested_arr = parsed
+        .get("untested_functions")
+        .and_then(Value::as_array)
+        .expect("(precondition) parsed payload must carry untested_functions[]");
+    let meta = parsed
+        .get("meta")
+        .expect("(precondition) parsed payload must carry meta");
+
+    // ── SA1 — issues[] length == 3 ──────────────────────────────────
+    assert_eq!(
+        issues_arr.len(),
+        3,
+        "(SA1) issues[] length; left: {}, right: 3",
+        issues_arr.len()
+    );
+
+    // ── SA2 — issues[0].severity == "critical" (vocabulary canary) ──
+    assert_eq!(
+        issues_arr[0].get("severity").and_then(Value::as_str),
+        Some("critical"),
+        "(SA2) issues[0].severity == \"critical\"; left: {:?}, right: \"critical\"",
+        issues_arr[0].get("severity")
+    );
+
+    // ── SA3 — untested_functions[] length == 2 ──────────────────────
+    assert_eq!(
+        untested_arr.len(),
+        2,
+        "(SA3) untested_functions[] length; left: {}, right: 2",
+        untested_arr.len()
+    );
+
+    // ── SA4 — untested_functions[0].test_path matches seeded path ──
+    let test_path_0 = untested_arr[0]
+        .get("test_path")
+        .and_then(Value::as_str)
+        .expect("(SA4 precondition) untested_functions[0].test_path must be a string");
+    assert!(
+        test_path_0.contains("tests/test_auth_login.rs")
+            || test_path_0.contains("tests/test_auth_logout.rs"),
+        "(SA4) untested_functions[0].test_path matches a seeded test path; left: {test_path_0:?}, right: one of [tests/test_auth_login.rs, tests/test_auth_logout.rs]"
+    );
+
+    // ── SA5 — meta.master_timed_out == false ────────────────────────
+    assert_eq!(
+        meta.get("master_timed_out").and_then(Value::as_bool),
+        Some(false),
+        "(SA5) meta.master_timed_out == false; left: {:?}, right: false",
+        meta.get("master_timed_out")
+    );
+
+    // ── SA6 — meta.wall_elapsed_ms < 5000 (parallelism canary) ──────
+    let wall_elapsed = meta
+        .get("wall_elapsed_ms")
+        .and_then(Value::as_u64)
+        .expect("(SA6 precondition) meta.wall_elapsed_ms must be a u64");
+    assert!(
+        wall_elapsed < 5000,
+        "(SA6) meta.wall_elapsed_ms < 5000 ms (parallelism canary — sequential awaits would compound G7+G8 per-source deadlines); left: {wall_elapsed}, right: < 5000"
+    );
+}
