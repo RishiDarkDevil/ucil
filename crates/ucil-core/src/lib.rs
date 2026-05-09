@@ -11,6 +11,7 @@ pub mod bonus_selector;
 pub mod ceqp;
 pub mod context_compiler;
 pub mod cross_group;
+pub mod feedback;
 pub mod fusion;
 pub mod incremental;
 pub mod knowledge_graph;
@@ -36,6 +37,13 @@ pub use fusion::{fuse_g2_rrf, rrf_weight, G2FusedHit, G2FusedOutcome, G2Hit, G2S
 // production-wiring consumer WOs.
 #[rustfmt::skip]
 pub use bonus_selector::{BonusContextSource, BonusEntries, BonusSelectionOptions, HitWithBonus, select_bonus_context};
+// Single-line per AC22 / AC03 (WO-0088 carry-forward) — `#[rustfmt::skip]`
+// blocks the 100-col wrap so `grep -qE '^pub use feedback::\{' …`
+// matches without depending on rustfmt's wrapping heuristic.
+// P3-W11-F12 lands the post-hoc feedback-loop analyser public
+// surface for the Phase-4 daemon-side production-wiring consumer WO.
+#[rustfmt::skip]
+pub use feedback::{analyze_post_hoc, AgentNextCall, BonusReference, BonusType, EditObservation, FeedbackAnalysisOptions, FeedbackAnalysisOutcome, FeedbackError, FeedbackPersistence, FeedbackSignal, FeedbackSignalRecord, ImportanceAdjustment};
 // Single-line per AC22 / AC03 (WO-0087 + WO-0088) — `#[rustfmt::skip]`
 // blocks the 100-col wrap so `grep -qE '^pub use context_compiler::\{' …`
 // matches without depending on rustfmt's wrapping heuristic.  P3-W10-F01
