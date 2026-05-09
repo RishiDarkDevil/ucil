@@ -8481,3 +8481,398 @@ async fn test_type_check_tool() {
         meta.get("files_skipped")
     );
 }
+
+// ── G4+G7+G8 review_changes MCP tool tests (P3-W11-F11) ──────────────────────
+//
+// One frozen `#[tokio::test]` selector lives at MODULE ROOT (NOT inside
+// any inner `mod tests { … }`) so the substring-match selector
+// `cargo test -p ucil-daemon server::test_review_changes_tool` resolves
+// uniquely without `--exact` per DEC-0007 + WO-0067/0068 lessons §planner.
+//
+// The test injects deterministic in-process `TestG4Source` /
+// `TestG7Source` / `TestG8Source` impls (UCIL's own dependency-inversion
+// seam per DEC-0008 §4 — these are NOT mocks of any external wire
+// format) and exercises `handle_review_changes` end-to-end through
+// `handle_line` so the parallel `tokio::join!` 3-arity fan-out + merge
+// projection is asserted over the real JSON-RPC envelope.
+
+/// Frozen acceptance test for `P3-W11-F11` (`review_changes`).
+///
+/// Master-plan §3.2 row 13 + §5.4 + §5.7 + §5.8 + §18 Phase 3 Week 11
+/// item 6.  Drives `handle_tools_call` end-to-end through
+/// [`McpServer::handle_review_changes`] with deterministic in-process
+/// [`G4Source`] + [`G7Source`] + [`G8Source`] impls and asserts SA1-SA8:
+///
+/// * **SA1 — Findings count**: 3 G7 issues + 2 G4 blast-radius nodes →
+///   `findings[].len() == 5`.  G8 contributes only to
+///   `untested_functions[]` (NOT `findings[]`).
+/// * **SA2 — Severity-rank invariant**: `findings[0].severity ==
+///   "critical"` AND `findings[]` is sorted descending by severity
+///   weight (Critical=4, High=3, Medium=2, Low=1, Info=0).
+/// * **SA3 — Source-group provenance**: collected `findings[].source_group`
+///   set covers AT LEAST `{"quality", "architecture"}`.
+/// * **SA4 — Untested-function count**: 2 G8 candidates with distinct
+///   `test_path` values → `untested_functions[].len() == 2`.
+/// * **SA5 — Blast-radius impacted count**: 2 nodes reachable from
+///   the seed file `src/foo.rs` via the seeded G4 edges →
+///   `blast_radius.impacted[].len() == 2`.
+/// * **SA6 — Master deadline did not trip**: all three G4 + G7 + G8
+///   sources return immediately under their masters →
+///   `meta.master_timed_out == false`.
+/// * **SA7 — Parallelism wall-clock canary**:
+///   `meta.wall_elapsed_ms < 6000` ms.  Sequential awaits over the
+///   3 G-source masters (G4=12s, G7=5.5s, G8=5s) would compound past
+///   6000 ms — wall-clock guard catches sequential-await regressions.
+/// * **SA8 — Finding shape integrity**: every entry in `findings[]`
+///   carries the required keys (`severity`, `category`, `source_group`,
+///   `file`, `line`, `message`) AND every `severity` is lowercase per
+///   §5.7 + §12.1 vocabulary canary.
+///
+/// Selector substring-match: `cargo test -p ucil-daemon
+/// server::test_review_changes_tool` resolves uniquely without
+/// `--exact`.
+#[cfg(test)]
+#[allow(clippy::too_many_lines, clippy::missing_panics_doc)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_review_changes_tool() {
+    use std::collections::BTreeSet;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    use crate::g4::{G4DependencyEdge, G4EdgeKind, G4EdgeOrigin};
+    use crate::g7::{G7Issue, G7SourceOutput, G7SourceStatus, Severity};
+    use crate::g8::{G8TestCandidate, TestDiscoveryMethod};
+
+    /// Local [`G7Source`] impl returning a pre-canned issue list.
+    /// Per `DEC-0008` §4 the [`G7Source`] trait is UCIL-internal so
+    /// this is not a substitute for any external wire format —
+    /// matches the `test_check_quality_tool` precedent (now 6+ WOs
+    /// deep through WO-0085 / WO-0089 / WO-0090).
+    struct TestG7Source {
+        id: String,
+        issues: Vec<G7Issue>,
+    }
+
+    #[async_trait::async_trait]
+    impl G7Source for TestG7Source {
+        fn source_id(&self) -> &str {
+            &self.id
+        }
+
+        async fn execute(&self, _query: &G7Query) -> G7SourceOutput {
+            G7SourceOutput {
+                source_id: self.id.clone(),
+                status: G7SourceStatus::Available,
+                elapsed_ms: 0,
+                issues: self.issues.clone(),
+                error: None,
+            }
+        }
+    }
+
+    /// Local [`G8Source`] impl returning a pre-canned candidate list.
+    /// Same `DEC-0008` §4 carve-out as `TestG7Source` above —
+    /// matches the `test_check_quality_tool` precedent.
+    struct TestG8Source {
+        id: String,
+        method: TestDiscoveryMethod,
+        candidates: Vec<G8TestCandidate>,
+    }
+
+    #[async_trait::async_trait]
+    impl G8Source for TestG8Source {
+        fn source_id(&self) -> String {
+            self.id.clone()
+        }
+
+        fn method(&self) -> TestDiscoveryMethod {
+            self.method
+        }
+
+        async fn execute(&self, _query: &G8Query) -> Result<Vec<G8TestCandidate>, String> {
+            Ok(self.candidates.clone())
+        }
+    }
+
+    // ── G4 seed: 2 edges from `src/foo.rs` so the merged
+    // `project_blast_radius_impacted` BFS yields exactly 2 impacted
+    // nodes (the two targets, depth=1) — matches scope_in #5.a.
+    let g4_edges = vec![
+        G4DependencyEdge {
+            source: "src/foo.rs".to_owned(),
+            target: "src/foo_helper.rs".to_owned(),
+            edge_kind: G4EdgeKind::Import,
+            source_id: "test-g4-source".to_owned(),
+            origin: G4EdgeOrigin::Inferred,
+            coupling_weight: 0.9,
+        },
+        G4DependencyEdge {
+            source: "src/foo.rs".to_owned(),
+            target: "src/foo_dep.rs".to_owned(),
+            edge_kind: G4EdgeKind::Call,
+            source_id: "test-g4-source".to_owned(),
+            origin: G4EdgeOrigin::Inferred,
+            coupling_weight: 0.7,
+        },
+    ];
+    let g4_src: Arc<dyn G4Source> = Arc::new(TestG4Source {
+        id: "test-g4-source".to_owned(),
+        edges: g4_edges,
+    });
+    let g4_sources: Arc<Vec<Arc<dyn G4Source>>> = Arc::new(vec![g4_src]);
+
+    // ── G7 seed: 3 G7 issues spanning Critical / High / Medium
+    // severities, each anchored to a distinct
+    // `(file_path, line_start, category)` key so the
+    // severity-weighted merge preserves all three groups in the
+    // output (no group collapse) — matches scope_in #5.b +
+    // `test_check_quality_tool` precedent.
+    let g7_issues = vec![
+        G7Issue {
+            source_tool: "lsp:rust-analyzer".to_owned(),
+            file_path: "src/foo.rs".to_owned(),
+            line_start: Some(10),
+            line_end: Some(10),
+            category: "type_error".to_owned(),
+            severity: Severity::Critical,
+            message: "borrow checker error".to_owned(),
+            rule_id: Some("E0382".to_owned()),
+            fix_suggestion: Some("clone the borrow".to_owned()),
+        },
+        G7Issue {
+            source_tool: "eslint".to_owned(),
+            file_path: "src/foo.rs".to_owned(),
+            line_start: Some(20),
+            line_end: Some(20),
+            category: "lint".to_owned(),
+            severity: Severity::High,
+            message: "no-unused-vars".to_owned(),
+            rule_id: Some("no-unused-vars".to_owned()),
+            fix_suggestion: None,
+        },
+        G7Issue {
+            source_tool: "ruff".to_owned(),
+            file_path: "src/bar.py".to_owned(),
+            line_start: Some(30),
+            line_end: Some(30),
+            category: "lint".to_owned(),
+            severity: Severity::Medium,
+            message: "F401: unused import".to_owned(),
+            rule_id: Some("F401".to_owned()),
+            fix_suggestion: None,
+        },
+    ];
+    let g7_src: Arc<dyn G7Source + Send + Sync> = Arc::new(TestG7Source {
+        id: "test-g7-source".to_owned(),
+        issues: g7_issues,
+    });
+    let g7_sources: Arc<Vec<Arc<dyn G7Source + Send + Sync>>> = Arc::new(vec![g7_src]);
+
+    // ── G8 seed: 2 G8 candidates with distinct `test_path` values so
+    // the dedup-by-test-path merge yields exactly 2 output rows —
+    // matches scope_in #5.c + `test_check_quality_tool` precedent.
+    let g8_candidates = vec![
+        G8TestCandidate {
+            test_path: PathBuf::from("tests/test_foo_login.rs"),
+            source_path: Some(PathBuf::from("src/foo.rs")),
+            method: TestDiscoveryMethod::Convention,
+            confidence: 0.95,
+        },
+        G8TestCandidate {
+            test_path: PathBuf::from("tests/test_foo_logout.rs"),
+            source_path: Some(PathBuf::from("src/foo.rs")),
+            method: TestDiscoveryMethod::Import,
+            confidence: 0.85,
+        },
+    ];
+    let g8_src: Arc<dyn G8Source + Send + Sync> = Arc::new(TestG8Source {
+        id: "test-g8-source".to_owned(),
+        method: TestDiscoveryMethod::Convention,
+        candidates: g8_candidates,
+    });
+    let g8_sources: Arc<Vec<Arc<dyn G8Source + Send + Sync>>> = Arc::new(vec![g8_src]);
+
+    let server = McpServer::new()
+        .with_g4_sources(g4_sources)
+        .with_g7_sources(g7_sources)
+        .with_g8_sources(g8_sources);
+
+    let request = json!({
+        "jsonrpc": JSONRPC_VERSION,
+        "id": 0xD1,
+        "method": "tools/call",
+        "params": {
+            "name": "review_changes",
+            "arguments": {
+                "changed_files": ["src/foo.rs", "src/bar.py"],
+                "reason": "verifier smoke",
+            }
+        }
+    })
+    .to_string();
+    let response = server.handle_line(&request).await;
+    assert_eq!(
+        response.get("error"),
+        None,
+        "(precondition) handler must not return JSON-RPC error: {response}"
+    );
+
+    let text = response
+        .pointer("/result/content/0/text")
+        .and_then(Value::as_str)
+        .expect("(precondition) response must carry result.content[0].text");
+    let parsed: Value = serde_json::from_str(text)
+        .expect("(precondition) result.content[0].text must be valid JSON");
+
+    let findings_arr = parsed
+        .get("findings")
+        .and_then(Value::as_array)
+        .expect("(precondition) parsed payload must carry findings[]");
+    let untested_arr = parsed
+        .get("untested_functions")
+        .and_then(Value::as_array)
+        .expect("(precondition) parsed payload must carry untested_functions[]");
+    let blast_radius = parsed
+        .get("blast_radius")
+        .expect("(precondition) parsed payload must carry blast_radius");
+    let impacted_arr = blast_radius
+        .get("impacted")
+        .and_then(Value::as_array)
+        .expect("(precondition) blast_radius.impacted must be an array");
+    let meta = parsed
+        .get("meta")
+        .expect("(precondition) parsed payload must carry meta");
+
+    // ── SA1 — findings[] length == 5 (3 G7 + 2 G4) ──────────────────
+    assert_eq!(
+        findings_arr.len(),
+        5,
+        "(SA1) findings[] length; left: {}, right: 5",
+        findings_arr.len()
+    );
+
+    // ── SA2 — findings sorted descending by severity, top critical ──
+    assert_eq!(
+        findings_arr[0].get("severity").and_then(Value::as_str),
+        Some("critical"),
+        "(SA2) findings[0].severity == \"critical\"; left: {:?}, right: \"critical\"",
+        findings_arr[0].get("severity")
+    );
+    fn sa2_weight(s: &str) -> i8 {
+        match s {
+            "critical" => 4,
+            "high" => 3,
+            "medium" => 2,
+            "low" => 1,
+            "info" => 0,
+            _ => -1,
+        }
+    }
+    for i in 0..findings_arr.len().saturating_sub(1) {
+        let lhs = findings_arr[i]
+            .get("severity")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let rhs = findings_arr[i + 1]
+            .get("severity")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        assert!(
+            sa2_weight(lhs) >= sa2_weight(rhs),
+            "(SA2) findings[{i}].severity weight >= findings[{}].severity weight (descending sort invariant); left: {} ({lhs:?}), right: {} ({rhs:?})",
+            i + 1,
+            sa2_weight(lhs),
+            sa2_weight(rhs),
+        );
+    }
+
+    // ── SA3 — findings[].source_group covers {quality, architecture} ─
+    let source_groups: BTreeSet<String> = findings_arr
+        .iter()
+        .filter_map(|f| {
+            f.get("source_group")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .collect();
+    assert!(
+        source_groups.contains("quality"),
+        "(SA3) findings[].source_group set contains \"quality\"; left: {source_groups:?}, right: contains \"quality\""
+    );
+    assert!(
+        source_groups.contains("architecture"),
+        "(SA3) findings[].source_group set contains \"architecture\"; left: {source_groups:?}, right: contains \"architecture\""
+    );
+
+    // ── SA4 — untested_functions[] length == 2 ──────────────────────
+    assert_eq!(
+        untested_arr.len(),
+        2,
+        "(SA4) untested_functions[] length; left: {}, right: 2",
+        untested_arr.len()
+    );
+
+    // ── SA5 — blast_radius.impacted[] length == 2 ───────────────────
+    assert_eq!(
+        impacted_arr.len(),
+        2,
+        "(SA5) blast_radius.impacted[] length; left: {}, right: 2",
+        impacted_arr.len()
+    );
+
+    // ── SA6 — meta.master_timed_out == false ────────────────────────
+    assert_eq!(
+        meta.get("master_timed_out").and_then(Value::as_bool),
+        Some(false),
+        "(SA6) meta.master_timed_out == false; left: {:?}, right: false",
+        meta.get("master_timed_out")
+    );
+
+    // ── SA7 — meta.wall_elapsed_ms < 6000 (parallelism canary) ──────
+    let wall_elapsed = meta
+        .get("wall_elapsed_ms")
+        .and_then(Value::as_u64)
+        .expect("(SA7 precondition) meta.wall_elapsed_ms must be a u64");
+    assert!(
+        wall_elapsed < 6000,
+        "(SA7) meta.wall_elapsed_ms < 6000 ms (parallelism canary — sequential awaits over G4+G7+G8 per-group masters would compound); left: {wall_elapsed}, right: < 6000"
+    );
+
+    // ── SA8 — finding shape integrity (every required field set,
+    // severity is lowercase) ────────────────────────────────────────
+    for (i, finding) in findings_arr.iter().enumerate() {
+        let sev = finding.get("severity").and_then(Value::as_str);
+        assert!(
+            matches!(
+                sev,
+                Some("critical" | "high" | "medium" | "low" | "info")
+            ),
+            "(SA8) findings[{i}].severity is lowercase canonical vocabulary; left: {sev:?}, right: one of [critical, high, medium, low, info]"
+        );
+        assert!(
+            finding.get("category").is_some(),
+            "(SA8) findings[{i}].category present; left: None, right: Some(_)"
+        );
+        assert!(
+            finding.get("source_group").is_some(),
+            "(SA8) findings[{i}].source_group present; left: None, right: Some(_)"
+        );
+        assert!(
+            finding.get("file").is_some(),
+            "(SA8) findings[{i}].file present; left: None, right: Some(_)"
+        );
+        // `line` may be `Value::Null` for blast-radius rows — assert
+        // the key is present (Value::Null counts as present) but
+        // do NOT require `is_some()` to be a JSON value.  The Value
+        // shape covers `null` so `.get("line").is_some()` passes
+        // even when the field is `Value::Null`.
+        assert!(
+            finding.get("line").is_some(),
+            "(SA8) findings[{i}].line present; left: None, right: Some(_)"
+        );
+        assert!(
+            finding.get("message").is_some(),
+            "(SA8) findings[{i}].message present; left: None, right: Some(_)"
+        );
+    }
+}
