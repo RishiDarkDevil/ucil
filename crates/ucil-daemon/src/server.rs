@@ -2120,10 +2120,8 @@ impl McpServer {
         // the file names themselves, per master-plan §15.2 line 1519
         // ("bounded fields") + WO-0085 §planner lesson on numeric-cast
         // tracing fields.
-        tracing::Span::current().record(
-            "changed_files_count",
-            i64::try_from(changed_files.len()).unwrap_or(i64::MAX),
-        );
+        let count = i64::try_from(changed_files.len()).unwrap_or(i64::MAX);
+        tracing::Span::current().record("changed_files_count", count);
 
         // Build per-G-source queries from the same `changed_files`
         // list — G4 takes the file-path strings as its
