@@ -4458,6 +4458,676 @@ impl From<std::collections::BTreeSet<String>> for BTreeSetWrapper {
     }
 }
 
+// ── G5 (Context) parallel orchestrator + PageRank-ranked, session-deduped
+// assembler acceptance test (P3-W10-F04 / WO-0091) ────────────────────────
+//
+// Per `DEC-0007` (frozen-selector module-root placement), the
+// acceptance test `test_g5_context_assembly` lives at the MODULE
+// ROOT of `executor.rs` — NOT inside `mod tests {}` — so the
+// `feature-list.json` selector
+// `-p ucil-daemon executor::test_g5_context_assembly` resolves
+// cleanly without a `tests::` intermediate (parallel to
+// `executor::test_g3_parallel_merge` from WO-0070,
+// `executor::test_g4_architecture_query` from WO-0083, and the
+// `executor::test_g8_test_discovery_all_methods` test below).
+//
+// Per `DEC-0008` §4 the local `TestG5Source` impl below is UCIL-
+// internal — NOT a mock of any external wire format.  Production
+// wiring of real subprocess clients (e.g. `AiderRepoMapG5Source`
+// consuming WO-0087's `PageRank` engine, `Context7G5Source` /
+// `RepomixG5Source` wrapping WO-0074's plugin runtimes) is deferred
+// to a follow-up production-wiring WO that bundles G5 into the
+// cross-group executor.
+
+/// Frozen acceptance selector for feature `P3-W10-F04` — see
+/// `ucil-build/feature-list.json` entry for
+/// `-p ucil-daemon executor::test_g5_context_assembly`.
+///
+/// Drives [`crate::g5::execute_g5`] +
+/// [`crate::g5::assemble_g5_context`] over UCIL-internal
+/// [`crate::g5::G5Source`] impls and asserts eight properties
+/// (SA1..SA8):
+///
+/// * **SA1** — Basic available case: 3 sources, 5 chunks total,
+///   1 dedup hit → `assembled.chunks.len() == 4`,
+///   `deduped_count == 1`, `source_count == 3`,
+///   `outcome.results[0].status == Available`.
+/// * **SA2 — M3-target** — `PageRank` ranking descending: chunks
+///   emitted with scores `[0.1, 0.9, 0.5, 0.3]` →
+///   `assembled.chunks[0..4].pagerank_score == [0.9, 0.5, 0.3, 0.1]`.
+/// * **SA3 — M2-target** — Session dedup invariant: chunks with
+///   paths `["a.rs", "b.rs", "c.rs"]`, `files_in_context = ["b.rs"]`
+///   → no surviving chunk has `path == "b.rs"`.
+/// * **SA4 — M1-target** — Per-source timeout: one source
+///   `LongSleep(7 s)` >
+///   [`crate::g5::G5_PER_SOURCE_DEADLINE`] = 4500 ms →
+///   that source's `outcome.results` entry has
+///   `status == TimedOut` and `elapsed_ms in [4500, 5000)` (the
+///   per-source ceiling fires before the 5 s master).
+/// * **SA5** — Error pass-through: 1 of 3 sources returns
+///   `G5SourceStatus::Errored` with `error.is_some()`; the
+///   assembler drops its chunks but other sources' chunks survive.
+/// * **SA6** — Master-deadline trip: tight `master_deadline = 100 ms`
+///   with 7 s sleepers trips the master,
+///   `outcome.master_timed_out == true`,
+///   `outcome.wall_elapsed_ms < 2000 ms`, all
+///   `results[*].status == TimedOut`.
+/// * **SA7** — Empty input: zero sources → `assembled.chunks.is_empty()`,
+///   `total_chunks_in == 0`, `deduped_count == 0`.
+/// * **SA8** — Parallelism wall-clock canary: 3 sources with 200 ms
+///   sleeps each → `outcome.wall_elapsed_ms < 500 ms` (sequential
+///   3×200 = 600 ms would breach this bound; mirrors WO-0070 SA1
+///   tightened-bound pattern).
+#[cfg(test)]
+#[allow(clippy::too_many_lines, clippy::missing_panics_doc)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+pub async fn test_g5_context_assembly() {
+    use std::time::Instant;
+
+    use crate::g5::{
+        assemble_g5_context, execute_g5, G5ContextChunk, G5Query, G5Source, G5SourceKind,
+        G5SourceOutput, G5SourceStatus, G5_PER_SOURCE_DEADLINE,
+    };
+
+    /// Behaviour switches for the per-test [`G5Source`] impl below.
+    ///
+    /// `(path, content, pagerank_score)` tuples are converted to
+    /// [`G5ContextChunk`] inside `execute` so each scenario can be
+    /// expressed as flat literals at the call site.
+    #[derive(Clone)]
+    enum TestBehaviour {
+        ReturnChunks(Vec<(String, String, f64)>),
+        Sleep(Duration, Vec<(String, String, f64)>),
+        Error(String),
+        LongSleep(Duration),
+        Empty,
+    }
+
+    /// Local [`G5Source`] impl driving the per-scenario behaviour.
+    /// Per `DEC-0008` §4 this is a UCIL-internal trait (the
+    /// dependency-inversion seam), so a local impl in a test is not
+    /// a mock of any external wire format — same shape as the
+    /// `TestG3Source` / `TestG4Source` / `TestG8Source` impls
+    /// elsewhere in this file.  The `Test` prefix is canonical per
+    /// WO-0085 §executor lesson.
+    struct TestG5Source {
+        id: String,
+        kind: G5SourceKind,
+        behaviour: TestBehaviour,
+    }
+
+    impl TestG5Source {
+        fn build_chunks(
+            source_id: &str,
+            kind: G5SourceKind,
+            tuples: &[(String, String, f64)],
+        ) -> Vec<G5ContextChunk> {
+            tuples
+                .iter()
+                .map(|(path, content, score)| G5ContextChunk {
+                    source_id: source_id.to_owned(),
+                    kind,
+                    path: path.clone(),
+                    content: content.clone(),
+                    pagerank_score: *score,
+                    token_count: Some(u32::try_from(content.len()).unwrap_or(u32::MAX)),
+                })
+                .collect()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl G5Source for TestG5Source {
+        fn source_id(&self) -> &str {
+            &self.id
+        }
+
+        fn kind(&self) -> G5SourceKind {
+            self.kind
+        }
+
+        async fn execute(&self, _query: &G5Query) -> G5SourceOutput {
+            match &self.behaviour {
+                TestBehaviour::ReturnChunks(tuples) => G5SourceOutput {
+                    source_id: self.id.clone(),
+                    kind: self.kind,
+                    status: G5SourceStatus::Available,
+                    elapsed_ms: 0,
+                    chunks: Self::build_chunks(&self.id, self.kind, tuples),
+                    error: None,
+                },
+                TestBehaviour::Sleep(d, tuples) => {
+                    let start = Instant::now();
+                    tokio::time::sleep(*d).await;
+                    let elapsed_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+                    G5SourceOutput {
+                        source_id: self.id.clone(),
+                        kind: self.kind,
+                        status: G5SourceStatus::Available,
+                        elapsed_ms,
+                        chunks: Self::build_chunks(&self.id, self.kind, tuples),
+                        error: None,
+                    }
+                }
+                TestBehaviour::Error(msg) => G5SourceOutput {
+                    source_id: self.id.clone(),
+                    kind: self.kind,
+                    status: G5SourceStatus::Errored,
+                    elapsed_ms: 0,
+                    chunks: vec![],
+                    error: Some(msg.clone()),
+                },
+                TestBehaviour::LongSleep(d) => {
+                    tokio::time::sleep(*d).await;
+                    // The orchestrator's per-source timeout MUST fire
+                    // before this branch returns; if the test ever
+                    // sees `Available` here, the timeout wrapper has
+                    // regressed (an M1-style mutation would land us
+                    // here).
+                    G5SourceOutput {
+                        source_id: self.id.clone(),
+                        kind: self.kind,
+                        status: G5SourceStatus::Available,
+                        elapsed_ms: u64::try_from(d.as_millis()).unwrap_or(u64::MAX),
+                        chunks: vec![],
+                        error: None,
+                    }
+                }
+                TestBehaviour::Empty => G5SourceOutput {
+                    source_id: self.id.clone(),
+                    kind: self.kind,
+                    status: G5SourceStatus::Available,
+                    elapsed_ms: 0,
+                    chunks: vec![],
+                    error: None,
+                },
+            }
+        }
+    }
+
+    let q = G5Query {
+        query_text: "rate limiter".to_owned(),
+        files_in_context: vec![],
+        token_budget: Some(8_000),
+    };
+
+    // ── SA1 — Basic available case ────────────────────────────────────
+    //
+    // 3 sources, 5 chunks total, dedup against 1 path
+    // ("dedup_me.rs") → 4 chunks survive, deduped_count == 1,
+    // source_count == 3 (each of {a, b, c} has at least one
+    // surviving chunk), results[0].status == Available.
+    let sources_sa1: Vec<Box<dyn G5Source>> = vec![
+        Box::new(TestG5Source {
+            id: "src_a".to_owned(),
+            kind: G5SourceKind::AiderRepoMap,
+            behaviour: TestBehaviour::ReturnChunks(vec![
+                ("a1.rs".to_owned(), "// a1 body".to_owned(), 0.8),
+                ("a2.rs".to_owned(), "// a2 body".to_owned(), 0.6),
+            ]),
+        }),
+        Box::new(TestG5Source {
+            id: "src_b".to_owned(),
+            kind: G5SourceKind::Context7Docs,
+            behaviour: TestBehaviour::ReturnChunks(vec![
+                ("b1.rs".to_owned(), "// b1 body".to_owned(), 0.7),
+                ("dedup_me.rs".to_owned(), "// dedup body".to_owned(), 0.5),
+            ]),
+        }),
+        Box::new(TestG5Source {
+            id: "src_c".to_owned(),
+            kind: G5SourceKind::RepomixPack,
+            behaviour: TestBehaviour::ReturnChunks(vec![(
+                "c1.rs".to_owned(),
+                "// c1 body".to_owned(),
+                0.4,
+            )]),
+        }),
+    ];
+    let outcome_sa1 = execute_g5(&sources_sa1, &q, Duration::from_millis(5_000)).await;
+    assert_eq!(
+        outcome_sa1.results.len(),
+        3,
+        "(SA1) outcome.results must contain exactly 3 entries (one per source); \
+         left: {}, right: 3",
+        outcome_sa1.results.len()
+    );
+    assert_eq!(
+        outcome_sa1.results[0].status,
+        G5SourceStatus::Available,
+        "(SA1) results[0].status must be Available on the happy path; \
+         left: {:?}, right: Available",
+        outcome_sa1.results[0].status
+    );
+    let assembled_sa1 = assemble_g5_context(outcome_sa1, &["dedup_me.rs".to_owned()]);
+    assert_eq!(
+        assembled_sa1.chunks.len(),
+        4,
+        "(SA1) assembled.chunks.len() must be 4 (5 in − 1 dedup); \
+         left: {}, right: 4",
+        assembled_sa1.chunks.len()
+    );
+    assert_eq!(
+        assembled_sa1.deduped_count, 1,
+        "(SA1) deduped_count must be 1 (one chunk path matched files_in_context); \
+         left: {}, right: 1",
+        assembled_sa1.deduped_count
+    );
+    assert_eq!(
+        assembled_sa1.source_count, 3,
+        "(SA1) source_count must be 3 (each of {{src_a, src_b, src_c}} has \
+         a surviving chunk); left: {}, right: 3",
+        assembled_sa1.source_count
+    );
+    assert_eq!(
+        assembled_sa1.total_chunks_in, 5,
+        "(SA1) total_chunks_in must be 5 (pre-dedup count); \
+         left: {}, right: 5",
+        assembled_sa1.total_chunks_in
+    );
+
+    // ── SA2 — PageRank ranking descending (M3-target) ────────────────
+    //
+    // One source emits 4 chunks with scores [0.1, 0.9, 0.5, 0.3].
+    // Assembler sorts descending → assembled.chunks[0..4]
+    // .pagerank_score == [0.9, 0.5, 0.3, 0.1].
+    let sources_sa2: Vec<Box<dyn G5Source>> = vec![Box::new(TestG5Source {
+        id: "ranker".to_owned(),
+        kind: G5SourceKind::AiderRepoMap,
+        behaviour: TestBehaviour::ReturnChunks(vec![
+            ("p_lo.rs".to_owned(), "// p_lo body".to_owned(), 0.1),
+            ("p_hi.rs".to_owned(), "// p_hi body".to_owned(), 0.9),
+            ("p_mid.rs".to_owned(), "// p_mid body".to_owned(), 0.5),
+            ("p_x.rs".to_owned(), "// p_x body".to_owned(), 0.3),
+        ]),
+    })];
+    let outcome_sa2 = execute_g5(&sources_sa2, &q, Duration::from_millis(5_000)).await;
+    let assembled_sa2 = assemble_g5_context(outcome_sa2, &[]);
+    assert_eq!(
+        assembled_sa2.chunks.len(),
+        4,
+        "(SA2) assembled.chunks.len() must be 4; left: {}, right: 4",
+        assembled_sa2.chunks.len()
+    );
+    let scores_sa2: Vec<f64> = assembled_sa2
+        .chunks
+        .iter()
+        .map(|c| c.pagerank_score)
+        .collect();
+    assert!(
+        (scores_sa2[0] - 0.9).abs() < 1e-9,
+        "(SA2) chunks[0].pagerank_score must be 0.9 (descending sort); \
+         left: {}, right: 0.9",
+        scores_sa2[0]
+    );
+    assert!(
+        (scores_sa2[1] - 0.5).abs() < 1e-9,
+        "(SA2) chunks[1].pagerank_score must be 0.5; left: {}, right: 0.5",
+        scores_sa2[1]
+    );
+    assert!(
+        (scores_sa2[2] - 0.3).abs() < 1e-9,
+        "(SA2) chunks[2].pagerank_score must be 0.3; left: {}, right: 0.3",
+        scores_sa2[2]
+    );
+    assert!(
+        (scores_sa2[3] - 0.1).abs() < 1e-9,
+        "(SA2) chunks[3].pagerank_score must be 0.1; left: {}, right: 0.1",
+        scores_sa2[3]
+    );
+
+    // ── SA3 — Session dedup invariant (M2-target) ────────────────────
+    //
+    // chunks emitted with paths ["a.rs", "b.rs", "c.rs"],
+    // files_in_context = ["b.rs"] → no surviving chunk has
+    // path == "b.rs".
+    let sources_sa3: Vec<Box<dyn G5Source>> = vec![Box::new(TestG5Source {
+        id: "deduper".to_owned(),
+        kind: G5SourceKind::Context7Docs,
+        behaviour: TestBehaviour::ReturnChunks(vec![
+            ("a.rs".to_owned(), "// a body".to_owned(), 0.5),
+            ("b.rs".to_owned(), "// b body".to_owned(), 0.5),
+            ("c.rs".to_owned(), "// c body".to_owned(), 0.5),
+        ]),
+    })];
+    let outcome_sa3 = execute_g5(&sources_sa3, &q, Duration::from_millis(5_000)).await;
+    let assembled_sa3 = assemble_g5_context(outcome_sa3, &["b.rs".to_owned()]);
+    assert!(
+        assembled_sa3.chunks.iter().all(|c| c.path != "b.rs"),
+        "(SA3) no surviving chunk may have path == \"b.rs\"; \
+         left: {:?}, right: [no \"b.rs\"]",
+        assembled_sa3
+            .chunks
+            .iter()
+            .map(|c| c.path.clone())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        assembled_sa3.chunks.len(),
+        2,
+        "(SA3) assembled.chunks.len() must be 2 (3 in − 1 dedup); \
+         left: {}, right: 2",
+        assembled_sa3.chunks.len()
+    );
+    assert_eq!(
+        assembled_sa3.deduped_count, 1,
+        "(SA3) deduped_count must be 1; left: {}, right: 1",
+        assembled_sa3.deduped_count
+    );
+
+    // ── SA4 — Per-source timeout (M1-target) ─────────────────────────
+    //
+    // One source LongSleep(7 s) > G5_PER_SOURCE_DEADLINE = 4500 ms.
+    // The per-source timer fires before the 5 s master, so
+    // outcome.results[i].status == TimedOut and elapsed_ms is in
+    // [4500, 5000). The other (fast) source returns Available.
+    let sources_sa4: Vec<Box<dyn G5Source>> = vec![
+        Box::new(TestG5Source {
+            id: "fast".to_owned(),
+            kind: G5SourceKind::AiderRepoMap,
+            behaviour: TestBehaviour::ReturnChunks(vec![(
+                "fast.rs".to_owned(),
+                "// fast body".to_owned(),
+                0.9,
+            )]),
+        }),
+        Box::new(TestG5Source {
+            id: "slow".to_owned(),
+            kind: G5SourceKind::RepomixPack,
+            behaviour: TestBehaviour::LongSleep(Duration::from_secs(7)),
+        }),
+    ];
+    let outcome_sa4 = execute_g5(&sources_sa4, &q, Duration::from_millis(5_000)).await;
+    let slow_idx = outcome_sa4
+        .results
+        .iter()
+        .position(|r| r.source_id == "slow")
+        .expect("(SA4) slow source must be present in results");
+    assert_eq!(
+        outcome_sa4.results[slow_idx].status,
+        G5SourceStatus::TimedOut,
+        "(SA4) slow source must carry G5SourceStatus::TimedOut; \
+         left: {:?}, right: TimedOut",
+        outcome_sa4.results[slow_idx].status
+    );
+    let slow_elapsed = outcome_sa4.results[slow_idx].elapsed_ms;
+    let per_source_ms = u64::try_from(G5_PER_SOURCE_DEADLINE.as_millis()).unwrap_or(u64::MAX);
+    assert!(
+        slow_elapsed >= per_source_ms,
+        "(SA4) slow source elapsed_ms must be >= G5_PER_SOURCE_DEADLINE \
+         ({per_source_ms} ms); left: {slow_elapsed}, right: >= {per_source_ms}"
+    );
+    assert!(
+        slow_elapsed < 5_000,
+        "(SA4) slow source elapsed_ms must be < 5000 ms (per-source ceiling \
+         fires before 5 s master); left: {slow_elapsed}, right: < 5000"
+    );
+    assert!(
+        !outcome_sa4.master_timed_out,
+        "(SA4) master_timed_out must be false — per-source ceiling fires \
+         first; left: true, right: false"
+    );
+
+    // ── SA5 — Error pass-through ─────────────────────────────────────
+    //
+    // 1 of 3 sources returns Errored; the assembler drops its
+    // (empty) chunks but other sources' chunks survive.  Verify
+    // status carries Errored and error.is_some() on the broken
+    // source's results entry.
+    let sources_sa5: Vec<Box<dyn G5Source>> = vec![
+        Box::new(TestG5Source {
+            id: "ok_a".to_owned(),
+            kind: G5SourceKind::AiderRepoMap,
+            behaviour: TestBehaviour::ReturnChunks(vec![(
+                "a.rs".to_owned(),
+                "// ok_a body".to_owned(),
+                0.7,
+            )]),
+        }),
+        Box::new(TestG5Source {
+            id: "broken".to_owned(),
+            kind: G5SourceKind::Context7Docs,
+            behaviour: TestBehaviour::Error("injected error".to_owned()),
+        }),
+        Box::new(TestG5Source {
+            id: "ok_b".to_owned(),
+            kind: G5SourceKind::RepomixPack,
+            behaviour: TestBehaviour::ReturnChunks(vec![(
+                "b.rs".to_owned(),
+                "// ok_b body".to_owned(),
+                0.6,
+            )]),
+        }),
+    ];
+    let outcome_sa5 = execute_g5(&sources_sa5, &q, Duration::from_millis(5_000)).await;
+    let broken_idx = outcome_sa5
+        .results
+        .iter()
+        .position(|r| r.source_id == "broken")
+        .expect("(SA5) broken source must be present in results");
+    assert_eq!(
+        outcome_sa5.results[broken_idx].status,
+        G5SourceStatus::Errored,
+        "(SA5) broken source must carry G5SourceStatus::Errored; \
+         left: {:?}, right: Errored",
+        outcome_sa5.results[broken_idx].status
+    );
+    assert!(
+        outcome_sa5.results[broken_idx].error.is_some(),
+        "(SA5) broken source must carry error.is_some(); left: None, \
+         right: Some(_)"
+    );
+    let assembled_sa5 = assemble_g5_context(outcome_sa5, &[]);
+    assert_eq!(
+        assembled_sa5.chunks.len(),
+        2,
+        "(SA5) assembled.chunks.len() must be 2 (only ok_a, ok_b survive); \
+         left: {}, right: 2",
+        assembled_sa5.chunks.len()
+    );
+    let surviving_source_ids_sa5: Vec<String> = assembled_sa5
+        .chunks
+        .iter()
+        .map(|c| c.source_id.clone())
+        .collect();
+    assert!(
+        !surviving_source_ids_sa5.contains(&"broken".to_owned()),
+        "(SA5) surviving chunks must NOT include broken source's chunks; \
+         left: {surviving_source_ids_sa5:?}, right: [no \"broken\"]"
+    );
+
+    // ── SA6 — Master-deadline trip ───────────────────────────────────
+    //
+    // master_deadline = 100 ms, all sources Sleep(7 s, ...) →
+    // outcome.master_timed_out == true,
+    // outcome.wall_elapsed_ms < 2000 ms, all results TimedOut.
+    //
+    // Compatible with the unconditional-const per-source deadline:
+    // the per-source CONST never gets shortened to master_deadline
+    // (per WO-0068 + WO-0070 lessons-learned For planner #3), so
+    // the master timer wins deterministically when master_deadline
+    // (100 ms) is much smaller than G5_PER_SOURCE_DEADLINE (4500 ms).
+    let sources_sa6: Vec<Box<dyn G5Source>> = vec![
+        Box::new(TestG5Source {
+            id: "stall_a".to_owned(),
+            kind: G5SourceKind::AiderRepoMap,
+            behaviour: TestBehaviour::Sleep(
+                Duration::from_secs(7),
+                vec![("x.rs".to_owned(), "// x body".to_owned(), 0.5)],
+            ),
+        }),
+        Box::new(TestG5Source {
+            id: "stall_b".to_owned(),
+            kind: G5SourceKind::Context7Docs,
+            behaviour: TestBehaviour::Sleep(
+                Duration::from_secs(7),
+                vec![("y.rs".to_owned(), "// y body".to_owned(), 0.5)],
+            ),
+        }),
+        Box::new(TestG5Source {
+            id: "stall_c".to_owned(),
+            kind: G5SourceKind::RepomixPack,
+            behaviour: TestBehaviour::Sleep(
+                Duration::from_secs(7),
+                vec![("z.rs".to_owned(), "// z body".to_owned(), 0.5)],
+            ),
+        }),
+    ];
+    let outcome_sa6 = execute_g5(&sources_sa6, &q, Duration::from_millis(100)).await;
+    assert!(
+        outcome_sa6.master_timed_out,
+        "(SA6) master_timed_out must be true on tight 100 ms master with \
+         7 s sleepers; left: false, right: true"
+    );
+    assert!(
+        outcome_sa6.wall_elapsed_ms < 2_000,
+        "(SA6) master deadline trips before per-source — wall_elapsed_ms \
+         must be < 2000 ms; left: {}, right: 2000",
+        outcome_sa6.wall_elapsed_ms
+    );
+    assert_eq!(
+        outcome_sa6.results.len(),
+        3,
+        "(SA6) master-trip path must synthesise placeholders for all 3 \
+         sources; left: {}, right: 3",
+        outcome_sa6.results.len()
+    );
+    for r in &outcome_sa6.results {
+        assert_eq!(
+            r.status,
+            G5SourceStatus::TimedOut,
+            "(SA6) every placeholder must carry G5SourceStatus::TimedOut; \
+             left: {:?}, right: TimedOut",
+            r.status
+        );
+    }
+
+    // ── SA7 — Empty input ────────────────────────────────────────────
+    //
+    // Two sub-cases both yield assembled.chunks.is_empty() +
+    // total_chunks_in == 0 + deduped_count == 0:
+    //
+    //   (a) Zero sources → outcome.results.is_empty().
+    //   (b) Two sources both return zero chunks via the
+    //       `TestBehaviour::Empty` arm → outcome.results.len() == 2
+    //       but total_chunks_in still == 0 because the assembler
+    //       sees Available + zero-chunk outputs the same as no
+    //       outputs.
+    let zero_sources: Vec<Box<dyn G5Source>> = vec![];
+    let zero_outcome = execute_g5(&zero_sources, &q, Duration::from_millis(5_000)).await;
+    assert!(
+        zero_outcome.results.is_empty(),
+        "(SA7) zero-sources outcome.results must be empty; left: {} entries, \
+         right: 0",
+        zero_outcome.results.len()
+    );
+    let zero_assembled = assemble_g5_context(zero_outcome, &[]);
+    assert!(
+        zero_assembled.chunks.is_empty(),
+        "(SA7) zero-sources assembled.chunks must be empty; left: {} chunks, \
+         right: 0",
+        zero_assembled.chunks.len()
+    );
+    assert_eq!(
+        zero_assembled.total_chunks_in, 0,
+        "(SA7) zero-sources total_chunks_in must be 0; left: {}, right: 0",
+        zero_assembled.total_chunks_in
+    );
+    assert_eq!(
+        zero_assembled.deduped_count, 0,
+        "(SA7) zero-sources deduped_count must be 0; left: {}, right: 0",
+        zero_assembled.deduped_count
+    );
+    assert_eq!(
+        zero_assembled.source_count, 0,
+        "(SA7) zero-sources source_count must be 0; left: {}, right: 0",
+        zero_assembled.source_count
+    );
+
+    let empty_sources: Vec<Box<dyn G5Source>> = vec![
+        Box::new(TestG5Source {
+            id: "empty_a".to_owned(),
+            kind: G5SourceKind::AiderRepoMap,
+            behaviour: TestBehaviour::Empty,
+        }),
+        Box::new(TestG5Source {
+            id: "empty_b".to_owned(),
+            kind: G5SourceKind::Context7Docs,
+            behaviour: TestBehaviour::Empty,
+        }),
+    ];
+    let empty_outcome = execute_g5(&empty_sources, &q, Duration::from_millis(5_000)).await;
+    let empty_assembled = assemble_g5_context(empty_outcome, &[]);
+    assert!(
+        empty_assembled.chunks.is_empty(),
+        "(SA7) all-empty assembled.chunks must be empty; left: {} chunks, \
+         right: 0",
+        empty_assembled.chunks.len()
+    );
+    assert_eq!(
+        empty_assembled.total_chunks_in, 0,
+        "(SA7) all-empty total_chunks_in must be 0; left: {}, right: 0",
+        empty_assembled.total_chunks_in
+    );
+    assert_eq!(
+        empty_assembled.deduped_count, 0,
+        "(SA7) all-empty deduped_count must be 0; left: {}, right: 0",
+        empty_assembled.deduped_count
+    );
+
+    // ── SA8 — Parallelism wall-clock canary ──────────────────────────
+    //
+    // Three sources each Sleep(200 ms, ...) → wall in [180, 500).
+    // Lower bound proves at least one source's 200 ms sleep
+    // elapsed.  Upper bound proves serial 3×200 ms = 600 ms plus
+    // noise did not happen → parallelism confirmed (mirrors WO-0070
+    // SA1 tightened-bound pattern).
+    let sources_sa8: Vec<Box<dyn G5Source>> = vec![
+        Box::new(TestG5Source {
+            id: "p_a".to_owned(),
+            kind: G5SourceKind::AiderRepoMap,
+            behaviour: TestBehaviour::Sleep(
+                Duration::from_millis(200),
+                vec![("pa.rs".to_owned(), "// pa body".to_owned(), 0.5)],
+            ),
+        }),
+        Box::new(TestG5Source {
+            id: "p_b".to_owned(),
+            kind: G5SourceKind::Context7Docs,
+            behaviour: TestBehaviour::Sleep(
+                Duration::from_millis(200),
+                vec![("pb.rs".to_owned(), "// pb body".to_owned(), 0.5)],
+            ),
+        }),
+        Box::new(TestG5Source {
+            id: "p_c".to_owned(),
+            kind: G5SourceKind::RepomixPack,
+            behaviour: TestBehaviour::Sleep(
+                Duration::from_millis(200),
+                vec![("pc.rs".to_owned(), "// pc body".to_owned(), 0.5)],
+            ),
+        }),
+    ];
+    let outcome_sa8 = execute_g5(&sources_sa8, &q, Duration::from_millis(5_000)).await;
+    assert!(
+        outcome_sa8.wall_elapsed_ms >= 180,
+        "(SA8) parallel wall >= 180 ms; left: {}, right: 180 (proves at \
+         least one 200 ms sleep elapsed)",
+        outcome_sa8.wall_elapsed_ms
+    );
+    assert!(
+        outcome_sa8.wall_elapsed_ms < 500,
+        "(SA8) parallel wall < 500 ms; left: {}, right: 500 (proves serial \
+         3x200=600 ms did NOT happen → parallelism confirmed)",
+        outcome_sa8.wall_elapsed_ms
+    );
+    assert!(
+        !outcome_sa8.master_timed_out,
+        "(SA8) master_timed_out must be false on a 200 ms-per-source happy \
+         path; left: true, right: false"
+    );
+}
+
 // ── G8 (Testing) parallel orchestrator + dedup-by-test-path merger
 // acceptance test (P3-W11-F09 / WO-0089) ───────────────────────────────────
 //
