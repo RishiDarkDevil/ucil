@@ -47,3 +47,9 @@ Starting ./scripts/run-phase.sh 3
 2026-05-10T07:03:46Z [watchdog] loop appears dead; entering 300s quiesce before restart
 2026-05-10T07:08:46Z [watchdog] MAX_RESTARTS (3) hit within 3600s — escalating and exiting
 ```
+
+## Resolution
+
+Self-inflicted noise from a flap loop on 2026-05-10. The phase-3 strict gate has 3 known source gaps (see harness-fixer halts at 1027Z+1030Z); run-phase exits 1 on each respawn because those gaps are unresolved, watchdog respawns, escalation repeats. Watchdog killed manually 2026-05-10T11:30Z; the underlying source gaps still need user action but THIS heartbeat is closed.
+
+resolved: true
